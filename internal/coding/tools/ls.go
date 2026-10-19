@@ -11,7 +11,7 @@ import (
 const lsName = "ls"
 
 type lsArgs struct {
-	Path   *string `json:"path" description:"Optional workspace-relative directory path; defaults to the workspace root"`
+	Path   *string `json:"path" description:"Optional workspace directory path (relative, or absolute inside the workspace); defaults to the workspace root"`
 	Offset *int    `json:"offset" description:"Optional zero-based entry offset"`
 	Limit  *int    `json:"limit" description:"Optional maximum number of entries"`
 }

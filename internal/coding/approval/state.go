@@ -18,6 +18,37 @@ type Handler interface {
 	Render(execution.Result, error) ([]ai.Part, error)
 }
 
+// DetachedHandler is implemented by a controlled handler whose process run
+// outlives the Tool call that started it. The controller prepares and journals
+// the operation exactly as it does for any controlled call, then hands the
+// prepared execution to the handler and returns the handler's receipt instead
+// of waiting for the process.
+type DetachedHandler interface {
+	Handler
+	// Detach owns the prepared operation: it either runs it once, from any
+	// goroutine, or closes it before returning. ctx is the Tool call's own
+	// context, which ends when the call returns; a detached run must strip its
+	// cancellation rather than derive from it directly.
+	Detach(ctx context.Context, call agent.ToolCall, prepared PreparedExecution) ([]ai.Part, error)
+}
+
+// DetachDecider is implemented by a DetachedHandler that detaches only for some
+// calls. The controller consults it before taking the detached branch; a call
+// it answers false for runs through the synchronous path, on the same prepared
+// execution. A handler that does not implement it always detaches, which is the
+// monitor's contract.
+type DetachDecider interface {
+	// Detaches reports whether this call takes the detached path.
+	Detaches(call agent.ToolCall) bool
+}
+
+// PreparedExecution owns one single-use execution plan. Run consumes and closes
+// it; Close abandons it before Run.
+type PreparedExecution interface {
+	Run(context.Context, execution.Sink) (execution.Result, error)
+	Close() error
+}
+
 // Journal is the durable session surface required by Controller.
 type Journal interface {
 	Path() []harness.Entry

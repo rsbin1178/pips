@@ -126,20 +126,28 @@ type Model struct {
 	timeline             string
 	transcript           transcriptStore
 	transcriptScroll     scrollRegion
-	selection            selectionState
-	search               searchState
-	mouseCaptureOff      bool
-	transcriptMode       transcriptModeState
-	transcriptHanded     bool // Escape hatch already wrote the rows to the main buffer.
-	frameHit             frameHitMap
-	history              historyState
-	notices              []noticeEntry
-	noticeSequence       uint64
-	scrollback           scrollbackCursor
-	scrollbackOutput     bool
-	streaming            streamProjection
-	renderWait           bool
-	renderDirty          bool
+	// childScroll is the read-only child page's reading position. It is the shared
+	// region type, so the page opens on its newest row and follows appended content
+	// exactly as the conversation does.
+	childScroll      scrollRegion
+	selection        selectionState
+	search           searchState
+	mouseCaptureOff  bool
+	transcriptMode   transcriptModeState
+	transcriptHanded bool // Escape hatch already wrote the rows to the main buffer.
+	frameHit         frameHitMap
+	// tasksPane is the model-local tasks overlay, and tasksPaneHit is where the
+	// last painted pane sat.
+	tasksPane        tasksPane
+	tasksPaneHit     tasksPaneHitMap
+	history          historyState
+	notices          []noticeEntry
+	noticeSequence   uint64
+	scrollback       scrollbackCursor
+	scrollbackOutput bool
+	streaming        streamProjection
+	renderWait       bool
+	renderDirty      bool
 	// viewStable marks an update that did not change what the frame renders: a
 	// deferred delta the reader cannot see yet, or a delivery the subscription
 	// already owns and the operation iterator only repeats. View() then reuses the
@@ -294,6 +302,7 @@ func newModel(ctx context.Context, options Options) *Model {
 		ctx:              ctx,
 		options:          options,
 		transcriptScroll: newScrollRegion(),
+		childScroll:      newScrollRegion(),
 		lifecycle:        lifecycle,
 		width:            defaultWidth,
 		height:           defaultHeight,
@@ -453,9 +462,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if previousSessionID != m.state.SessionID {
 			m.stopTeamWorkerRouteSubscription()
 			m.resetTeamProjection(m.state.SessionID)
+			m.resetTasksPane()
 		}
 		m.childStates = cloneChildStates(message.observation.Children)
 		m.resetSubagentInteractions()
+		m.syncTasksPane(time.Now())
 		m.syncApprovalPrompt()
 		m.setLayout()
 		commit := m.commitStableTimeline()
@@ -533,15 +544,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.clipboardLoading = false
 		if message.err != nil {
-			m.streamErr = message.err
-			m.setLayout()
-
-			return m, nil
+			return m, m.publishRefusal(message.err)
 		}
-		m.streamErr = m.composer.InsertImage(message.image)
-		m.setLayout()
 
-		return m, nil
+		return m, m.publishRefusal(m.insertComposerImage(message.image))
 	case planDocumentMsg:
 		return m.applyPlanDocument(message)
 	case bridgeImageMsg:
@@ -592,6 +598,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.hasState {
 			state := message.state
 			m.route.childState = &state
+			m.adoptChildState(message.childSessionID, state)
 		}
 		if message.hasDetail {
 			detail := message.detail
@@ -621,6 +628,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.route.err = message.err
 
 		return m, nil
+	case backgroundKillResultMsg:
+		return m, m.applyBackgroundKillResult(message)
+	case backgroundInspectResultMsg:
+		return m, m.applyBackgroundInspectResult(message)
 	case teamWorkerRouteDataMsg:
 		return m.applyTeamWorkerRouteData(message)
 	case teamWorkerRouteEventMsg:
@@ -889,16 +900,25 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.streamErr = nil
 		m.syncApprovalPrompt()
+		notice := m.selectionSaveNotice(message)
 		var commit tea.Cmd
 		switch message.operation {
 		case operationNew:
 			commit = m.commitNewSessionOutput()
+		case operationResume:
+			if m.fullscreen() {
+				// A resumed session starts with the banner as its first managed
+				// record, so scrolling to the top shows the same header a fresh
+				// session shows at startup.
+				m.appendBanner(m.renderBanner())
+			}
+			commit = m.commitStableTimeline()
 		default:
 			commit = m.commitStableTimeline()
 		}
 
 		if replacementControl {
-			commands := []tea.Cmd{m.startSubscription()}
+			commands := []tea.Cmd{m.startSubscription(), notice}
 			if message.operation == operationResume {
 				commands = append(commands, m.probeTeamRecoveryAfterResume())
 			}
@@ -906,7 +926,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.afterScrollback(commit, commands...)
 		}
 
-		return m, m.afterScrollback(commit, m.continueIfPaused())
+		return m, m.afterScrollback(commit, m.continueIfPaused(), notice)
 	case teamRecoveryProbeMsg:
 		if message.err != nil || message.sessionID == "" ||
 			message.sessionID != m.state.SessionID || len(message.values) == 0 ||
@@ -1006,17 +1026,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.route.kind == routeTeam && m.route.team != nil &&
 			teamRouteInputStage(m.route.team.stage) {
 			_, err := m.composer.InsertPaste(message.Content)
-			m.streamErr = err
 			m.setLayout()
 
-			return m, nil
+			return m, m.publishRefusal(err)
 		}
 		if m.route.kind == routeChild && m.route.childKind == childTeamWorker {
 			_, err := m.composer.InsertPaste(message.Content)
-			m.streamErr = err
 			m.setLayout()
 
-			return m, nil
+			return m, m.publishRefusal(err)
 		}
 		if m.route.kind != routeNone || m.prompt.kind != promptNone || m.composerResolving ||
 			m.clipboardLoading ||
@@ -1025,12 +1043,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		_, err := m.composer.InsertPaste(message.Content)
-		m.streamErr = err
 		m.setLayout()
 
-		return m, nil
+		return m, m.publishRefusal(err)
 	case tea.KeyPressMsg:
-		return m.updateKey(message)
+		// A keystroke can remove the attachment a refusal was about, so the notice is
+		// re-checked against the draft the key just changed.
+		model, command := m.updateKey(message)
+		if commit := m.reconcileComposerRefusal(); commit != nil {
+			return model, m.afterScrollback(commit, command)
+		}
+
+		return model, command
 	case renderTickMsg:
 		m.renderWait = false
 		var commit tea.Cmd
@@ -1057,7 +1081,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		return m, m.activity.Update(message)
+		// The clock is also what re-reads a running watch's output, so a page
+		// that is following one asks for the next read on every frame.
+		return m, tea.Batch(m.activity.Update(message), m.followOpenWatchPage())
 	default:
 		if m.lifecycle == lifecycleReady {
 			// The find box has focus while it is open, so its cursor blink and any
@@ -1305,6 +1331,12 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if command, handled := m.updateTeamPanelKey(message); handled {
 		return m, command
 	}
+	// The tasks pane is an optional layer between the pickers and the reading
+	// surfaces: it is revealed and focused by one chord, and once focused it owns
+	// the frame's keys the way any other focused overlay does.
+	if model, command, handled := m.updateTasksPaneReadyKey(message); handled {
+		return model, command
+	}
 	// The find box owns the ready view's keys while it is open: it is a reading
 	// surface, so the composer, its history and the command picker stay untouched
 	// until it closes.
@@ -1312,13 +1344,11 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateSearchKey(message)
 	}
 	key := message.String()
-	// A drag selection answers Escape first, the way the find box does: the key
-	// closes the gesture the reader just made instead of canceling the turn behind
-	// it.
-	if key == keyEscape && m.selection.visible {
-		m.clearSelection()
-
-		return m, redrawFrame()
+	// Escape ends the gesture the reader just made, the way the find box does: a drag
+	// selection or a whole-draft selection answers it before the cancel/exit binding
+	// behind it.
+	if command, handled := m.dismissReadingGesture(key); handled {
+		return m, command
 	}
 	if key == keyEscape && m.directAgent != nil && !m.directAgent.running &&
 		m.composer.Value() == "" {
@@ -1327,12 +1357,12 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	}
-	if key == "up" && m.composer.AtFirstVisualRow() && m.composer.HistoryUp() {
+	if key == "up" && !m.composer.SelectionActive() && m.composer.AtFirstVisualRow() && m.composer.HistoryUp() {
 		m.setLayout()
 
 		return m, nil
 	}
-	if key == keyDown && m.composer.AtLastVisualRow() && m.composer.HistoryDown() {
+	if key == keyDown && !m.composer.SelectionActive() && m.composer.AtLastVisualRow() && m.composer.HistoryDown() {
 		m.setLayout()
 
 		return m, nil
@@ -1371,6 +1401,8 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.openSearch("")
 
 			return m, nil
+		case actionTodo:
+			return m, m.openTodoDetailRoute()
 		case actionSubmit:
 			return m, m.submit(context)
 		case actionFollowUp:
@@ -1388,6 +1420,8 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.runModeControl(mode)
 		case actionPasteImage:
 			return m, m.readClipboardImage()
+		case actionSelectAll:
+			return m, m.selectAllDraft()
 		case actionCommand, actionHelp:
 			if action == actionCommand {
 				m.openCommandPicker()
@@ -1395,7 +1429,7 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			return m, m.printHelp()
+			return m, m.openHelp()
 		}
 
 		return m, nil
@@ -1483,8 +1517,14 @@ func (m *Model) readyView() tea.View {
 	footer = append(footer, m.reservedBand())
 	composerFooterIndex := len(footer)
 	footer = append(footer, m.composerBand())
+	// The pane is the frame's last band, below the status line or below the picker
+	// that replaces it. Its rows are measured here, before the picker sizes itself,
+	// so a picker opened while something is running cannot push the pane out of the
+	// frame.
+	pane := m.tasksPaneBand(time.Now())
 	if m.picker.kind != pickerNone {
-		usedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, footer...))
+		usedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, footer...)) +
+			lipgloss.Height(pane)
 		availableRows := m.pickerBandRows(caps, m.height-usedHeight)
 		switch m.picker.kind {
 		case pickerModel:
@@ -1512,6 +1552,14 @@ func (m *Model) readyView() tea.View {
 		}
 	}
 
+	// The pane is appended last, so the bands above it keep their positions whatever
+	// it lists; its rows come from the transcript's elastic height.
+	tasksPaneIndex := -1
+	if pane != "" {
+		tasksPaneIndex = len(footer)
+		footer = append(footer, pane)
+	}
+
 	parts := make([]string, 0, len(footer)+1)
 	timelineHeight := max(
 		0,
@@ -1527,6 +1575,10 @@ func (m *Model) readyView() tea.View {
 	}
 	composerIndex := len(parts) + composerFooterIndex
 	bandIndex := len(parts) + bandFooterIndex
+	tasksPaneFrameIndex := -1
+	if tasksPaneIndex >= 0 {
+		tasksPaneFrameIndex = len(parts) + tasksPaneIndex
+	}
 	promptIndex := -1
 	if promptFooterIndex >= 0 {
 		promptIndex = len(parts) + promptFooterIndex
@@ -1553,7 +1605,10 @@ func (m *Model) readyView() tea.View {
 		topDropped:    min(dropped, transcriptRows),
 		band:          m.bandRowOf(parts, bandIndex, dropped, bandHint != ""),
 		turnIndicator: indicator,
+		composerTop:   frameRowOf(parts, composerIndex, dropped),
+		composerRows:  lipgloss.Height(footer[composerFooterIndex]),
 	}
+	m.tasksPaneHit.top = frameRowOf(parts, tasksPaneFrameIndex, dropped)
 	// presentationView installs the pointer handler for every frame, so the ready
 	// view only has to record where its transcript band sat.
 	view.Cursor = m.composer.Cursor()
@@ -1561,6 +1616,7 @@ func (m *Model) readyView() tea.View {
 		view.Cursor = m.search.input.Cursor()
 	}
 	if (m.prompt.kind != promptNone && !m.goalCommandPickerActive()) || m.pickerHidesComposerCursor() || m.teamPanel.isFocused ||
+		m.tasksPaneFocused() ||
 		(m.teamRouteIsInline() && (m.route.loading || !teamRouteInputStage(m.route.team.stage))) {
 		view.Cursor = nil
 	}
@@ -1796,9 +1852,13 @@ func (m *Model) statusLineItem(item statusline.Item, width int) string {
 			value = fmt.Sprintf("%d%% cache", percent)
 			style = style.Foreground(palette.model)
 		}
-	case statusline.TaskProgress:
-		if m.state.Tasks.Total > 0 {
-			value = fmt.Sprintf("Tasks %d/%d", m.state.Tasks.Completed, m.state.Tasks.Total)
+	case statusline.TodoProgress:
+		// The strip is a progress cue, not a completion badge: once every item
+		// is terminal there is no work left to track, so the item disappears.
+		// The full checklist remains available through Ctrl+P and /todos.
+		if m.state.Tasks.Total > 0 &&
+			m.state.Tasks.Completed+m.state.Tasks.Cancelled < m.state.Tasks.Total {
+			value = fmt.Sprintf("Todo %d/%d", m.state.Tasks.Completed, m.state.Tasks.Total)
 			style = style.Foreground(palette.workspace)
 		}
 	case statusline.Phase:
@@ -1903,6 +1963,12 @@ func (m *Model) statusExtras() []string {
 	}
 	if m.queued > 0 {
 		extras = append(extras, fmt.Sprintf("%d queued", m.queued))
+	}
+	// While the runtime is idle and something is still running, the cue stands
+	// in for the tasks pane the automatic rule may have closed (or that a short
+	// terminal never paints).
+	if cue := m.stillRunningCue(); cue != "" {
+		extras = append(extras, cue)
 	}
 	if m.exitArmed {
 		extras = append(extras, "press Ctrl+C again to quit")
@@ -2455,7 +2521,7 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 	blocks := projectTimeline(m.state)
 	for _, block := range slices.Backward(blocks) {
 		switch block.kind {
-		case blockTool:
+		case blockTool, blockSubagent:
 			if len(block.tools) > 0 && block.tools[0].childSessionID != "" {
 				return m.openSubagentRoute(block.tools[0].childSessionID)
 			}
@@ -2463,7 +2529,7 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 
 			return m.openToolDetailRoute(detail)
 		case blockUser, blockAssistant, blockDraft, blockPlan, blockQuestion, blockDiagnostic,
-			blockChange, blockError, blockCompletion, blockTeam:
+			blockChange, blockError, blockCompletion, blockTeam, blockCompaction:
 		}
 	}
 	if child, ok := m.latestTeamWorkerChild(); ok {
@@ -2503,6 +2569,90 @@ func (m *Model) requestRender() tea.Cmd {
 	return tea.Tick(renderFrame, func(time.Time) tea.Msg {
 		return renderTickMsg{}
 	})
+}
+
+// publishRefusal records an operator-facing refusal and publishes it in the same
+// update. setLayout only resizes the Composer, and the refusal is drawn from the
+// transcript, so a refusal that does not commit leaves the draft on screen with
+// Enter doing nothing and nothing explaining why. Every refusal path returns
+// through here; a nil error publishes nothing and keeps the draft.
+func (m *Model) publishRefusal(err error) tea.Cmd {
+	if err == nil {
+		return nil
+	}
+
+	m.streamErr = err
+	m.setLayout()
+
+	return m.commitStableTimeline()
+}
+
+// selectAllDraft selects the whole draft and states the keys that act on it. The
+// notice is not decoration: the composer draws the selection but cannot say what the
+// next key will do to it.
+func (m *Model) selectAllDraft() tea.Cmd {
+	selected := m.composer.ToggleSelectAll()
+	m.setLayout()
+	if !selected {
+		return nil
+	}
+
+	return m.setStatusNotice(composerSelectionNotice)
+}
+
+// dismissReadingGesture answers Escape for the two reading gestures the ready view
+// owns: a drag selection in the transcript, and a whole-draft selection in the
+// Composer. Escape ends the gesture the reader just made, so neither may reach the
+// cancel/exit binding behind it. It reports whether it answered the key.
+func (m *Model) dismissReadingGesture(key string) (tea.Cmd, bool) {
+	if key != keyEscape {
+		return nil, false
+	}
+
+	if m.selection.visible {
+		m.clearSelection()
+
+		return redrawFrame(), true
+	}
+	if m.composer.SelectionActive() {
+		m.composer.CollapseSelection()
+		m.setLayout()
+
+		return redrawFrame(), true
+	}
+
+	return nil, false
+}
+
+// composerImageRefusal reports why an image held by the draft will not send, or
+// nil when the active model accepts image input.
+func (m *Model) composerImageRefusal() error {
+	if m.controller.Capabilities().Vision {
+		return nil
+	}
+
+	return errComposerVisionUnsupported
+}
+
+// reconcileComposerRefusal drops a refusal whose cause is gone. The refusal is
+// about the draft, so it must not outlive it: once the draft no longer holds an
+// image the active model cannot accept, the notice would tell the operator to fix
+// something they already fixed. It returns the commit that takes the notice off
+// screen, or nil when there was nothing to clear.
+func (m *Model) reconcileComposerRefusal() tea.Cmd {
+	if !errors.Is(m.streamErr, errComposerVisionUnsupported) {
+		return nil
+	}
+	if composerSnapshotHasImages(m.composer.Snapshot()) && !m.controller.Capabilities().Vision {
+		return nil
+	}
+
+	m.streamErr = nil
+	// The inline path prints the notice once and remembers it; a later refusal has
+	// to be able to print again.
+	m.scrollback.streamError = ""
+
+	return m.commitStableTimeline()
 }
 
 func actionContextFor(state coding.State) actionContext {
@@ -2572,10 +2722,7 @@ func (m *Model) prepareSubmission(
 	if composerSnapshotHasImages(snapshot) {
 		vision = m.controller.Capabilities().Vision
 		if !vision {
-			m.streamErr = errComposerVisionUnsupported
-			m.setLayout()
-
-			return nil
+			return m.publishRefusal(errComposerVisionUnsupported)
 		}
 	}
 	if composerSnapshotHasFiles(snapshot) {
@@ -2608,8 +2755,7 @@ func (m *Model) prepareSubmission(
 	message, err := resolveComposerSnapshot(m.ctx, snapshot, vision, nil)
 	if err != nil {
 		if strings.TrimSpace(m.composer.Value()) != "" {
-			m.streamErr = err
-			m.setLayout()
+			return m.publishRefusal(err)
 		}
 
 		return nil
@@ -2625,9 +2771,7 @@ func (m *Model) dispatchSubmission(
 ) tea.Cmd {
 	if kind == submissionPrompt {
 		if err := m.composer.RecordHistory(snapshot); err != nil {
-			m.streamErr = err
-
-			return nil
+			return m.publishRefusal(err)
 		}
 		m.composer.Reset()
 		m.setLayout()
@@ -2798,7 +2942,12 @@ func (m *Model) reduceStreamBatch(items []streamItem) {
 		m.stopTeamWorkerRouteSubscription()
 		m.resetTeamProjection(m.state.SessionID)
 		m.resetSubagentInteractions()
+		m.resetTasksPane()
 	}
+
+	// The tasks pane observes the projection the batch just advanced, so a child
+	// starting or stopping is what opens and closes it.
+	m.syncTasksPane(time.Now())
 
 	parent := false
 	for _, item := range valid {
@@ -3200,12 +3349,19 @@ func (m *Model) reduceObservedEvent(event coding.Event) {
 
 // reduceChildEvent projects one child-Session event into the TUI's own child
 // state. A parent subscription does not carry child Runtime States, so child
-// projections keep using the shared transition table.
+// projections keep using the shared transition table. The open child page's
+// scroll region re-anchors when the fresh rows are installed, so appending content
+// keeps the tail visible while the reader follows it.
 func (m *Model) reduceChildEvent(event coding.Event) {
 	state := m.childStates[event.SessionID]
-	wasAtBottom := m.route.kind == routeChild && m.route.childKind == childSubagent &&
-		m.route.childSessionID == event.SessionID &&
-		m.route.offset >= m.subagentRouteMaximumOffset()
+	// An authoritative snapshot adopted for an open page can already include
+	// events still queued on the subscription: the snapshot is read after they
+	// were published. Replaying one is a no-op, so its sequence is not a
+	// protocol violation.
+	if state.SessionID == event.SessionID && event.Sequence <= state.Sequence {
+		return
+	}
+
 	next, err := coding.Reduce(state, event)
 	if err != nil {
 		m.streamErr = fmt.Errorf("coding tui: reduce child %s: %w", event.SessionID, err)
@@ -3218,12 +3374,19 @@ func (m *Model) reduceChildEvent(event coding.Event) {
 		m.route.childSessionID == event.SessionID {
 		child := next.Clone()
 		m.route.childState = &child
-		if wasAtBottom {
-			m.route.offset = m.subagentRouteMaximumOffset()
-		} else {
-			m.route.offset = min(m.route.offset, m.subagentRouteMaximumOffset())
-		}
 	}
+}
+
+// adoptChildState records the Runtime's authoritative child State as this model's
+// own copy. A child that continued another child's conversation inherits its
+// history, which the child's own event stream does not carry, so keeping the two
+// copies the same is what lets later events extend the inherited transcript
+// instead of replacing it with a shorter one.
+func (m *Model) adoptChildState(childSessionID string, state coding.State) {
+	if childSessionID == "" {
+		return
+	}
+	m.childStates[childSessionID] = state.Clone()
 }
 
 func cloneChildStates(values map[string]coding.State) map[string]coding.State {

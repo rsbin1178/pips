@@ -107,25 +107,92 @@ pips exec --goal --goal-budget 100000 "all auth migration tests pass"
 printf 'the documented acceptance checks pass' | pips exec --goal
 ```
 
-`--goal-budget` requires `--goal` and a positive integer. The default work limit
-is 25 bounded execution segments, including explicit approval-resume segments;
-it is not 25 individual tool calls. A token budget includes observed work and
-completion-check usage. It is a cooperative limit, not a billing guarantee:
-one provider call can overshoot an allowance before reporting usage.
+`--goal-budget` requires `--goal` and a positive integer. A goal installs no
+work-segment cap and no turn cap: it runs until its token budget is reached, a
+declaration stops it, or the no-progress guard pauses it. `--goal-budget` is the
+bound you can set; without one, a goal that keeps producing new evidence keeps
+running. A token budget includes observed work and completion-check usage, and it
+is a cooperative limit rather than a billing guarantee: one provider call can
+overshoot an allowance before reporting usage.
 
 A worker saying "done" is not sufficient. An independent evaluator reviews
-recorded evidence, and a completion candidate receives a bounded read-only
-verification of workspace files and actual tool results. This verifier cannot
-edit files or execute shell commands; it audits saved test output rather than
-rerunning the tests itself. Missing or contradictory evidence produces a gap
-for the next work segment, not success. Model or malformed-protocol failures
-interrupt assessment and can be retried without repeating the work.
+recorded evidence, and a completion candidate is checked by a panel of three
+independent verifiers (clamped to one through five), each running as its own
+child agent with the general-purpose tool inventory. A verifier can therefore
+read the live tree and run cheap spot-checks; it is instructed not to modify the
+workspace, and the tool policy still gates anything that writes or reaches the
+network. Each verifier is shown the objective, the goal's diff and changed files
+since the goal started, the worker's final response and the previous round's
+gaps; pips has no goal plan artifact, so the plan sections read unavailable. Each
+verifier answers an adversarial document: whether it refutes the candidate, its
+evidence, its confidence, an optional blocker class, and concrete findings. The
+panel passes a candidate only when its cold majority does not refute it; a
+high-confidence refute from the first verifier vetoes that majority, and a panel
+whose every refuter names a blocker that iteration cannot resolve blocks the goal
+for a user decision instead of returning more work. Missing or contradictory
+evidence produces a gap for the next work segment, not success.
 
-Verification is intentionally bounded: the evidence ledger retains up to 32
-latest tool results with 4 KiB per result; an audit has up to four read rounds
-and eight tool calls. Keep checks and captured output focused. Dropped or
-truncated essential proof cannot pass verification; split larger objectives
-rather than relying on an unbounded transcript audit.
+Both checks ask for their answer as one JSON object. A model that declares
+`structured_output` is asked through the provider's own JSON Schema mechanism;
+any other model is asked through the prompt-only convention, with the schema
+described in the prompt. The declaration chooses the transport and never relaxes
+the check: the same document fields and proof rules apply either way. What
+decides proof is each verifier's own instructions: default to refuted when
+uncertain, treat prose as non-evidence, cite a diff hunk, a recorded result or a
+`path:line`, check the previous round's gaps first and raise a new objection only
+for a demonstrable defect or an unmet requirement, and refuse ambiguous, absent,
+failed, truncated or contradictory evidence — so a verification is only as good
+as the panel's compliance with that contract.
+Neither check caps the model's output
+tokens, so a model that reasons before answering is not cut off mid-answer; the
+goal's own token budget bounds the run. Neither check pins a temperature either:
+the provider's own default applies. The evaluator is
+shown the condition and a bounded transcript of the conversation — the last
+32 KiB of it, 4 KiB per message — while each verifier reads the recorded tool
+results. The evaluator answers with a decision — continue, candidate complete, or
+blocked — and a blocked decision names a stable blocker key: the goal keeps
+working until the same blocker is declared three times running, and then it is
+blocked with the evidence and the next user action the evaluator named. An answer
+the harness cannot use is judged, not fatal, and the two checks differ. A
+verifier treats an answer it cannot read — not the required JSON document, or one
+missing its evidence — as a rejection vote after first trying the one-line
+`Refuted`/`Not Refuted` terminal token; a wholly unusable answer becomes a refute
+with unknown confidence, which can never be decisive. The panel's aggregated gaps
+return to the model as the next work segment's feedback. The evaluator cannot judge at
+all, so an unusable assessment — including one whose answer carries no usage
+accounting — is attempted once more and, if the second answer is unusable too,
+the goal stops and says it was stopped rather than treated as complete: run
+`/goal resume` to retry the check. A provider failure still interrupts assessment
+and can be retried without repeating the work, and a verification infrastructure
+failure pauses the goal with "Goal verification infrastructure failed (…). Run
+/goal resume to retry." — the panel never treats a failure as an approval.
+
+The model declares its own progress with the `update_goal` tool. It is offered
+wherever a goal can run and stays offered outside one, so a call there is a
+refusal sentence rather than an unknown tool. Its three optional fields are
+fixed: `message` records a short progress note and changes nothing else;
+`blocked_reason` is a failure signal, sent only after the same problem has
+defeated three or more attempts; the runtime counts them, answering the first two
+with the streak so the model keeps working, and pauses the goal with that reason
+for a user decision on the third; and `completed` records the model's claim that
+the condition is achieved. A completion claim does not decide completion. It is
+consumed at the goal loop's next decision point, where the verification panel
+runs in place of the ordinary continuation step: a verified verdict ends the run,
+and an unverified one returns the panel's gaps to the model as its next feedback.
+The verdict stays with the panel, which reads the live tree, the goal's diff and
+the recorded tool results — the worker's declaration is never itself evidence. A declaration
+with no goal run in progress, or a `completed` or `blocked_reason` against a goal
+that is paused or already complete, is refused with a named reason.
+
+Verification is bounded in its inputs rather than its reasoning: the evidence
+ledger retains up to 32 latest tool results with 4 KiB per result, the diff shown
+to the panel is capped at 256 KiB and 300 changed files, a verifier reads full
+files until it stops calling tools, and a goal runs at most ten verification
+panels before it pauses for an explicit resume. The goal's token budget, when
+set, is checked at the loop boundary rather than per call. A diagnostic panel
+report is written under the goal's private state directory; it never decides
+anything. Dropped or truncated essential proof cannot pass verification; split
+larger objectives rather than relying on an unbounded audit.
 
 Goals do not grant trust, bypass tool approval, approve Plan review, or answer
 questions on your behalf. Pending input keeps the goal blocked. In `exec`, a
@@ -208,12 +275,34 @@ the process exits or the session is replaced), so later prompts can call it
 directly; calling a deferred tool that is not active yet returns an error that
 names the discovery tool.
 
+With search enabled the model is also offered `use_tool`, which calls a tool the
+current snapshot hides by name: `tool_name` is the exact name a search result
+reported, and `tool_input` is that tool's own argument object. The name is
+resolved with the session's own policy, so an unauthorized tool is refused
+exactly as a direct call would be and an unknown name is refused by name. A tool
+that is already visible is refused with a correction telling the model to call
+it as its own tool call, which is also why the wrapper cannot reach a
+permit-gated tool: Shell and Monitor are controlled local tools, and the stop
+tool is a local tool too, so all three are always visible. What it can reach is
+the plain catalog tools — MCP and Extension tools — whose calls need no
+approval. The target's own result is the call's result, unchanged. `use_tool` is
+a second path rather than a replacement: the
+discovery tool and its activation semantics are unchanged, and every visible tool
+is still called directly.
+
 ### Tool calls and MCP read-only tools
 
 A model may request several tool calls in one response. They run as a queue:
 every tool is treated as a write and runs serially in call order, except tools
 marked read-only (`read`, `ls`, `glob`, `grep`, and MCP tools listed below),
 which may run concurrently. Approval still applies to each call.
+
+Filesystem tools accept a workspace-relative path or an absolute path inside the
+workspace; both resolve to the same confined path. Absolute paths outside the
+workspace stay refused. A path argument is cleaned of surrounding whitespace and
+quotes, trailing literal `\n`/`\r`/`\t`, and a leading `~` is expanded before
+resolution. A workspace absolute path that lost its leading slash is recognized
+when it names the workspace root or a path below it.
 
 ```toml
 [mcp_read_only_tools]
@@ -442,6 +531,17 @@ typed request options. Pips does not contact a remote model catalog; only the
 current model and locally configured nested model tables appear in `/model`.
 Unknown model capacity remains unknown rather than being guessed.
 
+`/model` applies the highlighted model, variant, and reasoning and saves the
+selection as the default for the active config file on Enter. The selected model
+becomes the only model with `default = true`, and the chosen variant and
+reasoning are written as top-level `variant` and `reasoning` keys. Choosing the
+`default` variant or reasoning removes the corresponding key. The save preserves
+unrelated source and comments, rejects unsupported or concurrently changed
+files, and validates the variant and reasoning against the selected model. A
+failed save leaves the process-local selection in effect and reports the save
+error. Environment variables and startup flags still take precedence over the
+saved file on the next launch.
+
 Capabilities are declared, never fetched. Pips ships no model capability
 database; declare what a model supports on the provider (inherited by its
 models) or on a single model:
@@ -466,11 +566,33 @@ and `code_execution`. An unknown name fails configuration loading.
 Declarations layer on top of whatever the protocol adapter already reports for
 the bound model, so a third-party model the adapter only knows as plain chat
 can still be declared vision-capable. Two declarations change runtime behavior
-today: `vision` gates image attachments in the composer, and
-`structured_output` selects a native JSON Schema response format for subagents
-instead of prompt-only JSON. Other declarations are accepted and reported as
-`advisory` by `pips config show` until a consumer reads them. `tools = false`
-is rejected, because Pips requires native tool calling.
+today: `vision` admits image attachments in the composer, and
+`structured_output` selects a native JSON Schema response format — for subagents
+that opt into `structured_results = true`, and for a goal's completion
+assessment and evidence audit — instead of the prompt-only JSON fallback. It is a
+preference, never a requirement: a model that does not declare it runs those
+paths through the prompt-only convention, and a goal starts either way. Other
+declarations are accepted and reported as `advisory` by `pips config show` until
+a consumer reads them. `tools = false` is rejected, because Pips requires native
+tool calling.
+
+An image is attached whatever the active model declares: the draft is never
+dropped to enforce a capability. A model that does not accept image input says
+so as soon as an image lands in the draft, and again if Enter is pressed. The
+draft keeps the image, and the notice names the remedy — remove the image, or
+declare `vision = true` for that model.
+
+The transcript shows attachments as references, never as payloads. A file
+attached with `@` reads as `[File · <path> · <n> lines]`, an image as
+`[Image · <name> · <width>×<height>]`. The model still receives the complete
+file content and the image bytes; only the display collapses, so provider
+requests, prompt caching, session files, and resume are unaffected. A paste
+larger than 1000 characters or 8 lines becomes a
+`[Pasted text #N · <chars> chars · <lines> lines]` chip in the draft, and the
+pasted text itself is sent in full. Pasting the same content again with the
+cursor on that chip expands it back into editable text in place, up to 100,000
+characters; a larger paste stays a chip so the editor is never handed a buffer it
+cannot hold.
 
 `context_window` is local context-capacity metadata. Request output is
 configured only with a model or variant `request.max_output_tokens`; that value
@@ -522,11 +644,19 @@ without modifying anything, and it stays runnable on a configuration it cannot
 resolve — it prints `configuration fail` with the reason and next steps instead
 of exiting before it can say what is wrong.
 
+The `network` line distinguishes a configured proxy from a working one: when
+`HTTPS_PROXY`/`https_proxy` is set, Doctor dials it and asks for a `CONNECT`
+tunnel, then prints `probe=ok latency=…` or `probe=failed detail=…`. Proxy
+credentials never appear in the output. A system proxy without the environment
+variable still produces the existing warning because Pips ignores the macOS
+system proxy.
+
 `--trust-workspace` records the canonical workspace identity in `~/.pips` and
 enables project `.pips` Skills/Bundles/MCP plus shared `.agents/skills` for
 this invocation. It does not enable project configuration, grant a tool or
-Skill-script approval, approve an MCP server, or enable Full Access. The trust
-decision is audited on stderr.
+Skill-script approval, or enable Full Access. Project MCP servers are enabled
+by workspace trust; an optional user-level deny disables one by server ID. The
+trust decision is audited on stderr.
 
 Reviewed local lifecycle commands are configured and approved separately from
 Workspace trust. See the [Coding lifecycle hooks guide](coding-hooks.md) for
@@ -535,50 +665,211 @@ authority boundary.
 
 ### Dynamic custom Agents (Alpha)
 
-Custom Coding Agents are reusable Markdown definitions. They are an Alpha
-feature and are disabled by default: discovery and validation still work while
-the gate is off, but Pips will not expose custom definitions to the parent
-model or dispatch them. Enable the gate at the highest-precedence layer that
-fits the use case:
+Custom Coding Agents are reusable Markdown definitions. They are enabled by
+default: discovery, validation, and dispatch all work without configuration.
+Turn them off at the highest-precedence layer that fits the use case:
 
 ```toml
 # ~/.pips/config.toml (or the file selected by --config)
-dynamic_subagents = true
+dynamic_subagents = false
+# The same switch, written in the [subagents] table:
+# [subagents]
+# enabled = false
 ```
 
 ```sh
-PIPS_DYNAMIC_SUBAGENTS=true pips agents list
-pips --dynamic-subagents agents run go-checker "inspect internal/coding"
+PIPS_DYNAMIC_SUBAGENTS=false pips agents list
+pips --dynamic-subagents=false agents run go-checker "inspect internal/coding"
+pips --no-subagents agents run go-checker "inspect internal/coding"
 ```
 
-`pips config show` reports the resolved `dynamic_subagents` value and its
-source. Disabling the gate stops new custom dispatch without deleting
-definitions or making historical child Sessions unreadable. Built-in
-`explore`, `plan`, and `review` remain available through their compatible
-protocol. Selected-Beta telemetry, staged distribution, rollback drill, and GA
-evidence are defined in the
+`dynamic_subagents` and `[subagents] enabled` are two spellings of one switch;
+`--dynamic-subagents` and `--no-subagents` are its two flag spellings, and
+`PIPS_DYNAMIC_SUBAGENTS` is its environment spelling. Precedence is
+flag > environment > file > default (`true`), and a `[subagents]` table that
+omits `enabled` never turns subagents off. Two spellings in the same layer are
+one setting: setting both to the same value is accepted, and setting both to
+different values fails validation with a message naming both keys rather than
+letting one silently win. `pips config show` reports the resolved value under
+both `dynamic_subagents` and `subagents.enabled`, with the layer that decided
+it. Disabling the switch stops new custom dispatch without deleting definitions
+or making historical child Sessions unreadable. Built-in `explore`, `plan`, and
+`review` remain available through their compatible protocol, unless the
+individual type is disabled by `[subagents.toggle]`, which applies to built-in
+and custom types alike. Selected-Beta telemetry, staged distribution, rollback
+drill, and GA evidence are defined in the
 [Dynamic Subagent readiness runbook](coding-dynamic-subagents-readiness.md).
 
-Production child admission and execution budgets are configured independently
-in the same selected user file:
+Production child admission is configured independently in the same selected
+user file:
 
 ```toml
-[subagent]
-max_concurrent = 4
-max_spawned_per_root_interaction = 8
-max_auto_follow_ups = 4
-max_turns = 64
-max_tokens = 256000
-max_tool_calls = 128
-max_duration_minutes = 30
-max_depth = 0
+[subagents]
+max_concurrent = 32
+limit_behavior = "queue"
+max_depth = 1
+structured_results = false
+
+[subagents.toggle]
+# exact agent type name -> may it be dispatched; an absent key stays enabled
+explore = false
+
+[subagents.models]
+explore = "anthropic/claude-sonnet-4-5"
 ```
 
-Every value is positive and hard-bounded; invalid or unknown fields make
-configuration validation fail before Runtime open. A partial table changes only
-the named values, and `pips config show` reports each effective value and source.
+Every admission value is positive and hard-bounded; invalid or unknown fields
+make configuration validation fail before Runtime open. A partial table changes
+only the named values, and `pips config show` reports each effective value and
+source. Only concurrent children are bounded, so neither the spawn
+count per root interaction nor the auto-follow-up count is a `[subagents]` key:
+delete `max_spawned_per_root_interaction` and `max_auto_follow_ups` from an
+existing file. A child has no default execution budget: turns, cumulative
+tokens, Tool calls, and wall time are unbounded unless a subagent definition
+declares `limits.max_turns`, which caps the child and reserves finalization
+turns below it. `max_turns`, `max_tokens`, `max_tool_calls`, and
+`max_duration_minutes` are no longer `[subagents]` keys either, so delete those
+four lines too. The strict loader rejects a table that still carries any of
+these six removed keys with a migration error that names the key; the four
+execution keys point at the definition-side `limits.max_turns`.
+
+Inside a child, an identical Tool call is nudged (denied with a message) at the
+fixed thresholds: the 4th consecutive identical call when every call in
+the run is read risk, the 8th otherwise. The same run hard-stops the child as
+`no_progress` at 8 (read risk) or 12 (otherwise), and a different call resets
+the run. Neither a main interaction nor a Goal run installs a turn cap: a Goal
+is bounded by its own token budget.
+`limit_behavior` is `queue` (default) or `fail`. At the `max_concurrent` cap a
+`queue` spawn waits in arrival order and `fail` rejects it with the model-facing
+`Concurrent subagent limit reached` message; `max_concurrent` clamps to at least
+one, so the cap can be tuned but never disabled. `PIPS_SUBAGENT_LIMIT_BEHAVIOR`
+overrides the configured value and an unrecognized value falls back to `queue`.
+A foreground spawn that waits out its budget (default ten minutes,
+`PIPS_SUBAGENT_AWAIT_BUDGET_MS`) is handed off to the background and returns its
+`subagent_id` immediately.
 These are production defaults, not new authority: profile selectors, child-owned
 approval, Sandbox, and the frozen generation capability intersection still apply.
+
+`[subagents.toggle]` disables individual agent types by exact, case-sensitive
+name; an absent key leaves the type enabled, so an empty table changes nothing.
+A disabled type is refused with `Subagent '<type>' is disabled via
+[subagents.toggle] in config.toml`, is removed from the model-visible
+`subagent_type` list, and is reported as `disabled by configuration` on the
+`/agents` `Agents` tab. It applies to built-in and custom types alike, and it
+narrows dispatch only: the `models`, `roles`, and `personas` entries for a
+disabled type are still validated and reported as declared, and are simply never
+applied. `pips agents list` reports what definition files declare, so it does
+not read this configuration and still lists a disabled type. `pips config show`
+reports the table as declared, including a key that names no existing type.
+
+Built-in agent types are `general-purpose` (the full delegable catalog),
+`explore` and `plan` (read-only), and `review` (a pips extension, read-only). An
+omitted `subagent_type` resolves to `general-purpose`. Built-in agents return
+their final assistant text as the result. `structured_results = true` restores
+the typed JSON contract, where the child must return the role's schema and the
+result is validated locally. Child runs drive the model through the streaming
+path, so a provider whose non-streaming response carries no content still
+returns a result.
+
+The single delegation tool is `spawn_subagent`. Its required arguments are
+`prompt` and `description`; `subagent_type`, `run_in_background` (default
+`true`), `isolation`, `resume_from`, `cwd`, and `model` are optional.
+`isolation` accepts `none` (the default, shared workspace) or `worktree`.
+`model` names a configured model for the child and is resolved through the
+precedence below. The model-visible `subagent_type` enum lists custom Agents
+only; built-in types are never enumerated.
+
+### Roles and personas
+
+A role or persona is a named preset for one agent type. It is never a spawn
+argument: pips selects it by the resolved `subagent_type`, so a preset named
+`explore` applies to `explore`. A preset can narrow a type's authority and
+supply defaults, and it can never widen the delegable catalog.
+
+A **role** declares `description` (required), `default_capability_mode`, `model`,
+`reasoning_effort`, `prompt_file`, and `default_isolation`. Its `prompt_file` is
+rendered into the child's system prompt inside a `<role-instructions>` block. A
+**persona** declares `instructions`, `description`, `instructions_file`,
+`inputs`, `outputs`, `default_isolation`, `model`, and `reasoning_effort`; it has
+no capability mode. Its instructions are injected as a synthetic `<system-reminder>`
+user message before the child's task prompt, persisted with the child
+transcript, and skipped when a resumed child already carries them. pips parses
+and validates a persona's `inputs`/`outputs` for configuration fidelity and does
+not surface them to the parent model.
+
+Pips discovers one preset per `*.toml` file, named by the file stem, from these
+roots in increasing precedence:
+
+| Scope | Root | Trust requirement |
+| --- | --- | --- |
+| User roles | `$PIPS_HOME/roles/` (normally `~/.pips/roles/`) | none |
+| User personas | `$PIPS_HOME/personas/` (normally `~/.pips/personas/`) | none |
+| Project roles | `.pips/roles/` | trusted Workspace only |
+| Project personas | `.pips/personas/` | trusted Workspace only |
+
+Inline `[subagents.roles.<name>]` and `[subagents.personas.<name>]` tables in the
+selected user file take precedence over the same-named file. A preset name must
+be a lowercase ASCII agent type name, and an invalid declaration is reported as
+a diagnostic and dropped rather than failing the load.
+
+```toml
+[subagents.roles.explore]
+description = "Read-only codebase reconnaissance."
+default_capability_mode = "read-only"
+model = "anthropic/claude-sonnet-4-5"
+reasoning_effort = "low"
+prompt_file = "explore.md"
+default_isolation = "none"
+
+[subagents.personas.explore]
+instructions = "Report only what you observed, with exact paths and line ranges."
+
+[[subagents.personas.explore.outputs]]
+name = "summary"
+description = "One paragraph of findings."
+```
+
+The child model is selected from the first resolvable tier:
+spawn `model` > role `model` > persona `model` > `[subagents.models].<type>` >
+the definition's `model` > the parent session's model. A tier whose model is not
+in the configured catalog is reported as an `integration` diagnostic and the
+next tier is tried, so an unusable selection never fails the spawn. The resolved
+model, reasoning level, and persona are frozen into the child's execution plan.
+`reasoning_effort` is applied only for a model that reports reasoning support.
+`default_isolation` accepts `none` or `worktree`. A preset that requests
+`worktree` gives its type a child-owned Worktree, and a caller spelling of
+`none` does not cancel it.
+
+### Isolation, working directory, and resume
+
+`isolation = "worktree"` runs the child in a Git worktree created from the
+parent workspace's current `HEAD`, below the Worktrees root — a sibling of
+`$PIPS_HOME` named `<pips home>-worktrees`, normally `~/.pips-worktrees` — at
+`subagents/<workspace-token>/subagent-<child-session-id>`, on an owned branch
+under `refs/heads/pips/subagent/` derived from the child session id. The
+Worktree is preserved after the child finishes, and its path is returned as
+`worktree_path` in the result envelope and as a `<worktree_path>` line in the
+completion text. A workspace that is not a Git repository, and a Worktree that
+cannot be provisioned, fail the spawn instead of silently running the child in
+the parent workspace.
+
+`cwd` points the child at one existing directory instead of the parent
+workspace. It is sanitized (surrounding quotes and backticks stripped, a
+leading `~` expanded, sentinel placeholders dropped), must already exist, is
+mutually exclusive with `isolation = "worktree"`, and is ignored when
+`resume_from` is set. A path that does not exist alongside
+`isolation = "worktree"` is cleared so the Worktree wins.
+
+`resume_from` continues a completed child of the same parent. The source must
+be a terminal child of the current parent Session; a running, missing, foreign,
+or interrupted source fails the spawn. The resumed child inherits the source's
+transcript, its tool calls and results, and its cumulative token usage, while
+its system prompt and tool configuration are rendered freshly from the current
+definition. The source's agent type and model replace whatever the caller asked
+for, and a source model that left the configured catalog fails the spawn
+instead of silently switching models. The resumed child reuses the source's
+Worktree when it had one, inherits its directory when that still exists, and
+otherwise runs in the parent workspace.
 
 Pips discovers `*.md` definitions from these roots in increasing precedence:
 
@@ -606,6 +897,7 @@ schema: pips.agent/v1alpha1
 name: Go checker
 description: Inspect one bounded Go target and report evidence.
 model: inherit
+capability_mode: read-only
 visibility:
   user: true
   model: false
@@ -620,8 +912,6 @@ tools:
 skills:
   allow: [golang-code-style]
   preload: [golang-code-style]
-delegation:
-  allow: [test-runner]
 mcp:
   private: [source_control]
 hooks:
@@ -632,7 +922,7 @@ output:
 Inspect only the task supplied by the caller. Report evidence and uncertainty.
 ```
 
-`visibility.user` controls the Library and direct user invocation;
+`visibility.user` controls the Agents definition tab and direct user invocation;
 `visibility.model` controls whether the parent model can discover the profile.
 `delivery` can contain `foreground`, `background`, or both. A profile's
 `model` is either `inherit` or a configured Pips `provider/model` reference;
@@ -646,10 +936,17 @@ locally in addition to any provider structured-output support.
 weakening the profile. Skills select only already loaded, trusted Skills, and
 `preload` must be a subset of `allow`.
 
-`delegation.allow` names exact model-visible custom Agent IDs. Recursion is
-foreground-only, serial, cycle-checked, and disabled unless
-`[subagent].max_depth` is set to `1..3`; a recursive child receives only an
-exact `run_subagent` target list, never `spawn_agent`.
+`capability_mode` is `read-only`, `read-write`, `execute`, or `all`, with the
+source's input aliases accepted. It narrows the tool kinds a child may use and
+applies only when `tools.allow` is empty: an explicit allowlist already names its
+tools. `read-only` keeps read, list, glob, grep, session history, question, and
+Skill tools; `read-write` adds file editing; `execute` adds shell; `all` keeps
+every delegable tool. Tools without a local source identity (MCP and extension
+tools) survive every mode.
+
+A child cannot delegate further: `[subagents].max_depth` defaults to `1`, and the
+delegation tool is never offered to a child. The retired `delegation` frontmatter
+key is rejected as an unsupported field.
 
 `mcp.private` and `hooks.private` bind exact, already configured and trusted
 Agent-private integration IDs. They do not accept inline commands, URLs,
@@ -682,7 +979,7 @@ Pips freezes the intersection of the profile's selections with the active
 Runtime's delegable catalog, operating mode, Workspace trust, Sandbox,
 approval policy, model catalog, Skill/MCP generation, and per-call checks.
 Consequently a profile may request `apply_patch`, `shell`, an eligible MCP Tool,
-Tool Search, `ask_user`, an exact recursive target, or an exact configured
+Tool Search, `ask_user`, a `capability_mode`, or an exact configured
 private integration, but it receives the capability only when every Runtime
 and generation check permits it. It cannot define credentials, endpoints,
 environment variables, commands, Sandbox or permission overrides, or a new
@@ -738,11 +1035,471 @@ and compiled again. A failed review or write retains only the process-local
 draft until the command exits; a successful write becomes discoverable on the
 next normal Runtime open or reload, not in the generation that reviewed it.
 
-In the interactive TUI, open `/agents`, press `Ctrl+L` for the Library, choose
+In the interactive TUI, open `/agents`, press `Ctrl+A` for the Agents tab, choose
 an available user-visible profile with Enter, then enter its task in the
 Composer. `Ctrl+R` returns to durable Runs. Child approval and question prompts
 identify the exact child and resolve only that child Session; they do not grant
 or answer anything for the parent interaction.
+
+### Child messaging
+
+A running or completed subagent can receive a bounded text message from the
+conversation that owns it. The surface is off by default:
+
+```toml
+# ~/.pips/config.toml (or the file selected by --config)
+active_agent_messages = true
+```
+
+```sh
+PIPS_ACTIVE_AGENT_MESSAGES=true pips
+```
+
+`pips config show` reports the resolved `active_agent_messages` value and its
+source. While the gate is closed no messaging tool is offered and a call to it
+is refused, and no child can send one. The gate changes no authority: a
+recipient is still the same child with the same frozen capability intersection,
+approval scope, and Sandbox.
+
+The model-facing tool is `send_subagent_message`. Its required arguments are
+`subagent_id` and `text`; `delivery` is optional and defaults to `steer`. A
+`delivery` of `steer` joins the target's current run at its next turn boundary,
+`queue` waits for a later turn, and `interject` is a steer that arrives ahead of
+any message already queued to steer. Message text is limited to 32 KiB.
+`subagent_id` names a durable child of this conversation; the literal `parent`
+is available only to a child and targets the conversation that spawned it.
+
+Delivery depends on the target. A live child takes the message at its next turn
+boundary. A child that is still starting is parked until it becomes live. A
+completed child that this session delegated is woken: it continues in the
+background with the message as its prompt, keeping its own agent type and model.
+A wake reports only its acceptance, because the sender already holds that reply;
+the woken child's own result is not surfaced a second time as a background
+completion. It stays visible in the runs list and in its own transcript.
+Every refusal is explicit rather than silent — the result envelope reports
+`not_found_or_not_owned`, `not_active_or_finalizing`, `saturated`,
+`quota_exceeded`, `admission_uncertain`, `not_accepted_before_deadline`,
+`unsupported`, `limit`, `channel_closed`, or `accepted`, together with its
+disposition. A quota or an unresolvable admission is therefore never confused
+with a successful delivery.
+
+An eligible child also receives the messaging tool, but only when its capability
+mode keeps it: `read-write`, `execute`, and `all` do, and `read-only` does not.
+A child may message a live sibling or the conversation that spawned it; it may
+not message itself. A child may also wake a completed sibling. Because a child's
+own run is not the conversation's run, a child-initiated wake is attributed to
+that child's own call: the woken child appears in the runs list and in its own
+transcript, and it does not enter the conversation's timeline. A conversation-
+initiated wake is attributed to the conversation's own call and does appear on
+the conversation's timeline.
+
+### Context compaction feedback
+
+A successful full checkpoint marks its boundary in the conversation with a
+divider: `──────── Context compacted · manual · 9.0k → 1.2k tokens ────────`.
+The mode (`manual` or `auto`) and the token counts before and after are shown
+when the live event carries them. A resumed session keeps the divider and its
+token counts; the trigger is not persisted, so the mode is omitted there. A full
+checkpoint written by an earlier version also shows the divider on resume. A
+legacy retained-tail compaction has no full checkpoint boundary, so it shows no
+divider. Compaction failure stays an ordinary error or activity row and never
+paints a success divider.
+
+### Todo list and the todo gate
+
+In Agent mode the model keeps a visible todo list with `todo_write`. A call carries
+either 1 to 64 items, `clear = true` with no items, or `merge = false` with an
+empty list to remove the checklist. An item's `id` is its stable identifier and
+defaults to its step text, so a list written without ids stays addressable by
+its steps; a step is a nonblank text of at most 512 bytes with a status of
+`pending`, `in_progress`, `completed`, or `cancelled`. The optional explanation
+is at most 4096 bytes and the whole input is at most 64 KiB. An item may also
+carry an optional `meta` object of at most 1 KiB for free-form bookkeeping. A
+`cancelled` step is terminal — it is how a genuinely blocked step is recorded —
+and it never counts as in progress.
+
+`merge` selects the mode and **defaults to true**: the call updates items by id,
+an existing item takes a non-empty step, a set status, and a present meta, and
+keeps whatever the call omits, while an unknown id is appended with the id as
+its step fallback. A status flip is therefore one line —
+`{"plan":[{"id":"…","status":"completed"}]}` — and every item's id is in front
+of the model each turn in the `Current task state` reminder. Send `merge = false`
+to replace the complete list: the list becomes exactly the call's items, an
+omitted step falls back to the item's id, and an omitted status defaults to
+`pending`.
+
+Historical `update_plan` calls in old sessions keep their original
+replace-by-default semantics on replay; the transcript reader marks those calls
+so a resumed session cannot drift under the new default.
+
+One safety net applies: when `merge` is `false` (including a
+legacy call's absent default), the list already has items, every item carries no
+step, and every item's id already exists, the call is applied as a merge anyway,
+so a model that forgets the flag does not wipe the list. The consequence is
+that a replacement naming only ids and statuses cannot shrink the list; a model
+that wants to drop steps sends the items it keeps, with their steps.
+
+A call with `clear = true` removes the whole checklist. It must carry no items
+and cannot also set `merge = true`. An explicit `merge = false` with an empty
+list also clears it; an empty `plan`
+with `merge` absent or true is still refused.
+
+The call is validated before it is folded: a duplicate id inside one call is
+refused and named, and an item that carries neither an id nor a step is refused.
+Multiple items may be `in_progress`; that count is a planning choice, not a tool
+contract, so parallel work can keep several active steps. A non-clear folded
+list is validated too: it must hold 1 to 64 items with the step and meta bounds
+above, so a merge that would push the list past 64 items is refused and the list
+is left unchanged. The tool result reports the folded list's own
+`{updated, completed, total}`.
+
+The todo list is projected from the transcript, so it survives a resume. The status
+line's `task_progress` item reports `Todo completed/total` while the list
+still has open work; it hides once every step is completed or cancelled.
+`Ctrl+P` and `/todos` open the full checklist in the shared detail page. A successful
+`todo_write` call adds no tool card to the conversation — the status line and
+page are its visible surface — while a failed or interrupted call stays visible
+as an error card.
+
+Two reminders keep the todo list current:
+
+- The **nudge** is on by default. After three turns with no valid `todo_write`
+  call, and at most once every five turns, the turn's runtime reminder tells the
+  model to record or advance the todo list. A valid call resets the count, and a
+  compaction resets it too.
+- The **gate** is opt-in with `todo_gate = true`. When it is on and a run ends
+  on a content-only assistant message while the todo list still has pending or
+  in-progress steps, the run takes one more turn carrying a reminder that names
+  the affected steps and tells the model to advance the next pending one or mark
+  a genuinely blocked one `cancelled`. It fires at most twice per prompt, and it
+  never fires while a question, an approval, a plan review, or a goal run owns
+  the turn, nor after a lifecycle hook stopped the run.
+
+```toml
+todo_gate = false   # opt-in: one more turn when a todo list still has open steps
+```
+
+### Scheduled tasks (`scheduler_*`)
+
+In Agent mode, exactly where `todo_write` is offered, the model can schedule a
+prompt to run on an interval, list what is scheduled, and cancel it. Three Tools
+carry it:
+
+| Tool | Input | Answer |
+| --- | --- | --- |
+| `scheduler_create` | `task_id`, `interval`, `prompt`, `durable`, `fire_immediately` | `{id, humanSchedule, updated}` |
+| `scheduler_delete` | `id` | `{success, message}` |
+| `scheduler_list` | — | `{tasks: [{id, prompt, intervalHuman, nextFireAt, createdAt, recurring}]}` |
+
+`interval` and `prompt` are required to create. With `task_id` they are a patch:
+a provided field replaces the stored one, an omitted one stays, the schedule
+keeps its phase, and an unknown id is refused rather than silently creating a
+task. `durable` (default `false`) and `fire_immediately` (default `false`) are
+create-only and are ignored alongside `task_id`. `recurring` is deliberately not
+a model-facing field: every task pips records is recurring and keeps firing until
+it is deleted. `scheduler_delete` answers `success: false` for an id that does
+not exist rather than failing the call.
+
+An interval is `<digits><s|m|h|d>` — `60s`, `5m`, `2h`, `1d` — with surrounding
+whitespace tolerated and a 60-second floor. An empty value, a zero value, an
+unknown suffix, and a product that overflows are refused. The human rendering is
+`every 45 seconds`, `every 5 minutes`, `every 1 hour`, `every 2 days`.
+
+The task list is durable per session. It lives in a private `scheduler/`
+subdirectory of the session's own state directory (mode `0700`, one `0600` file),
+replaced atomically and bounded in size under a versioned schema; a platform that
+cannot provide those guarantees refuses the store. A `durable` task is reloaded
+when the session is reopened; a session-only one is dropped.
+
+Each task fires by starting a background `general-purpose` subagent whose prompt
+is the task's own text framed with the task id and the schedule:
+
+- a fire is skipped while the child the task's previous fire started is still
+  running, and happens once that child ends;
+- a recurring task's next fire is its previous scheduled time plus one interval,
+  so the schedule keeps its phase;
+- a next fire already in the past is skipped forward to the next future
+  occurrence rather than replayed, so an overdue task fires once, not once per
+  missed interval;
+- a task that fires is removed durably when it is not recurring, before the fire
+  is reported;
+- a fire that cannot start a child leaves the task scheduled and reports nothing,
+  and its next fire skips forward to the next future occurrence so the loop never
+  retries the same overdue fire.
+
+The fired child is an ordinary background child: its completion arrives through
+the durable notification path like any other, and `get_task_output`, `wait_tasks`
+and `kill_background_task` address it by the id its fire recorded, and it appears
+in `/agents` on the `Runs` tab with the session's other children. There is no
+separate loop surface — a fired iteration is a background child, so no second
+"loop" noun counts it. The loop's lifecycle mirrors the notification
+coordinator's: it starts when the Runtime opens, stops on close, and fires
+nothing after close.
+
+Not implemented, deliberately: chaining an iteration onto the previous child, a
+full framed prompt (a previous-iteration summary and Tool names), a
+descendant guard, an occurrence journal and `expiresAt`, a `/loop` slash command,
+a separate "loop" cue or pane kind, and re-announcing restored tasks.
+
+### Background commands (`shell`)
+
+`shell` runs one command and returns its output. Its optional `block_until_ms`
+decides whether the command has to finish before the call returns:
+
+| Value | Meaning |
+| --- | --- |
+| omitted | Block until the command ends or its `timeout_ms` deadline fires. |
+| `0` | Start the command in the background and return its task id at once. |
+| positive N | Wait up to N ms; a command still running at N moves to the background and the call returns its task id. |
+
+An explicit `block_until_ms` always detaches the run from the Tool call, even
+when the command finishes inside a positive wait, so the run is registered as a
+background task either way. The wait never kills the command and never extends
+its deadline: `timeout_ms` keeps its kill meaning, a positive block above the
+shell's 30-minute ceiling is clamped, and a block longer than the deadline ends
+when the kill does. A negative block is refused with the `block_until_ms` field
+named.
+
+**Deadline.** `timeout_ms` is unchanged for a foreground call: 100 to 1 800 000
+ms, default 120 000. A call that backgrounds resolves an omitted `timeout_ms` to
+the shell's 30-minute ceiling instead, because a background task that dies after
+the two-minute foreground default is a trap; an explicit `timeout_ms` is
+honoured as given, and the receipt names the effective deadline.
+
+**Receipt and completion.** A backgrounded command's Tool result names the task
+id, the effective deadline, that the model is notified when it completes, and
+the three id-addressed Tools — `get_task_output`, `wait_tasks`, and
+`kill_background_task` — and lists any other background task still running. Its
+completion is `Background task "<id>" completed (exit code: N).` or
+`(terminated by signal S)`, then `Duration: Xs`, then
+`Use get_task_output("<id>") to see the full output.`, then the user-kill notice
+when the kill never reached the model as a Tool result. The command is never
+echoed.
+
+**Output and events.** A backgrounded command writes both streams into its log
+and emits no events: a command has no event contract, and its completion is the
+single model-visible report. Its log is capped at the shell's own 16 MiB output
+ceiling rather than the monitor's 10 MiB. A command that ends inside a positive
+wait is not reported again: it renders the ordinary shell result — stdout,
+stderr, and the exit code — from the executor's own result, and that result is
+what suppresses its completion.
+
+**Identity and lifetime.** A backgrounded command is stamped with the spawning
+interaction's id and is cancelled by that interaction's cancel, exactly like a
+watch, so a cancelled interaction's kill wakes nobody. Teardown reaps it too.
+
+**Surfaces.** The tasks pane lists a running command under `Tasks` with the
+`Command` tag, and the idle status-line cue counts commands first — for example
+`1 command · 1 monitor still running`. A foreground `shell` call still creates
+no registry entry, no log file, and no pane row.
+
+### Background watches (`monitor`)
+
+`monitor` starts one long-running shell command and turns each of its stdout
+lines into a model-visible event. It is not a polling surface: the tool result
+is only a receipt, and the model is woken by the events.
+
+| Field | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `command` | yes | — | Shell command or script. Each stdout line is an event; exit ends the watch. |
+| `description` | yes | — | Short human-readable label shown with every event. |
+| `timeout_ms` | no | `36000000` | Deadline in milliseconds; 10 h is also the ceiling. |
+| `persistent` | no | `false` | Run until `kill_background_task` or the session ends. `persistent` wins over `timeout_ms`. |
+
+`persistent: true` resolves the deadline to zero, and the result reports it as
+`timeout_ms: 0`. A non-persistent deadline above 36000000 ms is refused with
+`persistent must be true when timeout_ms exceeds 36000000ms`; that is the only
+validation error the tool has. The receipt reports the task id, and from then on
+the watch reports itself.
+
+Authorization is `shell`'s: the same approval permit, journal record, policy,
+Sandbox profile, and change audit, under the same capability-mode class. The
+only difference is that the run is detached from the Tool call that started it,
+so it keeps the call's ambient values and drops its cancellation. A `read-only`
+or `read-write` session is never offered the tool; `execute` and `all` are.
+
+**Bounds.** A watch is bounded five ways: one read of the output file is at most
+1 MiB, the line buffer keeps the last 1 MiB, one line is truncated at 500 bytes,
+one batch is truncated at 3000 bytes, and the pipeline polls every 200 ms. Line
+and batch truncation walk back to a rune boundary and append a literal
+`...(truncated)`. Empty lines produce nothing. stderr is not an event source.
+The task's own output file is capped at 10 MiB — the monitor cap — and the
+tasks pane's inspect read shows at most a 24 KiB tail of it. A model reads the
+log by id instead: `get_task_output` dumps at most 40 000 bytes and points at
+the log's own path for the rest.
+
+**Volume.** A token bucket of 10 events, refilled one every 2 s, decides what is
+delivered. Events beyond it are dropped silently. The first event after a burst
+precedes itself with a catch-up notice naming how many were suppressed, and 30 s
+of sustained suppression stops the pipeline with a message telling the model to
+write a more selective command. The limiter stops the pipeline, never the
+process.
+
+**Delivery.** An event reaches the conversation one of two ways. While a turn is
+running, the events drain at the next turn boundary as one hidden synthetic
+`<system-reminder>` user message, so the model keeps working and the reminder is
+not read as the user's reply. While the session is idle, the same batch runs as
+one turn of its own. Both paths use one batch format: a single event renders as
+`<monitor-event task_id="…">[label] text</monitor-event>`, and more than one
+renders with a count preamble (`N monitor events from M monitors`), one
+`<monitor>` block per task in first-seen order, and `[n]` numbering inside each
+block. A task's arrival order is preserved, and an event whose wrapped text
+carries no usable label falls back to `event`.
+
+**Termination.** A natural exit, a timeout, and a kill each produce exactly one
+model-visible completion, and the pipeline itself emits no terminal event. The
+completion names the task, the reason (`exited (code n)`, `killed by signal …`,
+or `ended`), the description and duration, and then points at the task-output
+Tool — `Use get_task_output("<id>") for full output.` — rather than inlining the
+log. A command that cannot report a clean exit code — a kill, an operation
+deadline, an output limit — is reported as `ended`, because the executor
+classifies a cancelled run by its context before it inspects the wait status. A
+kill that the model itself requested already returned its outcome as a Tool
+result, so that kill's terminal report does not wake the model a second time; a
+kill from the tasks pane, which has no Tool result behind it, adds the notice
+that the task must not be restarted. A result a read already returned — a
+blocking wait, or a snapshot of a task that had already ended — never wakes the
+model again either, and a kill from the interaction that started the watch
+produces no completion at all. The start receipt lists any other background
+task still running, so a duplicate watch is visible at launch.
+
+**Reading and waiting by id.** Two read-only Tools address a background task by
+the `task_id` a `shell` or `monitor` call returned, or a delegated child by the
+`subagent_id` a `spawn_subagent` call returned. Each id resolves against the
+background registry first and then against this session's own children, and an
+id of neither shape reads the same not-found record. `get_task_output` takes
+`task_ids` (up to 20, with `task_id` as the single-id alias) and an optional
+`timeout_ms`:
+
+- Omit `timeout_ms` or pass `0` for a non-blocking snapshot. A positive value
+  blocks until every listed id resolves, clamped to the one-hour ceiling
+  (3 600 000 ms).
+- The record carries `task_id`, `command`, `status`, `exit_code`, `started`,
+  `ended`, `duration_secs`, `output`, `output_file`, `truncated`,
+  `truncation_hint`, and `raw_output_bytes`. For a background task the status
+  words are `running`, `completed`, `failed`, `cancelled`, and `timed_out`,
+  chosen in that order: a kill is `cancelled`, the task's own deadline is
+  `timed_out`, a clean exit is `completed`, and anything else is `failed`.
+- `output` is the log itself while it fits 40 000 bytes. Past that it is the
+  first 2 000 bytes cut at a rune boundary plus
+  `[Output truncated - <N> bytes total. Use read on <path> for full content]`,
+  and `raw_output_bytes` reports the log's real size.
+- A still-running record carries the wait words: a plain poll says
+  `Use timeout_ms to wait for completion.`, an elapsed wait says
+  `Waited the requested <x>.` (or `Waited <x>, the per-call maximum, of the
+  <y> you requested.` when the ask exceeded the ceiling), and each ends with the
+  reminder that the subject is still working and the model will be notified. A
+  child's reminder says `do not kill this subagent and do not tell it to stop`
+  in place of the task's `do not kill this task`, because only a subagent can be
+  told to stop.
+
+`wait_tasks` is the blocking alias for a caller that wants `mode: wait_any`:
+`wait_all` shares `get_task_output`'s multi path, while `wait_any` returns at the
+first completion. A wait is the point of that Tool, so an omitted or zero
+`timeout_ms` waits the default 30 s instead of taking a snapshot. A wait is
+event-driven: it registers on each still-running task's own end and wakes on it,
+so nothing polls. A wait that resolves a child id cancels the waits it left
+behind, so `wait_any` across a watch and a child returns at whichever resolves
+first.
+
+**Reading a delegated child.** A child maps onto the same record, so the Tool
+layer, the multi shape, and the renderer are unchanged. `task_id` is the child's
+session id, `command` is `[subagent:<identity>] <task preview>`, and
+`output_file` is empty: a child has no log file, so `read` has nothing to admit
+for it, and its `truncation_hint` names no path. The status words are the child's
+own closed set: `initializing` (`created`), `running`, `completed` (`succeeded`),
+`failed`, and `cancelled` (`canceled`, and `interrupted` too, with the
+interruption's own code kept in the body). `exit_code` is `0` for a completed
+child and `1` for a failed one, and absent otherwise; the times come from the
+child's creation time and its duration.
+
+A running child's `output` is a progress block — its type, description, elapsed
+time, turn and tool-call counts, tokens and context use, the tools it has used,
+and its error count. A child whose durable lifecycle exists but whose run has not
+started reads `initializing` with a shorter block. A terminal child's `output` is
+the result rendering the spawn result already prints, with the
+`<subagent_meta>` footer, the worktree path when the child kept one, and the
+resume line naming its id. A child's `output` takes the same 40 000-byte bound as
+a task log, with `raw_output_bytes` reporting its real length, the path-free
+footer `[Output truncated - <N> bytes total]`, and a `truncation_hint` that
+reports the same real total instead of naming a file.
+
+A read that returns a child's terminal record is that result's surface: the
+completion the same child produced is dropped from the delivery batch and
+acknowledged, so the model is not woken with a result it already has. A blocking
+wait registers before it blocks and releases the registration when it leaves
+without a terminal record, so a wait that elapses leaves the child's later
+completion to arrive.
+
+**Reading the rest of a log.** `output_file` is the log's own path under the
+session directory, which is outside the workspace tree. The `read` Tool admits
+exactly that path — a value that is not the exact log path of a task the registry
+still knows is refused as an outside-workspace path — and reads it under the
+registry's own bound for the widest kind (the shell's 16 MiB ceiling, which also
+covers a watch's 10 MiB log) rather than the workspace file bound, with the same
+line window, binary check, and output bound as a workspace file.
+
+**Stopping one.** `kill_background_task` takes the `task_id` a `shell` or
+`monitor` call returned, or the `subagent_id` a `spawn_subagent` call returned,
+and answers `killed`, `already_exited`, or `not_found`. The id resolves against
+the background registry first and then against this session's own children, so
+one id-addressed stop covers all three producers. The sentence differs per
+subject, because the two outcomes are not the same claim: a background task
+answers `Task "<id>" was terminated successfully.` or `Task "<id>" had already
+completed.`, while a child answers `Subagent "<id>" cancellation was initiated.`
+or `Subagent "<id>" had already finished.` A child's cancellation is only
+initiated — the child winds down afterwards — so "terminated successfully" would
+say more than the call knows. A `not_found` answer reads
+`Task or subagent "<id>" not found.` and also names the ids the registry still
+knows, bounded in count and length, so a model that lost an id can recover it.
+That enumeration is the registry's own and lists no child id: it names the known
+bash task ids and no subagent. A task id is
+unique across processes: `<kind>-<n>-<token>`, where the kind is `monitor` or
+`shell`, the counter stays readable, and a short random token keeps a restarted
+process from reusing an id. The tasks pane's kill control calls the same method,
+so there is one control path; its child rows keep their own `CancelSubagent`
+control.
+
+A stop that a Tool result answers marks the child's result taken, so the
+completion the same child produces is dropped from the delivery batch and
+acknowledged rather than waking the model with an outcome it already has. The
+rule follows the source, the same rule the registry applies to a watch: a model
+stop (`KillModel`) and a prompt-end stop (`KillPromptEnd`) mark the result — a
+Tool result already carried the outcome, or no turn is left to report it — while
+a user stop from the tasks pane (`KillUser`) does not, because the model must
+still learn that the pane stopped the child. A stop of a child that had already
+finished marks nothing: the model asked about it, and its completion is the
+surface that carries the result.
+
+**Tasks pane.** A registered monitor is a row under `Watchers`, labelled
+`Monitor`, showing the description (or the command when there is none), the
+running state, and its own elapsed time; a one-shot background command is a row
+under `Tasks`, labelled `Command`. `x` stops it, and `Enter`/`Ctrl+F` or a click
+on the row opens its page. That page is the same full-width container the Tool
+detail surface uses — a pinned status row rather than a window — and it names
+the task and its state, carries the task's own `$ command` above the output the
+way the shell detail surface carries a script, and shows the tail of the task's
+own output. The page is titled `Watch details` for a monitor and `Command
+details` for a one-shot command. A running task opens on that tail and re-reads
+it on the activity clock, so the reader watches the stream grow; scrolling up
+holds their place, and coming back to the tail follows again. `Esc` (or `Ctrl+T`)
+closes the page, matching every other detail page. A watch has no transcript to
+open.
+
+**Lifetime.** The registry is process-local. A watch does not survive a restart,
+so a crash cannot reconstruct one. A watch is stamped with the id of the
+interaction that started it, and an interaction that ends cancelled cancels
+exactly the watches it started — an earlier interaction's watches keep running.
+Teardown reaps every live watch, so none outlives its session.
+
+**Telemetry.** One content-free counter, `pips.coding.background.tasks`, records
+each watch's lifecycle with its kind and a closed outcome
+(`started`/`exited`/`killed`/`failed`) and a duration. The command, the
+description, a path, the output, and the task id are never exported.
+
+There is no configuration key, environment variable, or feature gate for the
+watch surface. The only filters that remove it are a capability mode — the same
+one that removes `shell` — and the host's own tool selection.
 
 ### Interactive TUI themes and status line
 
@@ -868,7 +1625,7 @@ metadata resolves it to; a model that declares reasoning levels but has none
 selected shows `(default)`, which is the honest answer because the provider's own
 default is unknown to Pips; a model with no reasoning levels shows no suffix at
 all. The other fields are `workspace`, `session`,
-`task_progress` (`Tasks completed/total`), `phase`, `mode` (Plan mode), and
+`task_progress` (`Todo completed/total`, hidden when terminal), `phase`, `mode` (Plan mode), and
 `team`. `/statusline` toggles and reorders them.
 
 Cost rows are configured in a separate top-level `[cost]` table, so a price
@@ -897,9 +1654,9 @@ total below one unit prints four decimals, so a cheap session does not read as
 configuration with a strict schema, so an older binary rejects a config that
 carries `[cost]` rather than silently ignoring the prices.
 
-`/status` opens the read-only runtime panel, shaped like the reference CLI's
-tabbed settings view: five pages — `Status`, `Config`, `Usage`, `Stats`,
-`Models` — switched with `Tab`/`→` and `Shift+Tab`/`←`.
+`/status` opens the read-only runtime panel, a tabbed settings view: five pages —
+`Status`, `Config`, `Usage`, `Stats`, `Models` — switched with `Tab`/`→` and
+`Shift+Tab`/`←`.
 
 - `Status` names the session, its workspace and kind, the resolved model and
   endpoint, the connected MCP servers (`N connected · /mcp`), the effective
@@ -949,7 +1706,7 @@ click on a tab switches pages, a click on the `Stats` range row selects that
 window, and a click on the `Config` search box focuses it. The panel ignores
 motion and drag, so the pointer never takes the conversation's selection gesture
 away from it. The same capture covers the full-area lists — `/resume`, `/skills`,
-`/mcp`, `/tree`, `/agents` and its Runs/Library tabs — where a left click moves
+`/mcp`, `/tree`, `/agents` and its Runs/Agents tabs — where a left click moves
 that route's selection to the row it landed on. A click only selects: it never
 resumes a Session, toggles a Skill, marks a fork, navigates the tree, opens a
 child, or answers an approval or question, because a click that focuses the
@@ -962,7 +1719,7 @@ counted (`N sessions could not be read`) instead of blanking the page. The
 runtime answers a workspace read only while idle, so a panel opened over a
 running turn says the repository summary waits instead of reporting a failure.
 Surfaces that only read (`/status`, `/mcp`, `/agents`, `/tree`, `/skills`,
-`/view-plan`, `/statusline`, `/theme`) stay reachable while a turn runs. The
+`/view-plan`, `/todos`, `/statusline`, `/theme`) stay reachable while a turn runs. The
 actions inside them that would change the runtime that turn owns — switching a
 tree node, toggling a Skill, cancelling a child run, arming a direct Agent —
 wait for the turn to finish and say so, and `/plan`, `/mode`, `/permissions`,
@@ -995,12 +1752,12 @@ alternate screen unless Zellij or tmux control mode restricts it, `always` force
 it, `never` draws the layout in the main buffer). `mouse = true` (the default)
 captures the mouse in fullscreen so a wheel notch can scroll the viewport and a
 left click can move the selection on a full-area list (`/resume`, `/skills`,
-`/mcp`, `/tree`, `/agents` and its Runs/Library tabs) — a click selects a row and
+`/mcp`, `/tree`, `/agents` and its Runs/Agents tabs) — a click selects a row and
 activates nothing, and motion events are ignored, so the pointer never repaints a
 frame by hovering. Text is selected in the viewport itself: drag over the
 conversation and the addressed rows go to the clipboard through an OSC 52 request
 only — a drag is a transient reading gesture, so it never writes the fallback
-file that `Ctrl+X`, `/copy` and `/export` use — and the reserved band under the
+file that `Ctrl+Y`, `/copy` and `/export` use — and the reserved band under the
 transcript confirms it with `copied 3 lines`. A confirmed copy clears the
 highlight; a copy that could not be made keeps the selection and reports why.
 `Esc` clears the selection too. Rows are copied as they are painted, so a
@@ -1017,6 +1774,24 @@ scrollable after quitting (use `Ctrl+O` or `/export` to get the conversation bac
 otherwise). Neither
 mode ever clears the terminal's scrollback, and both restore terminal state before
 the session is released.
+
+The composer scrolls its own draft. When the draft is taller than the box — more
+lines than rows, or one line that soft-wraps past it — a wheel notch over the
+composer moves the draft instead of the conversation. A draft that fits leaves the
+notch to the transcript, so pointing at a one-line input never stops the
+conversation from scrolling. `Ctrl+A` selects the whole draft: typing or pasting
+replaces it, `Backspace`/`Delete` clears it, and `Esc` keeps the draft and drops
+the selection. `Home` and `Ctrl+E` still move within a line. `Ctrl+Y` copies the
+newest assistant reply.
+
+`Ctrl+X` (or `Ctrl+?`, or the `/help` command) opens the Help panel, a full-area
+route like `/status`: two pages, `Shortcuts` and `Commands`, switched with
+`Tab`/`←`/`→`, scrolled with `↑`/`↓`, `PgUp`/`PgDn` or the wheel, and closed with
+`Esc`. The Shortcuts page is generated from the binding table, so every key the
+ready view answers to is listed under the context it works in, followed by what
+the draft and the conversation answer to — including which surface owns the
+conversation and the modifier that selects text while the mouse is captured. The
+Commands page lists the Composer's `/` commands.
 
 Between the activity line and the composer box the frame reserves one blank row:
 the reserved band. It stays blank while there is nothing to say, and it carries
@@ -1060,7 +1835,7 @@ mode hands history to the terminal and never renders reasoning, and `/copy` and
 `/export` never include reasoning text.
 
 Copy and export follow the same rule: the session owns the text, and the terminal
-is only one way to get it out. `Ctrl+X` copies the newest assistant reply, and
+is only one way to get it out. `Ctrl+Y` copies the newest assistant reply, and
 `/copy [n] [path]` copies the nth-latest reply (`1` is the newest, which includes
 a reply that is still streaming). A copy with no path is sent to the clipboard as
 an OSC 52 request **and** written to a fallback file, because OSC 52 delivery
@@ -1075,8 +1850,8 @@ resolves inside the workspace; the default destination lives in the Pips home
 directory. Both write through an atomic replace and report the resolved path on
 the status line for a few seconds. The exported document is the conversation the
 session is holding — the same document in both presentation modes, without the
-`/help`- and `/status`-style notices — so a session whose older history has not
-been paged in yet exports what has been loaded.
+startup banner or the inspection notices — so a session whose older history has
+not been paged in yet exports what has been loaded.
 
 Searching the conversation is the session's job in the same way. `Ctrl+F` (or
 `/find [query]`) opens a find box in the composer's band: typing filters live, the
@@ -1093,7 +1868,7 @@ subagent call, whichever the newest entry is — scrolls with the wheel exactly 
 its keys: one notch moves it three rows (one under a multiplexer), and it stops at
 its own first and last row. The wheel also works on every other list surface, and
 there it does what that surface's own scrolling keys do: `/agents` (Runs and
-Library) and the non-inline `/team` stages scroll their viewport and leave the
+Agents) and the non-inline `/team` stages scroll their viewport and leave the
 selection where it is, while `/tree`, `/resume`, `/skills`, `/mcp` and the
 dropdowns above the composer (`/model`, `/theme`, `/permissions`, the command and
 file pickers) move their selection, because for those lists the selection *is* the
@@ -1101,6 +1876,73 @@ scroll position. A selection list therefore wraps with the wheel exactly where i
 wraps with ↑/↓, and a picker never moves the conversation underneath it. The
 `/agents` hint line names the scroll inputs, and a picker's or panel's key hints
 stay authoritative for everything else.
+
+The tasks pane is the compact strip at the bottom of the frame, below the status
+line, that shows what the session is running. It groups rows into `Workflows`,
+`Subagents`, `Tasks`, and `Watchers` in that order with running rows first, and
+it opens itself when a child subagent starts and closes when the last one stops.
+Three groups have rows in this release: `Subagents` projects the session's
+children, `Tasks` projects its one-shot background commands, and `Watchers`
+projects its monitors. The `todo_write` checklist is not execution work, so it
+does not appear here: the status line's `task_progress` item shows
+`Todo completed/total` while work remains, then hides when every step is
+terminal. `Ctrl+P` or `/todos` (aliases `/plan-checklist` and `/checklist`)
+opens the whole checklist on the shared detail page. The page keeps
+the todo list's own order and includes finished steps the status line only counts.
+`Ctrl+B` is the pane's visibility switch — the first press reveals and focuses
+it, turning the finished rows on when nothing is running, and the second press
+hides it and gives the keys back to the composer. `↑`/`↓` or `j`/`k` move the
+selection, `Ctrl+H` shows what already ran — a stopped child, command, or monitor
+— revealing and focusing the pane for it and putting it away again on the second
+press, whether the keys are with the conversation or with the pane (a terminal
+profile that sends Ctrl+H as `Backspace` reaches the same toggle while the pane
+owns the keys), `x` stops the selected running child, command, or monitor,
+`Enter` (or `Ctrl+F` while the pane is focused) opens the selected row — a
+child's transcript or a background task's page — `←`/`→` collapse or expand every
+section, and `Tab` or `Esc` releases focus while leaving the pane visible. The
+wheel over the pane moves its selection the way the pane's own `↑`/`↓` do, so the
+rows the cap hides stay reachable, and a notch anywhere else still reads the
+conversation. A child row paints a state glyph, the task, the elapsed time, the
+child's live activity and model, and the `[✗]` and `[↗]` controls; a command row
+paints the `Command` tag under `Tasks`; a monitor row paints the `Monitor` tag
+under `Watchers`; both paint the description or command, the running state, and
+their own elapsed time with the same two controls. The controls are clickable
+wherever the frame reports mouse events, and a click on a row's body opens the
+same page its `[↗]` control opens; a click on a section header still collapses
+it.
+
+The pane is a compact strip: it paints at most six rows and never more than 30% of
+the frame, so the conversation keeps most of its rows, and a section with more rows
+than its share ends with `… +N more` and scrolls with the selection. A pane with
+nothing to list paints nothing at all — there is no empty-state note — and it gives
+the frame's keys back to the composer, so a keystroke after the last child stops
+belongs to what you are typing. Because the pane is hidden on a short frame (under
+12 rows) and closes itself when the last row stops, the status line also carries a
+count-led ` still running` cue while the session is idle with a child, a
+backgrounded command, or a watch still live — for example
+`1 command · 1 monitor · 1 subagent still running` — so running work is never
+invisible.
+
+A spawn appears in the parent transcript as one lifecycle line: `Subagent
+running: "…"` while a foreground child works, `Subagent started: "…"` for a
+background child, and `Subagent completed in …: "…"` (or `failed in …` /
+`cancelled in …`) once it stops. A foreground child's line stays in the live tail
+and commits once in its terminal form; a background child commits its opening line
+straight away and gets a separate terminal line when it finishes.
+
+`Ctrl+T` opens the newest child's transcript. A child page is the conversation's
+own container rather than a window: the child's blocks run the full width through
+the same renderer and the same options the conversation uses, so a Tool result
+collapses to its one-line row here exactly as it does there, and the pinned footer
+carries a separator and one row naming the child's state, identity, task, model,
+live activity and elapsed time, then its keys. There is no border and no close
+control painted on the page, and no composer. The page follows the child's newest
+row: it opens on the tail, keeps the tail visible while new content arrives, and
+`↑`/`↓`, `PgUp`/`PgDn`, the wheel or `Home` release it — `End` returns to the tail
+and resumes following. `Esc` closes it back to the conversation — the footer says
+so — and `q` and `Ctrl+T` do the same; `Ctrl+C` cancels the child rather than the
+conversation. The footer drops metadata from the right as the terminal narrows, so
+the identity, the state and the way out survive a narrow frame.
 
 `/statusline` keeps the existing picker interactions: toggle and reorder items,
 preview the result, press Enter to save, or press Esc to cancel. `/theme` and
@@ -1228,7 +2070,7 @@ server behaves the same wherever it is declared:
 | `type` | all | `stdio`, `streamable-http` (alias `http`). Omitted means `stdio` when `command` is set. `sse` is reported as unsupported. |
 | `command`, `args`, `env` | stdio | One executable token (bare name found on `PATH`, or a clean absolute path; symlinks run their target), its arguments, and variables added to the sanitized child environment. No shell is used. |
 | `url`, `headers` | streamable-http | HTTPS endpoint (plain HTTP only for `localhost`/loopback) and headers sent only to that origin. |
-| `connect_timeout` | all | Connect-plus-list budget, Go duration, default `10s`, at most `1m`. |
+| `connect_timeout` | all | Connect and list budget, Go duration, default `10s`, at most `1m`. A transient connect failure is retried inside this budget. |
 | `visibility` | all | `ambient` (default) or `agent_private` (see custom Agents above). |
 
 Server IDs derive from the `mcpServers` names (lowercase, other characters
@@ -1243,7 +2085,7 @@ the Agent Plugins specification forbids secrets and expansion there. If the
 variable is unset or empty, only that server fails with
 `credential_unavailable`, naming the variable but never a value. Fingerprints,
 `/mcp`, diagnostics, and logs only ever contain the `${env:NAME}` reference, so
-rotating a secret does not invalidate a project approval.
+rotating a secret does not change the server definition or a user-level deny.
 
 An invalid entry, an unsupported transport, or a second name that derives the
 same ID is skipped with one `integration.diagnostic`; the other servers still
@@ -1254,8 +2096,10 @@ configuration files do. A copied `{"mcpServers": ...}` file only needs the
 
 The previous `pips.mcp/v1alpha1` format (`"servers": [{"id": ..., "type":
 "streamable_http" | "stdio", ...}]`, absolute commands, no headers or env)
-is still read with its original rules. Project servers still need a matching
-project/user permission record before they connect.
+is still read with its original rules. A project server is enabled once the
+workspace is trusted; there is no second per-server approval. A user-store
+deny for the server ID disables it, and `.pips/permissions.toml` is retained
+only as an optional local record for `Decide`.
 
 Every server, native, plugin, or ACP-supplied, uses the same MCP client. It
 offers the `2026-07-28` protocol revision and falls back to `2025-11-25` or
@@ -1272,22 +2116,44 @@ server that fails at transport, connect, or list time disables only itself and
 reports the same safe `integration.diagnostic` as before.
 
 The first interaction after open or `/reload` is the safe boundary that freezes
-the tool catalog: if any server is still connecting when you send a prompt, the
-interaction waits for those servers before contacting the model, bounded by
-each server's own `connect_timeout` (connect plus list, at most one minute
-each, running in parallel). Cancelling the prompt cancels the wait. Later
-interactions never wait because the set has already settled.
+the tool catalog. It gives pending connections a **2-second startup grace**;
+cancel the prompt to stop waiting sooner. A server still connecting after the
+grace keeps working in the background and joins a later interaction. This keeps
+a slow proxy or a cold `npx` server from delaying the first model request for
+the full connect budget.
+
+A handshake that fails on the path to the server (TLS EOF, connection reset,
+timeout, temporary DNS) is retried up to three times on a fresh transport
+inside the same `connect_timeout`; authentication, protocol, and configuration
+failures are not retried. A server that still fails transiently is retried once
+at a later interaction after a 30-second cooldown, so a proxy blip does not
+disable it until restart.
+
+A connected session is watched. If its transport closes, its tools leave the
+snapshot and Pips rebuilds the session on a bounded ladder (immediate, 1s, 4s,
+16s, then 30s, eight attempts). A tool call that observes a reset or refused
+transport starts the same recovery. Exhaustion reports `recover_failed`; the
+server stays retryable at a later interaction. `/reload` remains the full
+configuration reload.
 
 `/mcp` opens a read-only panel listing every configured server with its state
-(`connected`, `connecting`, `failed`, `pending` for a project server awaiting
-approval, or `disabled` for a denied one), scope, transport, visibility, tool
-count, and — for a failure — the stage and diagnostic code. The selected row
+(`connected`, `connecting`, `failed`, or `disabled` for a user-level deny),
+scope, transport, visibility, tool count, and — for a failure — the stage and
+diagnostic code. The selected row
 expands to the connection duration and the first tool names; `Ctrl+D` shows
 the complete tool-name list or the failure detail; typing filters by ID,
 state, scope, transport, or tool name; `Esc` restores your draft. The panel
 refreshes itself while a server is still connecting and works while a request
 is running. It never shows endpoints, commands, headers, or environment values.
-Reconnecting still goes through `/reload`.
+
+### Diagnosing MCP servers
+
+`pips mcp doctor [server] [--json]` loads the same user/project/plugin
+definitions and user deny records as the Runtime, then probes each enabled
+server once. It reports `connected` with the tool count, `connecting`,
+`failed` with the safe message and stage/code, or `disabled` for a user-level
+deny. `--json` emits the same credential-free report for scripts. The command
+never prints endpoints, headers, commands, or environment values.
 
 ## Output
 

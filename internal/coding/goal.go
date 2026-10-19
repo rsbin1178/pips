@@ -18,8 +18,14 @@ var (
 	ErrGoalIncomplete = errors.New("coding goal: completion is not verified")
 )
 
+// maxGoalReferenceBytes bounds one verifier evidence citation in a projected
+// Goal state. The verifier renders a citation per refuter, so the bound matches
+// the reason bound rather than the shorter event-id bound.
+const maxGoalReferenceBytes = 4096
+
 // GoalRequest is a session-scoped completion condition and optional cumulative
-// observed token allowance. Zero MaxTokens leaves the 25-Work bound in force.
+// observed token allowance. The Goal carries no work-segment cap: zero MaxTokens
+// leaves it bounded by the no-progress guard and its own declarations.
 type GoalRequest struct {
 	Condition string
 	MaxTokens int
@@ -133,7 +139,10 @@ func validateGoalState(state GoalState) error {
 		}
 	}
 	for _, reference := range state.References {
-		if validateEventID("goal reference", reference, true) != nil {
+		// A reference is a verifier evidence citation (a record id or a
+		// path:line), not necessarily an opaque event id, so it is bounded text
+		// rather than an identifier.
+		if !validBoundedText(reference, maxGoalReferenceBytes, false) {
 			return invalidEvent("invalid Goal reference")
 		}
 	}

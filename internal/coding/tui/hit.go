@@ -27,6 +27,12 @@ type frameHitMap struct {
 	// row, so a click there can be answered without re-deciding the question
 	// against a scroll position the reader has already left.
 	turnIndicator bool
+	// composerTop is the frame row the Composer band started at, or -1 when the
+	// height clamp pushed it off the frame, and composerRows is how many rows it
+	// owns. A wheel notch that lands there belongs to the draft the Composer is
+	// showing rather than to the transcript behind it.
+	composerTop  int
+	composerRows int
 }
 
 // frameRowOf reports the frame row the first line of the band at index was
@@ -111,6 +117,12 @@ func (m *Model) handleMouse(message tea.MouseMsg) tea.Cmd {
 
 	if !m.frameHit.painted {
 		return nil
+	}
+
+	// The tasks pane owns the pointer rows it painted: it is a control surface,
+	// not part of the transcript's selection gesture.
+	if command, handled := m.tasksPaneMouse(message); handled {
+		return command
 	}
 
 	// The turn indicator and the reserved band are pointer targets of their own and

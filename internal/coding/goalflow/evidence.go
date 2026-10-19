@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/rsbin1178/pips/agent/goal"
@@ -56,7 +57,10 @@ type Evidence struct {
 	Truncated     bool     `json:"truncated,omitempty"`
 }
 
-// State is the Coding wrapper around the unchanged SDK Goal State V1.
+// State is the Coding wrapper around the unchanged SDK Goal State V1. Digest and
+// EmptyRounds are retained only so a state written before Phase AD still decodes:
+// the three-unchanged-evidence guard they fed is gone, and no decision reads
+// either of them. The verification fields are additive.
 type State struct {
 	Version     int      `json:"version"`
 	Goal        ai.JSON  `json:"goal"`
@@ -65,6 +69,20 @@ type State struct {
 	EmptyRounds int      `json:"empty_rounds"`
 	Gaps        []string `json:"gaps,omitempty"`
 	References  []string `json:"references,omitempty"`
+	// VerifyRuns counts the Goal's verification runs, capped by
+	// goalVerifierMaxRuns and reset by an explicit resume.
+	VerifyRuns int `json:"verify_runs,omitempty"`
+	// GapStalls counts consecutive not-achieved verifications whose aggregate gap
+	// digest was unchanged; GapDigest is that digest.
+	GapStalls int    `json:"gap_stalls,omitempty"`
+	GapDigest string `json:"gap_digest,omitempty"`
+	// VerifyGaps is the last verification's aggregate gaps, rendered into the next
+	// panel's PRIOR_GAPS block. It is additive, so an older state decodes.
+	VerifyGaps []string `json:"verify_gaps,omitempty"`
+	// Skeptic0Session is the first skeptic's child session id after a spawned
+	// panel larger than one ran, so the next verification resumes it instead of
+	// judging cold. It is additive, so an older state decodes.
+	Skeptic0Session string `json:"skeptic0_session,omitempty"`
 }
 
 // Prepare wraps the unchanged SDK Goal State V1.
@@ -84,7 +102,9 @@ func Decode(data ai.JSON) (State, error) {
 		return State{}, err
 	}
 
-	if state.Version != 1 || state.EmptyRounds < 0 || len(state.Gaps) > MaxGaps {
+	if state.Version != 1 || state.EmptyRounds < 0 || len(state.Gaps) > MaxGaps ||
+		len(state.VerifyGaps) > MaxGaps || state.VerifyRuns < 0 || state.GapStalls < 0 ||
+		!validSkepticSession(state.Skeptic0Session) {
 		return State{}, fmt.Errorf("%w: invalid Coding Goal state", goal.ErrInvalid)
 	}
 
@@ -93,6 +113,33 @@ func Decode(data ai.JSON) (State, error) {
 	}
 
 	return state, nil
+}
+
+// MaxSkepticSessionBytes bounds the resumed child session id the panel stores.
+const MaxSkepticSessionBytes = 128
+
+// validSkepticSession reports whether a stored skeptic session id is a bounded
+// session-name token. It mirrors the session repository's own id rule, so a
+// corrupted state cannot smuggle a path or a control sequence into a resume.
+func validSkepticSession(id string) bool {
+	if id == "" {
+		return true
+	}
+
+	if len(id) > MaxSkepticSessionBytes || !utf8.ValidString(id) || id == "." || id == ".." || id[0] == '.' {
+		return false
+	}
+
+	for _, character := range id {
+		if unicode.IsLetter(character) || unicode.IsDigit(character) ||
+			character == '-' || character == '_' || character == '.' {
+			continue
+		}
+
+		return false
+	}
+
+	return true
 }
 
 // Encode enforces the persisted policy payload bound.

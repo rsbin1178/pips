@@ -19,11 +19,13 @@ import (
 	"github.com/rsbin1178/pips/agent/team"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
 )
@@ -83,6 +85,8 @@ const (
 	EventSubagentFailed           EventType = "subagent.failed"
 	EventSubagentCanceled         EventType = "subagent.canceled"
 	EventSubagentInterrupted      EventType = "subagent.interrupted"
+	EventBackgroundStarted        EventType = "background.started"
+	EventBackgroundCompleted      EventType = "background.completed"
 	EventTeamLifecycle            EventType = "team.lifecycle"
 	EventTeamControlLifecycle     EventType = "team.control"
 	EventTeamIntegrationLifecycle EventType = "team.integration"
@@ -170,12 +174,17 @@ type SessionClosed struct {
 	Reason SessionCloseReason `json:"reason"`
 }
 
-// SessionTreeChanged replaces the reducer's durable bounded tree projection.
+// SessionTreeChanged replaces the reducer's bounded live tree/transcript
+// projection. It is live-only: the transcript is authoritative, so the event
+// is never written to the durable journal.
 type SessionTreeChanged struct {
 	Tree          SessionTree       `json:"tree"`
 	Transcript    ai.Messages       `json:"transcript"`
 	ContextTokens int               `json:"context_tokens"`
 	Tasks         tasklist.Snapshot `json:"tasks"`
+	// Compaction carries the boundary the bounded transcript belongs to. A zero
+	// value means the active branch has no full checkpoint.
+	Compaction CompactionState `json:"compaction,omitzero"`
 }
 
 // SessionNavigated records one successful same-file leaf change.
@@ -394,6 +403,23 @@ type SubagentLifecycle struct {
 	ToolCalls           int                      `json:"tool_calls"`
 	Usage               TokenUsage               `json:"usage"`
 	DurationMillis      int64                    `json:"duration_ms"`
+}
+
+// BackgroundTaskLifecycle is one registered background task's compact
+// projection. It is what the tasks pane lists under Watchers: the id, the kind,
+// the description-preferred text, and the running state. A task's output is
+// never part of it — a monitor's stdout reaches the model as events, not as
+// pane content.
+type BackgroundTaskLifecycle struct {
+	ID          string    `json:"id"`
+	Kind        string    `json:"kind"`
+	Description string    `json:"description,omitempty"`
+	Command     string    `json:"command,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitzero"`
+	EndedAt     time.Time `json:"ended_at,omitzero"`
+	Completed   bool      `json:"completed"`
+	ExitCode    int       `json:"exit_code,omitempty"`
+	Signal      string    `json:"signal,omitempty"`
 }
 
 // TeamLifecycleStatus is the compact parent-visible state of one Team or one
@@ -639,6 +665,7 @@ func (ToolStarted) eventPayload()              {}
 func (ToolUpdated) eventPayload()              {}
 func (ToolCompleted) eventPayload()            {}
 func (SubagentLifecycle) eventPayload()        {}
+func (BackgroundTaskLifecycle) eventPayload()  {}
 func (TeamLifecycle) eventPayload()            {}
 func (TeamControlLifecycle) eventPayload()     {}
 func (TeamIntegrationLifecycle) eventPayload() {}
@@ -698,7 +725,8 @@ func validateEnvelopeIDs(event Event) error {
 	case EventSessionOpened, EventSessionClosed, EventSessionTreeChanged,
 		EventSessionNavigated, EventSessionForked, EventCompactionStarted,
 		EventCompactionCompleted, EventModeChanged, EventTeamLifecycle,
-		EventTeamControlLifecycle, EventTeamIntegrationLifecycle, EventGoalChanged:
+		EventTeamControlLifecycle, EventTeamIntegrationLifecycle, EventGoalChanged,
+		EventBackgroundStarted, EventBackgroundCompleted:
 		if event.InteractionID != "" || event.RunID != "" {
 			return invalidEvent("session event has interaction or run id")
 		}
@@ -934,6 +962,14 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		if err := validateGoalChangedPayload(value); err != nil {
 			return payloadInvalid(eventType, payload, err)
 		}
+	case BackgroundTaskLifecycle:
+		if eventType != EventBackgroundStarted && eventType != EventBackgroundCompleted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateBackgroundTaskLifecycle(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
+		}
 	case TeamLifecycle:
 		if eventType != EventTeamLifecycle {
 			return payloadMismatch(eventType, payload)
@@ -1118,6 +1154,13 @@ func validateSessionTreeChangedPayload(value SessionTreeChanged) error {
 		return errors.New("invalid task snapshot")
 	}
 
+	if err := validateCompactionState(value.Compaction); err != nil {
+		return err
+	}
+	if value.Compaction.BoundaryIndex > len(value.Transcript) {
+		return errors.New("compaction boundary is outside the transcript")
+	}
+
 	for index, message := range value.Transcript {
 		if validateMessage(message) != nil {
 			return fmt.Errorf("invalid transcript message %d", index)
@@ -1154,6 +1197,32 @@ func validateSessionForkedPayload(value SessionForked) error {
 
 	if value.SourceSessionID == value.TargetSessionID {
 		return errors.New("fork source and target sessions are equal")
+	}
+
+	return nil
+}
+
+// validateCompactionState checks the completed checkpoint a tree snapshot
+// carries. An empty value is legal: the active branch has no full checkpoint.
+func validateCompactionState(value CompactionState) error {
+	if value.Active {
+		return errors.New("tree snapshot carries an active compaction")
+	}
+	if value.BoundaryIndex < 0 || value.TokensBefore < 0 || value.TokensAfter < 0 ||
+		value.DurationMillis < 0 {
+		return errors.New("invalid compaction state bounds")
+	}
+	if value.Mode != "" && !validCompactionMode(value.Mode) {
+		return errors.New("invalid compaction mode")
+	}
+	if validateOptionalID(value.CheckpointID) != nil || validateOptionalID(value.FirstKeptID) != nil {
+		return errors.New("invalid compaction identity")
+	}
+	if value.Strategy != "" && value.Strategy != CompactionStrategyFull {
+		return errors.New("invalid compaction strategy")
+	}
+	if validateCompactionPreview(value.Preview, false) != nil {
+		return errors.New("invalid compaction preview")
 	}
 
 	return nil
@@ -1669,6 +1738,34 @@ func validDigest(value string) bool {
 	return err == nil
 }
 
+// validateBackgroundTaskLifecycle bounds one background task projection. The
+// pane needs the identity, the description-preferred text, and the running
+// state; output content is not part of the payload at all.
+func validateBackgroundTaskLifecycle(value BackgroundTaskLifecycle) error {
+	if err := validateEventID("background task id", value.ID, true); err != nil {
+		return err
+	}
+
+	if value.Kind != string(background.KindMonitor) && value.Kind != string(background.KindShell) {
+		return errors.New("invalid background task kind")
+	}
+
+	if !validBoundedText(value.Description, maxEventTextBytes, true) ||
+		!validBoundedText(value.Command, maxEventTextBytes, true) {
+		return errors.New("invalid background task text")
+	}
+
+	if value.Completed != !value.EndedAt.IsZero() {
+		return errors.New("invalid background task terminal state")
+	}
+
+	if value.Signal != "" && !validIdentifierText(value.Signal, maxEventIDBytes, false) {
+		return errors.New("invalid background task signal")
+	}
+
+	return nil
+}
+
 func validateSubagentLifecycle(eventType EventType, value SubagentLifecycle) error {
 	if err := validateSubagentLifecycleFields(value); err != nil {
 		return err
@@ -2084,19 +2181,29 @@ func validMediaSource(source ai.MediaSource) bool {
 	if len(source.Data) > maxEventTextBytes ||
 		!validBoundedText(source.ID, maxEventTextBytes, true) ||
 		!validBoundedText(source.URL, maxEventTextBytes, true) ||
-		!validIdentifierText(source.MIMEType, maxEventIDBytes, true) {
+		!validIdentifierText(source.MIMEType, maxEventIDBytes, true) ||
+		source.Width < 0 || source.Height < 0 {
 		return false
 	}
 
 	set := 0
 
-	for _, present := range []bool{source.ID != "", source.URL != "", len(source.Data) > 0} {
+	for _, present := range []bool{source.ID != "", source.URL != "", len(source.Data) > 0, source.Path != ""} {
 		if present {
 			set++
 		}
 	}
+	if set != 1 {
+		return false
+	}
+	if len(source.Data) > 0 && source.MIMEType == "" {
+		return false
+	}
+	if source.Path != "" && !session.ValidMediaReference(source.Path, source.Digest) {
+		return false
+	}
 
-	return set == 1 && (len(source.Data) == 0 || source.MIMEType != "")
+	return true
 }
 
 //nolint:gocyclo // StreamEvent variants share bounded fields but have distinct required fields.

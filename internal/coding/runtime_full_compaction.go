@@ -250,8 +250,9 @@ func (r *Runtime) executeFullCompaction(
 	postHookErr := r.runPostCompact(ctx, mode, preview.EstimatedTokens, after, durationMS, emitter)
 
 	// A compacted conversation lost the plan context, so the next reminder is
-	// the full variant again.
+	// the full variant again and the todo nudge's count starts over with it.
 	r.resetPlanReminderCount()
+	r.resetTodoNudgeCounters()
 
 	startOutcome, startErr := r.runSessionStartSource(ctx, "compact", emitter)
 	if emitErr := emitter.emit("", "", EventCompactionCompleted, CompactionCompleted{

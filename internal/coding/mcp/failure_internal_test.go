@@ -5,8 +5,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"syscall"
 	"testing"
 	"time"
 
@@ -50,6 +52,20 @@ func TestFailureCauseClassifiesOnlyByErrorType(t *testing.T) {
 			want: "the TLS handshake failed",
 		},
 		{
+			name: "tls eof", err: fmt.Errorf("post: %w", io.EOF), server: remote,
+			want: "the connection was reset; check the proxy or network",
+		},
+		{
+			name:   "connection reset",
+			err:    fmt.Errorf("post: %w", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}),
+			server: remote,
+			want:   "the connection was reset; check the proxy or network",
+		},
+		{
+			name: "broken pipe", err: fmt.Errorf("post: %w", syscall.EPIPE), server: remote,
+			want: "the connection was reset; check the proxy or network",
+		},
+		{
 			name: "forbidden", err: errors.New("Forbidden"), server: remote, resource: rejected,
 			want: "the server rejected the credentials (HTTP 403)",
 		},
@@ -67,4 +83,32 @@ func TestFailureCauseClassifiesOnlyByErrorType(t *testing.T) {
 
 	assert.Equal(t, "base", failureMessage("base", errors.New("secret detail"), remote, nil))
 	assert.Equal(t, "base: timed out after 1.5s", failureMessage("base", context.DeadlineExceeded, local, nil))
+}
+
+func TestIsTransientConnectError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", want: false},
+		{name: "eof", err: io.EOF, want: true},
+		{name: "unexpected eof", err: io.ErrUnexpectedEOF, want: true},
+		{name: "reset", err: &net.OpError{Op: "read", Err: syscall.ECONNRESET}, want: true},
+		{name: "broken pipe", err: syscall.EPIPE, want: true},
+		{name: "deadline", err: context.DeadlineExceeded, want: true},
+		{name: "cancelled", err: context.Canceled, want: false},
+		{name: "permanent", err: errors.New("sentinel"), want: false},
+		{name: "tls certificate", err: x509.UnknownAuthorityError{}, want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, test.want, isTransientConnectError(test.err))
+		})
+	}
 }

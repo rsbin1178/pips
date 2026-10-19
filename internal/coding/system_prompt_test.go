@@ -35,7 +35,7 @@ func TestBuildCodingSystemPromptComposesDeterministicLayers(t *testing.T) {
 		Approval:         "on-request",
 		WorkspaceTrusted: true,
 		Mode:             ModeAgent,
-		ToolNames:        []string{"pips_tool_search", "read", "read", "spawn_agent"},
+		ToolNames:        []string{"pips_tool_search", "read", "read", "spawn_subagent"},
 		ToolSearchName:   "pips_tool_search",
 		ToolSearchSources: []catalog.SourceSummary{
 			{Kind: catalog.SourceMCP, ID: "github", Tools: 12},
@@ -50,8 +50,8 @@ func TestBuildCodingSystemPromptComposesDeterministicLayers(t *testing.T) {
 	assert.Contains(t, prompt, `"visible_tools": [`+"\n"+`    "pips_tool_search",`+"\n"+`    "read",`)
 	assert.Equal(t, 1, strings.Count(prompt, `"read"`))
 	assert.Contains(t, prompt, "Use pips_tool_search to discover deferred tools: mcp/github (12), mcp/slack (4). Then call the discovered tool directly.")
-	assert.Contains(t, prompt, "Use spawn_agent for independent background work")
-	assert.NotContains(t, prompt, "Use run_subagent for one isolated read-only specialist result")
+	assert.Contains(t, prompt, "Use spawn_subagent to delegate one independent task")
+	assert.NotContains(t, prompt, "Use spawn_agent for independent background work")
 	assert.Less(t, strings.Index(prompt, "# Runtime environment"), strings.Index(prompt, "# Tool guidance"))
 	assert.Less(t, strings.Index(prompt, "# Tool guidance"), strings.Index(prompt, "# Project instructions"))
 }
@@ -205,13 +205,14 @@ func TestBuildCodingSystemPromptGuidesTaskProgressOnlyWhenAvailable(t *testing.T
 	}
 	prompt, err := buildCodingSystemPrompt(options)
 	require.NoError(t, err)
-	assert.Contains(t, prompt, "Use update_plan for non-trivial multi-step work")
-	assert.Contains(t, prompt, "exactly one step in_progress")
+	assert.Contains(t, prompt, "Use "+tasklist.ToolName+" for non-trivial multi-step work")
+	assert.Contains(t, prompt, "Prefer one step in_progress when work is serial")
+	assert.Contains(t, prompt, "Send clear true with no items")
 
 	options.ToolNames = []string{"read"}
 	prompt, err = buildCodingSystemPrompt(options)
 	require.NoError(t, err)
-	assert.NotContains(t, prompt, "Use update_plan")
+	assert.NotContains(t, prompt, "Use "+tasklist.ToolName)
 }
 
 func TestRuntimeInjectsMainSystemPromptAndProjectInstructions(t *testing.T) {
@@ -244,9 +245,8 @@ func TestRuntimeInjectsMainSystemPromptAndProjectInstructions(t *testing.T) {
 	assert.Contains(t, system, `"approval": "on-request"`)
 	assert.Contains(t, system, `"workspace_trusted": false`)
 	assert.Contains(t, system, `"apply_patch"`)
-	assert.Contains(t, system, `"run_subagent"`)
-	assert.Contains(t, system, `"spawn_agent"`)
-	assert.Contains(t, system, `"update_plan"`)
+	assert.Contains(t, system, `"spawn_subagent"`)
+	assert.Contains(t, system, `"todo_write"`)
 }
 
 func TestRuntimeExplicitUserSkillIsInteractionScoped(t *testing.T) {

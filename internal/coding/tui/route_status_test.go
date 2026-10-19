@@ -20,24 +20,7 @@ import (
 // statusPageText renders one status panel page the way its rows read, so a test
 // can assert the disclosed facts without composing a whole view.
 func statusPageText(model *Model, tab statusPanelTab) string {
-	lines := make([]string, 0, 64)
-	for _, line := range model.statusPageLines(tab) {
-		switch line.kind {
-		case statusLineHeading:
-			lines = append(lines, line.text)
-		case statusLineField:
-			lines = append(lines, line.label+": "+line.value)
-		case statusLinePair:
-			lines = append(lines,
-				line.label+": "+line.value,
-				line.label2+": "+line.value2,
-			)
-		case statusLineText:
-			lines = append(lines, line.text)
-		}
-	}
-
-	return strings.Join(lines, "\n")
+	return pageLinesText(model.statusPageLines(tab))
 }
 
 func TestStatusPanelShowsTheRuntimeReport(t *testing.T) {

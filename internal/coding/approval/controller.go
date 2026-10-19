@@ -64,14 +64,7 @@ func New(
 }
 
 type controllerExecutor interface {
-	Prepare(context.Context, execution.Operation, execution.Authorization) (preparedExecution, error)
-}
-
-// preparedExecution owns one single-use execution plan. Run consumes and
-// closes it; Close abandons it before Run.
-type preparedExecution interface {
-	Run(context.Context, execution.Sink) (execution.Result, error)
-	Close() error
+	Prepare(context.Context, execution.Operation, execution.Authorization) (PreparedExecution, error)
 }
 
 type executorAdapter struct {
@@ -82,7 +75,7 @@ func (a executorAdapter) Prepare(
 	ctx context.Context,
 	operation execution.Operation,
 	authorization execution.Authorization,
-) (preparedExecution, error) {
+) (PreparedExecution, error) {
 	plan, err := a.executor.Plan(ctx, operation, authorization)
 	if err != nil {
 		return nil, err
@@ -362,10 +355,34 @@ func (c *Controller) executeDirect(
 		return nil, errors.Join(err, prepared.Close())
 	}
 
+	// A detached handler owns the run: the Tool result is its receipt, and the
+	// process keeps going after this call returns. The lifecycle stays
+	// started-without-result until the harness persists the receipt, exactly as
+	// it does for a synchronous call, so the volatile marker covers that window.
+	// A handler that decides per call takes the synchronous path below when it
+	// answers that this call does not background.
+	if detached, ok := handler.(DetachedHandler); ok && detaches(handler, call) {
+		c.volatile[lifecycle.receipt.RequestID] = struct{}{}
+
+		return detached.Detach(ctx, call, prepared)
+	}
+
 	result, runErr := prepared.Run(ctx, &agentProgressSink{})
 	c.volatile[lifecycle.receipt.RequestID] = struct{}{}
 
 	return handler.Render(result, runErr)
+}
+
+// detaches reports whether this call takes the detached path. A handler that
+// does not implement DetachDecider always detaches; a handler that does decides
+// per call, and the call it refuses keeps the synchronous path's own handling.
+func detaches(handler Handler, call agent.ToolCall) bool {
+	decider, ok := handler.(DetachDecider)
+	if !ok {
+		return true
+	}
+
+	return decider.Detaches(call)
 }
 
 func (c *Controller) issuePermit(call agent.ToolCall, fingerprint execution.Fingerprint) bool {

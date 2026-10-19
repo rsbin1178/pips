@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 
 	term "github.com/charmbracelet/x/term"
 	"github.com/rsbin1178/pips/internal/coding"
@@ -72,6 +73,7 @@ type Dependencies struct {
 	WorkingDir   func() (string, error)
 	SandboxProbe SandboxProbe
 	SystemProxy  SystemProxyProbe
+	ProxyProbe   ProxyProbe
 	Terminal     TerminalDetector
 	RunTUI       TUIRunner
 	RunSSH       SSHRunner
@@ -80,6 +82,14 @@ type Dependencies struct {
 	OpenACP      ACPControllerOpener
 	RunACP       ACPRunner
 	Environment  []string
+
+	// updateAPIBase, updateDownloadBase, updateOS, and updateArch override the
+	// release source and platform of `pips update`. They exist so tests can
+	// serve a release over httptest instead of reaching the network.
+	updateAPIBase      string
+	updateDownloadBase string
+	updateOS           string
+	updateArch         string
 }
 
 type rootFlags struct {
@@ -91,6 +101,7 @@ type rootFlags struct {
 	toolSearch       bool
 	toolSearchName   string
 	dynamicSubagents bool
+	noSubagents      bool
 	mode             string
 	sandbox          string
 	approval         string
@@ -135,7 +146,8 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	persistent.StringVar(&flags.reasoning, "reasoning", "", "model reasoning level")
 	persistent.BoolVar(&flags.toolSearch, "tool-search", false, "enable deferred tool search")
 	persistent.StringVar(&flags.toolSearchName, "tool-search-name", "", "deferred tool search tool name")
-	persistent.BoolVar(&flags.dynamicSubagents, "dynamic-subagents", false, "enable Alpha custom subagents")
+	persistent.BoolVar(&flags.dynamicSubagents, "dynamic-subagents", true, "enable custom subagents")
+	persistent.BoolVar(&flags.noSubagents, "no-subagents", false, "disable subagents")
 	persistent.StringVar(&flags.mode, "mode", "", "operating mode (agent or plan)")
 	persistent.StringVar(&flags.sandbox, "sandbox", "", "sandbox mode")
 	persistent.StringVar(&flags.approval, "approval", "", "approval mode")
@@ -167,8 +179,10 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 		newSessionCommand(dependencies, flags),
 		newPluginCommand(dependencies),
 		newHooksCommand(dependencies, flags),
+		newMCPCommand(dependencies, flags),
 		newDoctorCommand(dependencies, flags),
 		newVersionCommand(dependencies.Build),
+		newUpdateCommand(dependencies),
 		newCompletionCommand(),
 	)
 
@@ -192,6 +206,10 @@ func defaultProcessDependencies(dependencies Dependencies) Dependencies {
 		dependencies.SystemProxy = systemproxy.Probe
 	}
 
+	if dependencies.ProxyProbe == nil {
+		dependencies.ProxyProbe = nativeProxyProbe
+	}
+
 	if dependencies.Terminal == nil {
 		dependencies.Terminal = detectTerminal
 	}
@@ -206,6 +224,14 @@ func defaultProcessDependencies(dependencies Dependencies) Dependencies {
 
 	if dependencies.Environment == nil {
 		dependencies.Environment = os.Environ()
+	}
+
+	if dependencies.updateOS == "" {
+		dependencies.updateOS = runtime.GOOS
+	}
+
+	if dependencies.updateArch == "" {
+		dependencies.updateArch = runtime.GOARCH
 	}
 
 	return dependencies

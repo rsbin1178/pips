@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/rsbin1178/pips/ai"
@@ -85,7 +86,7 @@ func (m *Manager) walkOwnedDescendants(
 	visited[parentMeta.ID] = struct{}{}
 	defer delete(visited, parentMeta.ID)
 
-	metas, err := m.config.Repository.ListSubagents(ctx, parentMeta.WorkspaceID, parentMeta.ID)
+	metas, err := m.config.Repository.ListSubagents(ctx, parentMeta)
 	if err != nil {
 		return err
 	}
@@ -217,7 +218,6 @@ func (m *Manager) findOwnedSummary(ctx context.Context, childSessionID string) (
 	return ownedSummary{}, fmt.Errorf("%w: child does not belong to current parent", ErrInvalid)
 }
 
-//nolint:nestif // Durable custom and builtin result validation stays beside exact lineage validation.
 func (m *Manager) inspectChild(
 	child *session.Handle,
 	owned bool,
@@ -264,13 +264,15 @@ func (m *Manager) inspectChild(
 			return Detail{}, fmt.Errorf("%w: successful child has no final assistant result", ErrInvalid)
 		}
 
-		if role := selected.summary.Identity.LegacyRole(); role != "" {
-			spec, specErr := specFor(role)
-			if specErr != nil {
-				return Detail{}, specErr
-			}
-			detail.Result, err = spec.decode(text, value.Limits.limits())
-		} else {
+		// The persisted plan decides the contract: a free-text plan keeps the
+		// final answer as text, a legacy builtin plan is reconstructed through
+		// its frozen schema, and any other plan uses its own compiled validator.
+		switch value.Plan.Output.Format {
+		case OutputFormatText:
+			detail.Result, err = textOutputValidator{limits: value.Limits.limits()}.Validate(text)
+		case OutputFormatBuiltin:
+			detail.Result, err = legacyBuiltinResult(value.Plan.Output, value.Limits.limits(), text)
+		default:
 			validator, validatorErr := NewOutputValidator(value.Plan.Output, value.Plan.Limits)
 			if validatorErr != nil {
 				return Detail{}, validatorErr
@@ -283,6 +285,28 @@ func (m *Manager) inspectChild(
 	}
 
 	return cloneDetail(detail), nil
+}
+
+// legacyBuiltinResult reconstructs a pre-unification builtin plan's structured
+// result through its frozen JSON Schema. The retired typed decoder also
+// accepted a plain-text summary, so keep that tolerance for old sessions.
+func legacyBuiltinResult(contract OutputContract, limits Limits, text string) (any, error) {
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		legacy := OutputContract{
+			Format: OutputFormatJSONSchema, Name: contract.Name, Schema: slices.Clone(contract.Schema),
+		}
+		legacy.Digest = digestOutputContract(legacy)
+		validator, err := NewOutputValidator(legacy, limits)
+		if err != nil {
+			return nil, err
+		}
+		if value, err := validator.Validate(trimmed); err == nil {
+			return value, nil
+		}
+	}
+
+	return textOutputValidator{limits: limits}.Validate(trimmed)
 }
 
 func (m *Manager) childHandle(
@@ -301,7 +325,7 @@ func (m *Manager) childHandle(
 	parent := m.config.Parent.Metadata()
 
 	child, err := m.config.Repository.Open(ctx, session.OpenOptions{
-		ID: childSessionID, WorkspaceID: parent.WorkspaceID,
+		ID: childSessionID, WorkspaceID: parent.WorkspaceID, WorkspacePath: parent.WorkspacePath,
 	})
 	if err != nil {
 		return nil, false, err
@@ -327,11 +351,14 @@ func summaryFrom(meta session.Metadata, value record) Summary {
 		ChildSessionID: meta.ID,
 		Ownership:      executionOwnership(value),
 		Delivery:       value.Delivery,
+		Wake:           value.Wake,
 		Identity:       value.Identity,
 		Role:           value.Role,
 		State:          value.State,
 		TaskPreview:    value.TaskPreview,
 		Model:          value.Model,
+		Cwd:            value.Cwd,
+		WorktreePath:   value.WorktreePath,
 		CreatedAt:      meta.CreatedAt,
 		Duration:       time.Duration(value.DurationMillis) * time.Millisecond,
 		Turns:          value.Turns,
@@ -358,7 +385,9 @@ func cloneDetail(value Detail) Detail {
 	value.Activity = cloneActivity(value.Activity)
 	value.Plan = value.Plan.Clone()
 	value.Result = cloneResult(Result{
-		Identity: value.Summary.Identity, Role: value.Summary.Role, Value: value.Result,
+		Identity: value.Summary.Identity, Role: value.Summary.Role,
+		Structured: value.Plan.Output.Format != OutputFormatText,
+		Value:      value.Result,
 	}).Value
 
 	return value

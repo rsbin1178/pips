@@ -24,43 +24,6 @@ type workspaceStatusResultMsg struct {
 	err        error
 }
 
-func (m *Model) printHelp() tea.Cmd {
-	return m.printInspection(
-		"Help",
-		renderActionHelp(defaultActions, m.actionContext())+"\n\n"+
-			"Ctrl+J / Shift+Enter newline\n"+
-			"/goal <condition> [--budget <tokens>] works toward verified completion; /goal status|pause|resume|clear controls it.\n"+
-			"/team [objective] proposes or inspects a Team; recovery, Integration, and cleanup always require review.\n"+
-			"/resume may show a read-only Team recovery badge; Enter resumes only the conversation.\n"+
-			"/copy [n] [path] copies the nth-latest assistant reply (default: the latest) to the clipboard and a fallback file.\n"+
-			"/export [path] writes the loaded conversation as Markdown.\n"+
-			"/find [query] searches the conversation: Enter next match, Shift+Enter previous, Esc closes.\n"+
-			m.historyHelpLine(),
-	)
-}
-
-// historyHelpLine names the surface that owns the conversation, because that
-// ownership differs between the managed viewport and the inline compatibility
-// mode and the help text is the only place a user can read it.
-func (m *Model) historyHelpLine() string {
-	if !m.fullscreen() {
-		return "The terminal owns conversation history: use its wheel or scrollback keys to navigate, " +
-			"and drag normally to select and copy text."
-	}
-
-	line := "This session owns the conversation: the wheel and PgUp/PgDn (or Home/End) scroll it, " +
-		"Ctrl+F searches it, and Ctrl+O hands the whole transcript to the terminal for its own " +
-		"selection and search."
-	if m.mouseReportingEnabled() {
-		// Capturing the mouse takes bare drag-select away, so the modifier that
-		// restores it has to be stated where a user can find it.
-		line += "\nMouse reporting is on, so hold Shift (Option in iTerm2, macOS Terminal and " +
-			"tmux on macOS) while dragging to select text, or set [tui] mouse = false."
-	}
-
-	return line
-}
-
 func (m *Model) loadWorkspaceStatus() tea.Cmd {
 	if m.worktreeLoading {
 		return nil

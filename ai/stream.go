@@ -113,9 +113,8 @@ type StreamEvent struct {
 // failure. It is display metadata: a consumer may render it, ignore it, or
 // store it, and none of that changes the response being assembled.
 //
-// The counters follow the convention the other agent frontends use: Attempt is
-// the retry ordinal — 1 for the first replay — and MaxRetries is the retry
-// budget, so "1/10" reads as the first of at most ten replays.
+// Attempt is the retry ordinal — 1 for the first replay — and MaxRetries is
+// the retry budget, so "1/10" reads as the first of at most ten replays.
 type RetryNotice struct {
 	// Attempt is the 1-based ordinal of the retry that is about to start.
 	Attempt int

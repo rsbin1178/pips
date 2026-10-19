@@ -39,6 +39,14 @@ const (
 	// answer. It is its own kind so it can never render as, or be mistaken for,
 	// a committed assistant message.
 	blockIncomplete
+	// blockSubagent carries the parent transcript's one-line lifecycle row for
+	// one spawn. A spawn is never rendered as a generic Tool card: the lifecycle
+	// row is its only representation, so one spawn commits exactly one row.
+	blockSubagent
+	// blockCompaction marks the boundary where a full context checkpoint
+	// replaced the conversation. It is a divider rather than a message, so the
+	// reader can tell the compacted history from the turns that follow it.
+	blockCompaction
 )
 
 const (
@@ -47,6 +55,8 @@ const (
 	questionAnsweredTitle = "Question answered"
 	questionFailedTitle   = "Question failed"
 	planApprovedTitle     = "Plan · Approved"
+	// subagentLabel leads every spawn's lifecycle row in the parent transcript.
+	subagentLabel = "Subagent "
 )
 
 // thinkingGlyph leads one visible reasoning section. The block follows the
@@ -86,11 +96,38 @@ type timelineBlock struct {
 	rendered         bool
 	tools            []toolActivity
 	workspaceChanges *coding.WorkspaceChanged
+	// subagent carries the lifecycle row for one spawn. It is set only on
+	// blockSubagent; the carried tools entry is what keeps the spawn's committed
+	// Tool identity and its click-through to the child session.
+	subagent *subagentLifecycleRow
 	// notice marks operator output (the banner, /help, /status, goal reports)
 	// that the frame pins to the terminal edge. It is the one entry kind that
 	// keeps the full width, because the banner is a bordered box that lines up
 	// with the Composer box instead of with the conversation inside it.
 	notice bool
+}
+
+// subagentLifecycleRow is the parent transcript's projection of one spawn. It
+// carries everything the lifecycle line prints, and the child identity a
+// background child's separate terminal row is matched on.
+type subagentLifecycleRow struct {
+	childSessionID string
+	callID         string
+	description    string
+	activity       string
+	identity       subagent.AgentIdentity
+	role           subagent.Role
+	model          string
+	state          subagent.State
+	durationMillis int64
+	code           string
+	background     bool
+}
+
+// started reports whether the row is still the spawn's opening line rather than
+// its terminal one.
+func (row subagentLifecycleRow) started() bool {
+	return row.state == subagent.StateCreated || row.state == subagent.StateRunning
 }
 
 type timelineRenderOptions struct {
@@ -219,6 +256,18 @@ func appendCommittedMessageBlocks(
 //nolint:gocyclo,cyclop // The already projected Tools merge with messages in durable order.
 func projectCommittedBlocks(state coding.State, activities []toolActivity) committedProjection {
 	blocks := make([]timelineBlock, 0, len(state.Transcript)+len(state.Tools)+4)
+	divider, boundary, hasDivider := projectCompactionDivider(state)
+	dividerInserted := false
+	insertDivider := func() {
+		if !hasDivider || dividerInserted {
+			return
+		}
+		blocks = append(blocks, divider)
+		dividerInserted = true
+	}
+	if boundary == 0 {
+		insertDivider()
+	}
 	syntheticMessages := make(map[int]struct{}, len(state.SyntheticMessages))
 	for _, index := range state.SyntheticMessages {
 		syntheticMessages[index] = struct{}{}
@@ -226,6 +275,9 @@ func projectCommittedBlocks(state coding.State, activities []toolActivity) commi
 	cutoff := 0
 	activityIndex := 0
 	for messageIndex, message := range state.Transcript {
+		if messageIndex == boundary {
+			insertDivider()
+		}
 		position := messageIndex + 1
 		candidateID := ""
 		if messageIndex < len(state.MessageCandidates) {
@@ -246,12 +298,53 @@ func projectCommittedBlocks(state coding.State, activities []toolActivity) commi
 			cutoff = max(cutoff, committed)
 		}
 	}
+	insertDivider()
 
 	return committedProjection{
 		blocks:    groupExploreBlocks(blocks),
 		tailStart: activityIndex,
 		cutoff:    cutoff,
 	}
+}
+
+// projectCompactionDivider turns one completed full checkpoint into the divider
+// that marks where the model context was compacted. Bootstrap and the live event
+// both populate the same CompactionState, so a resumed session and the process
+// that compacted it show the same boundary. The mode is absent after a resume
+// because only the checkpoint entry, not the trigger, survives on disk.
+//
+// The returned index is the transcript position the divider belongs at: the
+// messages before it are the old branch, the messages after it are the context
+// that follows the checkpoint.
+func projectCompactionDivider(state coding.State) (timelineBlock, int, bool) {
+	if state.Compaction.Active || state.Compaction.CheckpointID == "" ||
+		state.Compaction.Strategy != coding.CompactionStrategyFull {
+		return timelineBlock{}, 0, false
+	}
+
+	parts := []string{"Context compacted"}
+	switch state.Compaction.Mode {
+	case coding.CompactionAutomatic:
+		parts = append(parts, "auto")
+	case coding.CompactionManual:
+		parts = append(parts, "manual")
+	}
+	switch {
+	case state.Compaction.TokensBefore > 0 && state.Compaction.TokensAfter > 0:
+		parts = append(parts,
+			compactTokenCount(state.Compaction.TokensBefore)+" → "+
+				compactTokenCount(state.Compaction.TokensAfter)+" tokens",
+		)
+	case state.Compaction.TokensAfter > 0:
+		parts = append(parts, compactTokenCount(state.Compaction.TokensAfter)+" tokens")
+	case state.Compaction.TokensBefore > 0:
+		parts = append(parts, compactTokenCount(state.Compaction.TokensBefore)+" tokens before")
+	}
+
+	return timelineBlock{
+		kind: blockCompaction, id: "compaction:" + state.Compaction.CheckpointID,
+		body: strings.Join(parts, " · "),
+	}, min(max(0, state.Compaction.BoundaryIndex), len(state.Transcript)), true
 }
 
 // projectCommittedRange projects the messages in Transcript[covered:] together
@@ -687,11 +780,76 @@ func projectSubagentToolActivity(
 	if !found {
 		value, found = projectDurableSubagent(activity)
 	}
-	if found {
-		activity = enrichSubagentToolActivity(activity, value)
+	if !found {
+		return projectPendingSubagentLifecycle(activity)
 	}
 
-	return projectToolActivity(activity)
+	return projectSubagentLifecycle(activity, value)
+}
+
+// projectPendingSubagentLifecycle renders a spawn whose child state has not
+// reached the parent projection yet, such as a child still queued behind the
+// concurrency limit. The row is built from the call itself so a spawn always
+// reads as a lifecycle line rather than as a generic Tool card.
+func projectPendingSubagentLifecycle(activity toolActivity) timelineBlock {
+	arguments := decodeToolArguments(activity.arguments)
+	row := subagentLifecycleRow{
+		callID:      activity.id,
+		description: oneLineSubagentTask(toolArgumentString(arguments, "description")),
+		state:       subagentStateFromToolState(activity.state),
+		background:  subagentCallBackground(arguments),
+	}
+
+	return timelineBlock{
+		kind: blockSubagent, id: activity.id, position: activity.position,
+		tools: []toolActivity{activity}, subagent: &row,
+	}
+}
+
+// subagentStateFromToolState maps a spawn Tool's own state back onto the child
+// lifecycle vocabulary, for a row that has no child projection to read.
+func subagentStateFromToolState(state toolActivityState) subagent.State {
+	switch state {
+	case toolStateRunning:
+		return subagent.StateRunning
+	case toolStateSucceeded:
+		return subagent.StateSucceeded
+	case toolStateInterrupted:
+		return subagent.StateCanceled
+	case toolStateFailed:
+		return subagent.StateFailed
+	}
+
+	return subagent.StateRunning
+}
+
+// projectSubagentLifecycle turns one spawn into the lifecycle row the parent
+// transcript shows. The enriched Tool activity still rides along so committed
+// Tool identities, click-through to the child session, and the Tool detail path
+// keep working; only the rendering differs.
+func projectSubagentLifecycle(
+	activity toolActivity,
+	value coding.SubagentState,
+) timelineBlock {
+	enriched := enrichSubagentToolActivity(activity, value)
+	row := subagentLifecycleRow{
+		childSessionID: value.ChildSessionID,
+		callID:         activity.id,
+		description:    subagentLifecycleDescription(activity, value),
+		activity:       subagentLiveActivityLabel(value),
+		identity:       value.Identity,
+		role:           value.Role,
+		model:          value.Model,
+		state:          value.State,
+		durationMillis: value.DurationMillis,
+		code:           value.Code,
+		background:     value.Delivery == subagent.DeliveryBackground,
+	}
+
+	return timelineBlock{
+		kind: blockSubagent, id: activity.id, position: activity.position,
+		tools: []toolActivity{enriched}, subagent: &row,
+	}
 }
 
 func matchingSubagent(
@@ -726,23 +884,13 @@ func enrichSubagentToolActivity(
 	activity.result = ""
 	activity.body = ""
 	activity.preview = []string{subagentMetadata(value)}
-
-	switch value.State {
-	case subagent.StateCreated, subagent.StateRunning:
-		activity.state = toolStateRunning
-	case subagent.StateSucceeded:
-		activity.state = toolStateSucceeded
-	case subagent.StateFailed:
-		activity.state = toolStateFailed
-	case subagent.StateCanceled, subagent.StateInterrupted:
-		activity.state = toolStateInterrupted
-	}
+	activity.state = subagentToolState(value.State)
 
 	return activity
 }
 
 func isSubagentToolName(name string) bool {
-	return name == subagent.ToolName || name == subagent.SpawnToolName
+	return name == subagent.ToolName
 }
 
 func projectToolActivity(activity toolActivity) timelineBlock {
@@ -956,7 +1104,21 @@ func subagentActivitySummary(value subagent.ActivitySummary) string {
 		return verb
 	}
 
-	return verb + " " + value.Target
+	return verb + " " + clampActivitySubject(value.Target)
+}
+
+// subagentLiveActivityLabel is the per-child activity the parent shows for one
+// child: its bounded semantic summary, or the waiting fallback while a live
+// child has no observable activity yet. A terminal child carries no activity.
+func subagentLiveActivityLabel(value coding.SubagentState) string {
+	if summary := subagentActivitySummary(value.Activity); summary != "" {
+		return summary
+	}
+	if value.State == subagent.StateCreated || value.State == subagent.StateRunning {
+		return activityLabelWaitingActivity
+	}
+
+	return ""
 }
 
 //nolint:gocyclo // The closed role/lifecycle matrix is the explicit product vocabulary.
@@ -1006,6 +1168,214 @@ func subagentActivityLabel(role subagent.Role, state subagent.State) string {
 
 func humanizeStatusCode(value string) string {
 	return strings.ReplaceAll(strings.TrimSpace(value), "_", " ")
+}
+
+// subagentToolState maps a child lifecycle state onto the Tool state vocabulary
+// the frame already uses for glyph and tone.
+func subagentToolState(state subagent.State) toolActivityState {
+	switch state {
+	case subagent.StateCreated, subagent.StateRunning:
+		return toolStateRunning
+	case subagent.StateSucceeded:
+		return toolStateSucceeded
+	case subagent.StateFailed:
+		return toolStateFailed
+	case subagent.StateCanceled, subagent.StateInterrupted:
+		return toolStateInterrupted
+	}
+
+	return toolStateRunning
+}
+
+// subagentLifecycleVerb is the verb the lifecycle row leads with. The spawn's
+// delivery picks the opening verb — a foreground child says "running", a
+// background child says "started" — and the terminal state picks the closing
+// one.
+func subagentLifecycleVerb(row subagentLifecycleRow) string {
+	switch row.state {
+	case subagent.StateSucceeded:
+		return "completed in " + formatInteractionDuration(row.durationMillis) + ": "
+	case subagent.StateFailed:
+		detail := ""
+		if code := humanizeStatusCode(row.code); code != "" {
+			detail = " (" + code + ")"
+		}
+
+		return "failed in " + formatInteractionDuration(row.durationMillis) + detail + ": "
+	case subagent.StateCanceled, subagent.StateInterrupted:
+		return "cancelled in " + formatInteractionDuration(row.durationMillis) + ": "
+	case subagent.StateCreated, subagent.StateRunning:
+		if row.background {
+			return "started: "
+		}
+
+		return "running: "
+	}
+
+	return "running: "
+}
+
+// subagentLifecycleMeta renders the identity tuple the opening lifecycle row
+// carries, in the source's `(persona · role · model)` shape: every blank part is
+// omitted, and a role that only repeats the agent's name is dropped. pips'
+// parent-visible child projection carries the agent identity in the tuple's
+// first slot; the child's persona lives in its durable plan and is shown on the
+// inspection route instead.
+func subagentLifecycleMeta(
+	identity subagent.AgentIdentity,
+	role subagent.Role,
+	model string,
+) string {
+	parts := make([]string, 0, 3)
+	name := safeDetailText(identity.Name)
+	if name == "" {
+		name = safeDetailText(identity.ID)
+	}
+	if name != "" {
+		parts = append(parts, name)
+	}
+	if roleText := safeDetailText(string(role)); roleText != "" && !strings.EqualFold(roleText, name) {
+		parts = append(parts, roleText)
+	}
+	if modelText := safeDetailText(model); modelText != "" {
+		parts = append(parts, modelText)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+
+	return " (" + strings.Join(parts, " · ") + ")"
+}
+
+// quotedSubagentDescription wraps one spawn description in the curly quotes the
+// lifecycle row uses, truncating the inner text so the quotes and the trailing
+// meta survive at a narrow width.
+func quotedSubagentDescription(description string, maximum int) string {
+	if maximum <= 2 {
+		return "“…”"
+	}
+
+	return "“" + ansi.Truncate(description, maximum-2, "…") + "”"
+}
+
+// subagentLifecycleDescription is the spawn's short label: the call's own
+// `description` argument when the transcript still has it, otherwise the task
+// preview the parent projection carries.
+func subagentLifecycleDescription(activity toolActivity, value coding.SubagentState) string {
+	if description := oneLineSubagentTask(
+		toolArgumentString(decodeToolArguments(activity.arguments), "description"),
+	); description != "" {
+		return description
+	}
+
+	return oneLineSubagentTask(value.TaskPreview)
+}
+
+// subagentCallBackground reports whether a spawn call asked for a background
+// child. `run_in_background` is optional and defaults to true, so only an
+// explicit false spelling makes the call foreground. This is a rendering
+// fallback for a spawn whose child state has not landed yet: the child's own
+// `Delivery` supersedes it as soon as the projection carries one.
+func subagentCallBackground(arguments map[string]any) bool {
+	value, ok := arguments["run_in_background"]
+	if !ok {
+		return true
+	}
+
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case float64:
+		return typed != 0
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "false", "0", "no":
+			return false
+		}
+
+		return true
+	}
+
+	return true
+}
+
+// subagentLifecycleParts assembles one lifecycle row at a width and reports its
+// parts, so the styled renderer and the plain-text export share one definition
+// of the line.
+func subagentLifecycleParts(row subagentLifecycleRow, width int) (string, string, string) {
+	activity := ""
+	meta := ""
+	if row.started() {
+		if row.activity != "" {
+			activity = " · " + row.activity
+		}
+		meta = subagentLifecycleMeta(row.identity, row.role, row.model)
+	}
+	verb := subagentLifecycleVerb(row)
+	overhead := ansi.StringWidth(subagentLabel) + ansi.StringWidth(verb) +
+		ansi.StringWidth(activity) + ansi.StringWidth(meta)
+	description := quotedSubagentDescription(row.description, max(1, width-overhead))
+
+	return toolActivityGlyph(subagentToolState(row.state)), subagentLabel + verb,
+		description + activity
+}
+
+// subagentLifecycleText renders the row as one plain line at a width.
+func subagentLifecycleText(row subagentLifecycleRow, width int) string {
+	glyph, prefix, suffix := subagentLifecycleParts(row, width)
+	meta := ""
+	if row.started() {
+		meta = subagentLifecycleMeta(row.identity, row.role, row.model)
+	}
+
+	return ansi.Truncate(glyph+" "+prefix+suffix+meta, max(1, width), "…")
+}
+
+// renderSubagentLifecycleBlock renders one spawn as the parent transcript's
+// lifecycle row: a state glyph, the lifecycle verb, the quoted description, an
+// optional live activity while the child runs, and the identity meta.
+func renderSubagentLifecycleBlock(
+	block timelineBlock,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) string {
+	row := block.subagent
+	if row == nil {
+		return ""
+	}
+	width = max(1, width)
+
+	glyph, prefix, suffix := subagentLifecycleParts(*row, width)
+	meta := ""
+	if row.started() {
+		meta = subagentLifecycleMeta(row.identity, row.role, row.model)
+	}
+	if noColor {
+		return ansi.Truncate(glyph+" "+prefix+suffix+meta, width, "…")
+	}
+
+	palette := paletteFor(theme)
+	tone := palette.idle
+	switch subagentToolState(row.state) {
+	case toolStateRunning:
+		tone = palette.model
+	case toolStateFailed:
+		tone = palette.error
+	case toolStateInterrupted:
+		tone = palette.warning
+	case toolStateSucceeded:
+	}
+
+	rendered := lipgloss.NewStyle().Bold(true).Foreground(tone).Render(glyph + " " + prefix)
+	if suffix != "" {
+		rendered += lipgloss.NewStyle().Foreground(palette.workspace).Render(suffix)
+	}
+	if meta != "" {
+		rendered += lipgloss.NewStyle().Foreground(palette.muted).Render(meta)
+	}
+
+	return ansi.Truncate(rendered, width, "…")
 }
 
 func isTerminalSubagent(state subagent.State) bool {
@@ -1208,14 +1578,48 @@ func embeddedResourceLabel(values ...string) string {
 	return "[resource]"
 }
 
+// Attachment provenance headers. The Composer writes one ahead of every payload
+// it inlines into a user message so the model receives it (see
+// attachment.Text.PromptText and composer_submission.go). They open the text part
+// they belong to, which is what makes them recognizable here.
+const (
+	workspaceFileProvenancePrefix  = "[Workspace file: "
+	clipboardImageProvenancePrefix = "[Clipboard image: "
+	workspaceImageProvenancePrefix = "[Workspace image: "
+)
+
+// visibleMessageText renders a message's parts for the transcript. An attachment's
+// provenance collapses to the reference it names: the Composer inlines a file's
+// content and an image's bytes into the message so the model receives them, while
+// the reader wants the reference, not the payload. The message itself is never
+// rewritten, so provider requests, prompt caching, session files and resume keep
+// the complete copy.
 func visibleMessageText(message ai.Message) string {
 	values := portableMessageParts(message)
 	parts := make([]string, 0, len(values))
+	// namedImage marks a text part that already named the image the next part
+	// carries, so the pair reads as one reference instead of two markers.
+	namedImage := false
+
 	for _, part := range values {
 		switch part := part.(type) {
 		case ai.TextPart:
+			if label, isImage, ok := attachmentReference(part.Text); ok {
+				parts = append(parts, label)
+				namedImage = isImage
+
+				continue
+			}
+
+			namedImage = false
 			parts = append(parts, part.Text)
 		case ai.ImagePart:
+			if namedImage {
+				namedImage = false
+
+				continue
+			}
+
 			parts = append(parts, "[image]")
 		case ai.FilePart:
 			label := strings.TrimSpace(part.Name)
@@ -1227,6 +1631,65 @@ func visibleMessageText(message ai.Message) string {
 	}
 
 	return strings.TrimSpace(strings.Join(parts, ""))
+}
+
+// attachmentReference renders one Composer attachment provenance as the reference
+// the transcript shows, and reports whether it named an image.
+func attachmentReference(text string) (label string, isImage, ok bool) {
+	trimmed := strings.TrimLeft(text, "\n")
+
+	switch {
+	case strings.HasPrefix(trimmed, workspaceFileProvenancePrefix):
+		header, body, found := strings.Cut(trimmed, "\n")
+		path := provenanceDetail(header, workspaceFileProvenancePrefix)
+		if path == "" {
+			return "", false, false
+		}
+		if !found || strings.TrimSpace(body) == "" {
+			return "[File · " + path + "]", false, true
+		}
+
+		// The content is what the reader does not need; its size is what they do.
+		// Trailing blank lines are not lines the reader counts.
+		lines := logicalLineCount(strings.TrimRight(body, "\r\n"))
+
+		return fmt.Sprintf("[File · %s · %s]", path, lineCountLabel(lines)), false, true
+	case strings.HasPrefix(trimmed, clipboardImageProvenancePrefix):
+		return imageReference(trimmed, clipboardImageProvenancePrefix)
+	case strings.HasPrefix(trimmed, workspaceImageProvenancePrefix):
+		return imageReference(trimmed, workspaceImageProvenancePrefix)
+	default:
+		return "", false, false
+	}
+}
+
+func imageReference(text, prefix string) (string, bool, bool) {
+	header, _, _ := strings.Cut(text, "\n")
+	detail := provenanceDetail(header, prefix)
+	if detail == "" {
+		return "", false, false
+	}
+
+	return "[Image · " + detail + "]", true, true
+}
+
+// provenanceDetail returns the text between a provenance prefix and its closing
+// bracket, or "" when the header is not the shape the Composer writes.
+func provenanceDetail(header, prefix string) string {
+	if !strings.HasPrefix(header, prefix) || !strings.HasSuffix(header, "]") {
+		return ""
+	}
+
+	return strings.TrimSuffix(strings.TrimPrefix(header, prefix), "]")
+}
+
+// lineCountLabel words how much content an attachment carries.
+func lineCountLabel(lines int) string {
+	if lines == 1 {
+		return "1 line"
+	}
+
+	return fmt.Sprintf("%d lines", lines)
 }
 
 // portableMessageParts returns a message's parts for projection only. The
@@ -1403,6 +1866,11 @@ func renderTimelineBlockWithOptions(
 
 		return renderToolActivityBlock(block, width, theme, noColor)
 	}
+	if block.kind == blockSubagent {
+		// A spawn keeps its lifecycle line in every surface, including the
+		// expanded child view, so the same row cannot render two ways.
+		return renderSubagentLifecycleBlock(block, width, theme, noColor)
+	}
 	if block.kind == blockTeam {
 		return renderTeamActivityBlock(block, width, theme, noColor)
 	}
@@ -1414,6 +1882,9 @@ func renderTimelineBlockWithOptions(
 	}
 	if block.kind == blockIncomplete {
 		return renderIncompleteReplyBlock(block, width, theme, noColor)
+	}
+	if block.kind == blockCompaction {
+		return renderCompactionDividerBlock(block, width, theme, noColor)
 	}
 
 	return renderRegularTimelineBlock(block, markdown, width, theme, noColor)
@@ -1743,6 +2214,38 @@ func renderUserMessage(body string, width int, theme colorTheme, noColor bool) s
 		Render(content)
 }
 
+// renderCompactionDividerBlock draws one horizontal rule with its label in the
+// middle. The label stays inside the conversation's text column, so a divider
+// never competes with the frame edge. A frame too narrow for both rules falls
+// back to the label alone rather than dropping the success notice.
+func renderCompactionDividerBlock(block timelineBlock, width int, theme colorTheme, noColor bool) string {
+	width = max(1, width)
+	label := strings.TrimSpace(ansi.Strip(block.body))
+	if label == "" {
+		label = "Context compacted"
+	}
+
+	text := " " + label + " "
+	remaining := width - ansi.StringWidth(text)
+	if remaining < 2 {
+		return ansi.Truncate(label, width, "…")
+	}
+
+	left := remaining / 2
+	right := remaining - left
+	if noColor {
+		return strings.Repeat("─", left) + text + strings.Repeat("─", right)
+	}
+
+	palette := paletteFor(theme)
+	rule := lipgloss.NewStyle().Foreground(palette.separator)
+	value := lipgloss.NewStyle().Foreground(palette.muted)
+
+	return rule.Render(strings.Repeat("─", left)) +
+		value.Render(text) +
+		rule.Render(strings.Repeat("─", right))
+}
+
 func renderErrorBlock(block timelineBlock, width int, theme colorTheme, noColor bool) string {
 	width = max(1, width)
 	body := strings.TrimSpace(block.body)
@@ -1827,7 +2330,7 @@ func timelineTitleStyle(kind blockKind, theme colorTheme) lipgloss.Style {
 		color = palette.session
 	case blockAssistant, blockDraft, blockPlan:
 		color = palette.model
-	case blockTool, blockTeam:
+	case blockTool, blockTeam, blockSubagent:
 		color = palette.idle
 	case blockChange:
 		color = palette.change

@@ -32,6 +32,12 @@ var (
 	// ErrInvalidMessage means a portable message has an unsupported concrete
 	// form, role-specific content, or sequence position.
 	ErrInvalidMessage = errors.New("ai: invalid message")
+	// ErrUnsupportedMedia means a provider wire shape cannot carry a media part
+	// (image or file) from a tool result, so forwarding the request would
+	// silently drop it. It matches [ErrUnsupported] because it is the same
+	// "cannot be expressed" class; adapters wrap it in
+	// [UnsupportedMediaError] to name the provider and the part kind.
+	ErrUnsupportedMedia = fmt.Errorf("%w: media cannot be represented", ErrUnsupported)
 	// ErrStreamIdle means a streaming response delivered bytes and then stayed
 	// silent past the client's idle bound, so the stream was aborted. It is a
 	// failure class of its own rather than a context deadline because both
@@ -45,7 +51,36 @@ var (
 	// retryable errors: a peer that never starts answering is worth another
 	// attempt, while a deadline the caller set is not.
 	ErrResponseTimeout = errors.New("ai: response timed out")
+	// ErrMalformedStructuredOutput means a schema-constrained answer was not one
+	// JSON object. Callers treat it as an answer of the wrong shape rather than a
+	// transport failure.
+	ErrMalformedStructuredOutput = errors.New("ai: structured output is not one JSON object")
 )
+
+// UnsupportedMediaError names the provider and the tool-result part kind a wire
+// shape cannot express. Adapters return it, wrapping [ErrUnsupportedMedia],
+// instead of dropping the media from the request.
+type UnsupportedMediaError struct {
+	// Provider is the adapter that cannot express the part.
+	Provider Provider
+	// Kind is the part kind, for example "image" or "file".
+	Kind string
+}
+
+// NewUnsupportedMediaError builds the error for a part a provider's wire shape
+// cannot carry.
+func NewUnsupportedMediaError(provider Provider, part Part) *UnsupportedMediaError {
+	return &UnsupportedMediaError{Provider: provider, Kind: PartKind(part)}
+}
+
+// Error implements the error interface.
+func (e *UnsupportedMediaError) Error() string {
+	return fmt.Sprintf("ai: %s cannot express %s tool-result media", e.Provider, e.Kind)
+}
+
+// Unwrap exposes [ErrUnsupportedMedia] (and through it [ErrUnsupported]) to
+// [errors.Is].
+func (e *UnsupportedMediaError) Unwrap() error { return ErrUnsupportedMedia }
 
 // Error is a structured provider error. Adapters return it (wrapped around a
 // sentinel) for non-2xx responses. Extract it with [errors.As]:

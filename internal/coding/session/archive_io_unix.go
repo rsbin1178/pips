@@ -12,37 +12,57 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Only the trusted repository root is a path. All subsequent operations are
+// Only the trusted repository root is a path. Every subsequent operation is
 // descriptor-relative single components with O_NOFOLLOW, including temp files.
-func openArchiveDirectory(path, sessionID string, create bool) (*os.File, error) {
+// rel names the owning session directory under the root; the archive directory
+// itself is the last component of the walk.
+func openArchiveDirectory(path string, rel []string, create bool) (*os.File, error) {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
-	root := os.NewFile(uintptr(fd), "archive repository")
-	defer func() { _ = root.Close() }()
-	if err := checkArchiveFile(root, true, false); err != nil {
-		return nil, err
+
+	current := os.NewFile(uintptr(fd), "archive repository")
+	if err := checkArchiveFile(current, true, false); err != nil {
+		return nil, errors.Join(err, current.Close())
 	}
-	name := sessionID + ".history"
+
+	for _, name := range append(append(make([]string, 0, len(rel)+1), rel...), ArchiveDirName) {
+		next, err := openArchiveComponent(current, name, create)
+		if err != nil {
+			return nil, errors.Join(err, current.Close())
+		}
+		_ = current.Close()
+		current = next
+	}
+
+	return current, nil
+}
+
+// openArchiveComponent creates (when asked) and opens one owned private
+// directory beneath parent.
+func openArchiveComponent(parent *os.File, name string, create bool) (*os.File, error) {
 	if create {
-		if err := unix.Mkdirat(fd, name, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
+		if err := unix.Mkdirat(int(parent.Fd()), name, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
 			return nil, err
 		}
 		// Also sync an existing directory name: it may have been created by an
 		// earlier failed attempt that never reached its parent sync.
-		if err := root.Sync(); err != nil {
+		if err := parent.Sync(); err != nil {
 			return nil, err
 		}
 	}
-	childFD, err := unix.Openat(fd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+
+	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
-	child := os.NewFile(uintptr(childFD), "session history")
+
+	child := os.NewFile(uintptr(fd), "archive directory")
 	if err := checkArchiveFile(child, true, true); err != nil {
 		return nil, errors.Join(err, child.Close())
 	}
+
 	return child, nil
 }
 

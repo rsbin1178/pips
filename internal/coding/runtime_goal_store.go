@@ -28,6 +28,10 @@ type goalLedger struct {
 	ChildUsage        ai.Usage        `json:"child_usage"`
 	AccountedChildren []string        `json:"accounted_children,omitempty"`
 	DeliveredChildren []string        `json:"delivered_children,omitempty"`
+	// BaselineCommit is the repository commit the Goal was created at, so a
+	// verification can capture the Goal's whole change set as a diff. It is
+	// empty outside a Git repository or when the best-effort resolve failed.
+	BaselineCommit string `json:"baseline_commit,omitempty"`
 }
 
 type runtimeGoalControl struct {
@@ -36,6 +40,34 @@ type runtimeGoalControl struct {
 	directory string
 	id        continuation.ID
 	ledger    goalLedger
+	// declaration is the model's pending completion declaration. It lives in the
+	// process, like the run that made it: the Goal loop consumes it at exactly one
+	// decision point, and a restarted Goal has no declaration to consume.
+	declaration bool
+	// blockedReason is the model's own failure reason for the pause it declared.
+	// The pause path's transition wording is what the engine records, so the
+	// paused projection reports this instead while the Goal stays paused. It is
+	// cleared whenever the Goal is created, resumed, or cleared.
+	blockedReason string
+	// blockedStreak counts the model's consecutive blocked declarations, so the
+	// Goal pauses at the bar the Tool advertises instead of on the first
+	// complaint. Like the declaration it answers, it is process-local state of the
+	// run that produced it; creating, resuming or clearing the Goal starts the
+	// count again, as does any declaration that is not a blocked one.
+	blockedStreak int
+	// resetVerification is set by an explicit resume from a paused Goal and
+	// consumed by the Controller at the next decision point, so the Goal's
+	// verification run count and gap-stall state start again. It is process-local,
+	// like the declaration and the blocked streak.
+	resetVerification bool
+	// skeptic0Source and skeptic0Usage are the last verifier-skeptic-zero spawn's
+	// child session and cumulative usage. A resumed child's reported usage is
+	// cumulative over its source session, so the panel subtracts this baseline to
+	// report only what the resumed run spent. Like the declaration they are
+	// process-local state of the run that produced them: a restarted Goal resumes
+	// no child, so it has no baseline to subtract.
+	skeptic0Source string
+	skeptic0Usage  ai.Usage
 }
 
 var (
@@ -43,13 +75,17 @@ var (
 	goalControllerRef = continuation.HandlerRef{Kind: "coding.goal.assessment", Version: "1"}
 )
 
+// goalStateDirName is the Goal continuation store inside a session's state
+// directory, so a session's whole durable state stays in one place.
+const goalStateDirName = "goal"
+
 //nolint:gocyclo // Recovery validates ownership before restoring a paused projection.
 func (r *Runtime) openGoalControl(ctx context.Context) error {
 	id := r.handle.Metadata().ID
 	if err := session.ValidateID(id); err != nil {
 		return err
 	}
-	directory := filepath.Join(r.paths.GoalsDir(), id)
+	directory := filepath.Join(r.handle.StateDir(), goalStateDirName)
 	if err := ensureOwnerOnlyDirectory(directory); err != nil {
 		return err
 	}
@@ -128,6 +164,9 @@ func (c *runtimeGoalControl) loadLedger() error {
 	if c.ledger.Version != 1 || c.ledger.ID != c.id || !goalflow.ValidUsage(c.ledger.FailedUsage) || !goalflow.ValidUsage(c.ledger.ChildUsage) {
 		return ErrRuntimeInvalid
 	}
+	if len(c.ledger.BaselineCommit) > 128 {
+		return ErrRuntimeInvalid
+	}
 	return nil
 }
 
@@ -201,26 +240,43 @@ func (c *runtimeGoalControl) project(execution continuation.Execution) (GoalStat
 	if err != nil {
 		return GoalState{}, err
 	}
-	status := GoalStatus(execution.Status)
-	if execution.Status == continuation.StatusFailed && execution.Reason == "Observed Goal token budget exhausted" {
-		status = GoalLimited
-	}
-	if status == "pause_requested" {
-		status = GoalPaused
-	}
-	if status == "cancel_requested" {
-		status = GoalCancelled
-	}
-	if execution.Status == continuation.StatusBlocked && execution.Block != nil && execution.Block.Kind == "no_progress" {
-		status = GoalPaused
-	}
+	status := projectedGoalStatus(execution)
 	failed := c.ledger.FailedUsage.InputTokens + c.ledger.FailedUsage.OutputTokens
+	reason := goalflow.Bound(execution.Reason, 4096)
+	if status == GoalPaused && c.blockedReason != "" {
+		// A Goal the model declared blocked reports the model's own failure reason
+		// while it stays paused, so a user resumes it with the reason the worker
+		// reported rather than the pause transition's own wording.
+		reason = goalflow.Bound(c.blockedReason, 4096)
+	}
+
 	return GoalState{
 		ID: string(execution.ID), Revision: uint64(execution.Revision), Condition: policy.Condition,
-		Status: status, Reason: goalflow.Bound(execution.Reason, 4096), Attempts: execution.Accounting.Attempts,
+		Status: status, Reason: reason, Attempts: execution.Accounting.Attempts,
 		Evaluations: policy.Evaluations, Tokens: execution.Accounting.Tokens() + failed + c.ledger.ChildUsage.InputTokens + c.ledger.ChildUsage.OutputTokens, MaxTokens: execution.Limits.MaxTokens,
 		FailedCheckTokens: failed, Gaps: state.Gaps, References: state.References,
 	}, nil
+}
+
+// projectedGoalStatus maps the engine's status to the projection's. A verifier
+// infrastructure failure and a stall or run-cap block both pause the Goal; every
+// other block kind stays a block on a user action.
+func projectedGoalStatus(execution continuation.Execution) GoalStatus {
+	status := GoalStatus(execution.Status)
+
+	switch {
+	case execution.Status == continuation.StatusFailed && execution.Reason == "Observed Goal token budget exhausted":
+		status = GoalLimited
+	case status == "pause_requested":
+		status = GoalPaused
+	case status == "cancel_requested":
+		status = GoalCancelled
+	case execution.Status == continuation.StatusBlocked && execution.Block != nil &&
+		(execution.Block.Kind == "no_progress" || execution.Block.Kind == "infra"):
+		status = GoalPaused
+	}
+
+	return status
 }
 
 func (r *Runtime) publishGoal(ctx context.Context, emitter *eventEmitter, phase GoalStatus) error {

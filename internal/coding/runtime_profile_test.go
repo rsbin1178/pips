@@ -13,6 +13,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/paths"
 	"github.com/rsbin1178/pips/internal/coding/session"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/teamworktree"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
@@ -48,7 +49,7 @@ func TestTeamWorkerRuntimeUsesExactProfileAndCatalog(t *testing.T) {
 		assert.Contains(t, tools, expected)
 	}
 	for _, forbidden := range []string{
-		"write_plan", "run_subagent", "spawn_agent", "team_claim_task",
+		"write_plan", subagent.ToolName, "team_claim_task",
 		"team_release_task", "team_finish_task_attempt", catalog.DefaultToolSearchName,
 	} {
 		assert.NotContains(t, tools, forbidden)

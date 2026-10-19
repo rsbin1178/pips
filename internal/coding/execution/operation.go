@@ -44,6 +44,9 @@ const (
 	KindShell
 	KindGit
 	KindProcess
+	// KindMonitor is a model-started background watch whose process outlives
+	// the Tool call that started it.
+	KindMonitor
 )
 
 // WorkspaceAccess identifies the requested workspace permission.
@@ -100,6 +103,10 @@ type OperationSpec struct {
 	// justification for authority the user already supplied.
 	NetworkByConfiguration bool
 	Justification          string
+	// NoDeadline marks an operation with no deadline at all: it runs until it
+	// exits or its context is canceled. It is an explicit state rather than a
+	// sentinel duration, and only a monitor may use it.
+	NoDeadline bool
 }
 
 // Operation is an immutable-by-API, canonical command and permission request.
@@ -112,6 +119,7 @@ type Operation struct {
 	env           []EnvVar
 	stdin         []byte
 	timeout       time.Duration
+	noDeadline    bool
 	output        OutputLimits
 	workspace     WorkspaceAccess
 	workspaceKey  string
@@ -179,6 +187,7 @@ func NewOperation(ctx context.Context, ws workspace.Workspace, spec OperationSpe
 		env:           env,
 		stdin:         slices.Clone(spec.Stdin),
 		timeout:       spec.Timeout,
+		noDeadline:    spec.NoDeadline,
 		output:        spec.Output,
 		workspace:     spec.Workspace,
 		workspaceKey:  ws.Identity().Key(),
@@ -211,6 +220,10 @@ func (o Operation) Stdin() []byte { return slices.Clone(o.stdin) }
 
 // Timeout returns the operation deadline duration.
 func (o Operation) Timeout() time.Duration { return o.timeout }
+
+// NoDeadline reports whether the operation has no deadline. A no-deadline
+// operation runs until it exits or its context is canceled.
+func (o Operation) NoDeadline() bool { return o.noDeadline }
 
 // Output returns the process output limits.
 func (o Operation) Output() OutputLimits { return o.output }
@@ -253,7 +266,7 @@ func validateWorkspace(ws workspace.Workspace) error {
 
 func validateScalarFields(spec OperationSpec) error {
 	switch spec.Kind {
-	case KindShell, KindGit, KindProcess:
+	case KindShell, KindGit, KindProcess, KindMonitor:
 	default:
 		return fmt.Errorf("%w: unsupported kind", ErrInvalidOperation)
 	}
@@ -274,8 +287,8 @@ func validateScalarFields(spec OperationSpec) error {
 		return fmt.Errorf("%w: unsupported network access", ErrInvalidOperation)
 	}
 
-	if spec.Timeout <= 0 || spec.Timeout > maxTimeout {
-		return fmt.Errorf("%w: timeout outside supported range", ErrInvalidOperation)
+	if err := validateTimeout(spec); err != nil {
+		return err
 	}
 
 	if err := validateOutputLimits(spec.Output); err != nil {
@@ -288,6 +301,26 @@ func validateScalarFields(spec OperationSpec) error {
 
 	if err := validateText("justification", spec.Justification, maxJustificationBytes, true); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+// validateTimeout bounds an operation deadline by its kind. A monitor is always
+// no-deadline: the background registry owns a task's own deadline, so the
+// operation carries no second clock, and an interactive shell keeps its
+// unchanged ceiling. No other kind may be unbounded.
+func validateTimeout(spec OperationSpec) error {
+	if spec.NoDeadline {
+		if spec.Kind != KindMonitor || spec.Timeout != 0 {
+			return fmt.Errorf("%w: no-deadline operation is not representable", ErrInvalidOperation)
+		}
+
+		return nil
+	}
+
+	if spec.Timeout <= 0 || spec.Timeout > maxTimeout {
+		return fmt.Errorf("%w: timeout outside supported range", ErrInvalidOperation)
 	}
 
 	return nil

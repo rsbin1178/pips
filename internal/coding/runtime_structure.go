@@ -186,8 +186,8 @@ func (r *Runtime) Fork(ctx context.Context, entryID string) (string, error) {
 		return "", err
 	}
 	targetID := target.Metadata().ID
-	targetPlanStore, planErr := planmode.NewStore(
-		r.paths.SessionsDir(),
+	targetPlanStore, planErr := planmode.NewStoreAt(
+		target.StateDir(),
 		targetID,
 		planmode.DefaultLimits(),
 	)
@@ -248,11 +248,65 @@ func (r *Runtime) emitTreeChanged(ctx context.Context, emitter *eventEmitter) er
 		return err
 	}
 	transcript := transcriptFromPath(r.session.Path())
+	compaction, hasCheckpoint := fullCompactionStateFromPath(r.session.Path())
+	if hasCheckpoint {
+		r.mu.Lock()
+		live := r.state.Compaction
+		r.mu.Unlock()
+		if live.CheckpointID == compaction.CheckpointID {
+			compaction.Mode = live.Mode
+			compaction.DurationMillis = live.DurationMillis
+		}
+	} else {
+		// Keep the legacy retained-tail state so its consumers do not lose it on
+		// an ordinary tree refresh. A full checkpoint navigation clears it.
+		r.mu.Lock()
+		live := r.state.Compaction
+		r.mu.Unlock()
+		if live.CheckpointID == "" && live.FirstKeptID != "" {
+			compaction = live
+		}
+	}
 
 	return emitter.emit("", "", EventSessionTreeChanged, SessionTreeChanged{
 		Tree: tree, Transcript: transcript, ContextTokens: r.contextTokens(),
-		Tasks: tasksFromPath(r.session.Path()),
+		Tasks: tasksFromPath(r.session.Path()), Compaction: compaction,
 	})
+}
+
+// fullCompactionStateFromPath rebuilds the latest full checkpoint projection
+// from the durable path. BoundaryIndex counts the messages before the checkpoint
+// in the same bounded transcript window [transcriptFromPath] returns.
+func fullCompactionStateFromPath(path []harness.Entry) (CompactionState, bool) {
+	messages := 0
+	boundary := 0
+
+	var checkpoint *harness.Entry
+
+	for index := range path {
+		entry := &path[index]
+		if entry.Kind == harness.KindMessage && entry.Message != nil {
+			messages++
+		}
+		if entry.Kind == harness.KindContextCheckpoint && entry.Checkpoint != nil {
+			checkpoint = entry
+			boundary = messages
+		}
+	}
+
+	if checkpoint == nil {
+		return CompactionState{}, false
+	}
+
+	boundary = max(0, boundary-max(0, messages-maxEventItems))
+
+	return CompactionState{
+		TokensBefore:  checkpoint.TokensBefore,
+		TokensAfter:   harness.EstimateContext([]harness.Entry{*checkpoint}),
+		CheckpointID:  checkpoint.ID,
+		Strategy:      CompactionStrategyFull,
+		BoundaryIndex: boundary,
+	}, true
 }
 
 func tasksFromPath(path []harness.Entry) tasklist.Snapshot {
@@ -262,7 +316,11 @@ func tasksFromPath(path []harness.Entry) tasklist.Snapshot {
 			continue
 		}
 		if update, ok := tasklist.FromMessage(entry.Message); ok {
-			snapshot = tasklist.FromUpdate(update)
+			// A call that cannot be folded leaves the plan alone, the way a
+			// malformed call is ignored.
+			if folded, foldErr := tasklist.Apply(snapshot, update); foldErr == nil {
+				snapshot = folded
+			}
 		}
 	}
 

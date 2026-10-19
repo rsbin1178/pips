@@ -14,10 +14,12 @@ import (
 	"github.com/rsbin1178/pips/agent/extension"
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	"github.com/rsbin1178/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -291,6 +293,109 @@ func TestRuntimeStopHookContinuesPrimaryTurn(t *testing.T) {
 	assert.True(t, requestContainsText(requests[1], "perform one more focused pass"))
 }
 
+func TestRuntimeStopHookListsRunningBackgroundTasks(t *testing.T) {
+	skipHookRuntimeOnWindows(t)
+	t.Parallel()
+
+	logPath := filepath.Join(t.TempDir(), "stop.json")
+	stop := writeRuntimeHookScript(t, "cat > \"$HOOK_STOP_LOG\"")
+	model := newRuntimeModel(runtimeTextResponse("done"))
+	runtime := openTrustedHookRuntime(t, model, lifecycleHookConfig(t, map[hooks.Event][]string{
+		hooks.EventStop: {stop},
+	}), append(os.Environ(), "HOOK_STOP_LOG="+logPath))
+
+	// A watch that stays alive keeps the Stop payload's list non-empty.
+	snapshot, err := runtime.backgroundTasks.Launch(t.Context(), background.Request{
+		Kind:        background.KindMonitor,
+		Command:     "sleep 30",
+		Description: "watch me",
+		NoDeadline:  true,
+		Start: func(ctx context.Context, _ execution.Sink) (execution.Result, error) {
+			<-ctx.Done()
+
+			return execution.Result{Status: execution.StatusCanceled}, nil
+		},
+	})
+	require.NoError(t, err)
+
+	// A backgrounded command is one of them too, and it reports the command line
+	// in the field the reference reserves for it.
+	command, err := runtime.backgroundTasks.Launch(t.Context(), background.Request{
+		Kind:       background.KindShell,
+		Command:    "cargo build --release",
+		NoDeadline: true,
+		Start: func(ctx context.Context, _ execution.Sink) (execution.Result, error) {
+			<-ctx.Done()
+
+			return execution.Result{Status: execution.StatusCanceled}, nil
+		},
+	})
+	require.NoError(t, err)
+
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("start a watch")))
+
+	//nolint:gosec // The path is this test's own temporary hook log.
+	content, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+
+	var input struct {
+		BackgroundTasks []struct {
+			ID          string `json:"id"`
+			Type        string `json:"type"`
+			Status      string `json:"status"`
+			Description string `json:"description"`
+			Command     string `json:"command"`
+		} `json:"background_tasks"`
+	}
+	require.NoError(t, json.Unmarshal(content, &input))
+
+	require.Len(t, input.BackgroundTasks, 2)
+
+	// The registry orders by start time, which two launches can share, so the
+	// entries are read by id rather than by position.
+	entries := make(map[string]struct {
+		ID          string `json:"id"`
+		Type        string `json:"type"`
+		Status      string `json:"status"`
+		Description string `json:"description"`
+		Command     string `json:"command"`
+	}, len(input.BackgroundTasks))
+	for _, entry := range input.BackgroundTasks {
+		entries[entry.ID] = entry
+	}
+
+	watch, ok := entries[snapshot.ID]
+	require.True(t, ok)
+	assert.Equal(t, string(background.KindMonitor), watch.Type)
+	assert.Equal(t, "running", watch.Status)
+	assert.Equal(t, "sleep 30", watch.Description)
+	assert.Empty(t, watch.Command, "command is shell-only in the entry shape")
+
+	running, ok := entries[command.ID]
+	require.True(t, ok)
+	assert.Equal(t, string(background.KindShell), running.Type)
+	assert.Equal(t, "running", running.Status)
+	assert.Equal(t, "cargo build --release", running.Command)
+	assert.Empty(t, running.Description, "description carries a watch's command")
+}
+
+func TestClipHookTextBoundsAndMarksTheValue(t *testing.T) {
+	t.Parallel()
+
+	short := strings.Repeat("a", hookClipLimit)
+	assert.Equal(t, short, clipHookText(short), "a value at the bound is untouched")
+
+	long := strings.Repeat("a", hookClipLimit+40)
+	clipped := clipHookText(long)
+	assert.Contains(t, clipped, "… [+")
+	assert.LessOrEqual(t, len([]rune(clipped)), hookClipLimit)
+	assert.True(t, strings.HasPrefix(clipped, "aaa"))
+
+	multi := strings.Repeat("é", hookClipLimit+1)
+	assert.LessOrEqual(t, len([]rune(clipHookText(multi))), hookClipLimit)
+	assert.True(t, strings.HasPrefix(clipHookText(multi), "é"))
+}
+
 func TestRuntimeSubagentHooksAddContextAndContinueChild(t *testing.T) {
 	skipHookRuntimeOnWindows(t)
 	t.Parallel()
@@ -303,8 +408,8 @@ func TestRuntimeSubagentHooksAddContextAndContinueChild(t *testing.T) {
 	model := newRuntimeModel(
 		runtimeToolResponse(
 			"delegate-1",
-			"run_subagent",
-			`{"role":"explore","task":"Locate the runtime composition root."}`,
+			subagent.ToolName,
+			`{"prompt":"Locate the runtime composition root.","description":"delegate","subagent_type":"explore","run_in_background":false}`,
 		),
 		runtimeTextResponse(`{"summary":"first","evidence":[],"unknowns":[]}`),
 		runtimeTextResponse(`{"summary":"second","evidence":[],"unknowns":[]}`),

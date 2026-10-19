@@ -73,6 +73,192 @@ func TestLoadDynamicSubagentsGatePrecedenceAndProvenance(t *testing.T) {
 	assert.Equal(t, "--dynamic-subagents", source.Detail)
 }
 
+func TestLoadSubagentsEnabledSpellingMergesWithTopLevelSwitch(t *testing.T) {
+	t.Parallel()
+
+	// A `[subagents]` table that only tunes limits never turns subagents off.
+	tuningOnly := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, tuningOnly, "[subagents]\nmax_concurrent = 4\n")
+	result, err := config.Load(config.LoadOptions{ConfigFile: tuningOnly})
+	require.NoError(t, err)
+	assert.True(t, result.Config.DynamicSubagents)
+	assert.Equal(t, 4, result.Config.Subagent.MaxConcurrent)
+	for _, field := range []config.Field{config.FieldDynamicSubagents, config.FieldSubagentEnabled} {
+		source, ok := result.Config.Source(field)
+		require.True(t, ok)
+		assert.Equal(t, config.SourceDefault, source.Kind)
+	}
+
+	// The table spelling is the same switch, so it reports the same value and
+	// the same deciding tier as the top-level spelling.
+	tableSpelling := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, tableSpelling, "[subagents]\nenabled = false\n")
+	result, err = config.Load(config.LoadOptions{ConfigFile: tableSpelling})
+	require.NoError(t, err)
+	assert.False(t, result.Config.DynamicSubagents)
+	for _, field := range []config.Field{config.FieldDynamicSubagents, config.FieldSubagentEnabled} {
+		source, ok := result.Config.Source(field)
+		require.True(t, ok)
+		assert.Equal(t, config.SourceConfigFile, source.Kind)
+		assert.Equal(t, tableSpelling, source.Detail)
+	}
+
+	// An agreeing pair is one setting written twice, not a contradiction.
+	agreeing := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, agreeing, "dynamic_subagents = false\n\n[subagents]\nenabled = false\n")
+	result, err = config.Load(config.LoadOptions{ConfigFile: agreeing})
+	require.NoError(t, err)
+	assert.False(t, result.Config.DynamicSubagents)
+
+	// Disagreeing spellings are one layer contradicting itself.
+	disagreeing := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, disagreeing, "dynamic_subagents = false\n\n[subagents]\nenabled = true\n")
+	_, err = config.Load(config.LoadOptions{ConfigFile: disagreeing})
+	require.ErrorIs(t, err, config.ErrInvalid)
+	require.ErrorContains(t, err, "dynamic_subagents")
+	require.ErrorContains(t, err, "[subagents] enabled")
+
+	// Environment stays above both file spellings.
+	result, err = config.Load(config.LoadOptions{
+		ConfigFile: agreeing,
+		LookupEnv:  mapLookup(map[string]string{config.DynamicSubagentsEnv: "true"}),
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Config.DynamicSubagents)
+	source, ok := result.Config.Source(config.FieldSubagentEnabled)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceEnvironment, source.Kind)
+	assert.Equal(t, config.DynamicSubagentsEnv, source.Detail)
+}
+
+func TestLoadNoSubagentsFlagSpellingAndConflict(t *testing.T) {
+	t.Parallel()
+
+	// `--no-subagents` resolves the switch to false and reports its own name.
+	disabled := true
+	result, err := config.Load(config.LoadOptions{
+		FlagOverrides: config.Patch{NoSubagents: &disabled},
+	})
+	require.NoError(t, err)
+	assert.False(t, result.Config.DynamicSubagents)
+	source, ok := result.Config.Source(config.FieldDynamicSubagents)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceFlag, source.Kind)
+	assert.Equal(t, "--no-subagents", source.Detail)
+	source, ok = result.Config.Source(config.FieldSubagentEnabled)
+	require.True(t, ok)
+	assert.Equal(t, "--no-subagents", source.Detail)
+
+	// An explicit `--no-subagents=false` asks for the switch to stay on.
+	enabled := false
+	result, err = config.Load(config.LoadOptions{
+		FlagOverrides: config.Patch{NoSubagents: &enabled},
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Config.DynamicSubagents)
+
+	// Both flag spellings may be passed when they agree.
+	disabledFlag := true
+	off := false
+	result, err = config.Load(config.LoadOptions{
+		FlagOverrides: config.Patch{DynamicSubagents: &off, NoSubagents: &disabledFlag},
+	})
+	require.NoError(t, err)
+	assert.False(t, result.Config.DynamicSubagents)
+	source, ok = result.Config.Source(config.FieldDynamicSubagents)
+	require.True(t, ok)
+	assert.Equal(t, "--dynamic-subagents", source.Detail)
+
+	// Two explicit flag spellings that disagree are refused, and the flag tier
+	// stays above a contradicting file.
+	on := true
+	contradictingFile := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, contradictingFile, "[subagents]\nenabled = false\n")
+	_, err = config.Load(config.LoadOptions{
+		ConfigFile:    contradictingFile,
+		FlagOverrides: config.Patch{DynamicSubagents: &on, NoSubagents: &disabledFlag},
+	})
+	require.ErrorIs(t, err, config.ErrInvalid)
+	require.ErrorContains(t, err, "--dynamic-subagents")
+	require.ErrorContains(t, err, "--no-subagents")
+
+	result, err = config.Load(config.LoadOptions{
+		ConfigFile:    contradictingFile,
+		FlagOverrides: config.Patch{DynamicSubagents: &on},
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Config.DynamicSubagents)
+}
+
+func TestLoadSubagentToggleTable(t *testing.T) {
+	t.Parallel()
+
+	// An absent table enables every type.
+	result, err := config.Load(config.LoadOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, result.Config.Subagent.Toggle)
+	assert.True(t, result.Config.Subagent.TypeEnabled("explore"))
+	source, ok := result.Config.Source(config.FieldSubagentToggle)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[subagents.toggle]\nexplore = false\ngo-checker = true\n")
+	result, err = config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"explore": false, "go-checker": true}, result.Config.Subagent.Toggle)
+	assert.False(t, result.Config.Subagent.TypeEnabled("explore"))
+	assert.True(t, result.Config.Subagent.TypeEnabled("go-checker"))
+	// An absent key means enabled, and the lookup is exact and case-sensitive.
+	assert.True(t, result.Config.Subagent.TypeEnabled("plan"))
+	assert.True(t, result.Config.Subagent.TypeEnabled("Explore"))
+	source, ok = result.Config.Source(config.FieldSubagentToggle)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+
+	// A table that only carries a toggle still keeps the other defaults.
+	assert.Equal(t, config.DefaultSubagentConfig().MaxConcurrent, result.Config.Subagent.MaxConcurrent)
+}
+
+func TestLoadActiveAgentMessagesGatePrecedenceAndProvenance(t *testing.T) {
+	t.Parallel()
+
+	// The messaging gate is closed by default.
+	result, err := config.Load(config.LoadOptions{})
+	require.NoError(t, err)
+	assert.False(t, result.Config.ActiveAgentMessages)
+	source, ok := result.Config.Source(config.FieldActiveAgentMessages)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "active_agent_messages = true\n")
+	result, err = config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.True(t, result.Config.ActiveAgentMessages)
+	source, ok = result.Config.Source(config.FieldActiveAgentMessages)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+
+	result, err = config.Load(config.LoadOptions{
+		ConfigFile: path,
+		LookupEnv:  mapLookup(map[string]string{config.ActiveAgentMessagesEnv: "false"}),
+	})
+	require.NoError(t, err)
+	assert.False(t, result.Config.ActiveAgentMessages)
+	source, ok = result.Config.Source(config.FieldActiveAgentMessages)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceEnvironment, source.Kind)
+	assert.Equal(t, config.ActiveAgentMessagesEnv, source.Detail)
+
+	_, err = config.Load(config.LoadOptions{
+		LookupEnv: mapLookup(map[string]string{config.ActiveAgentMessagesEnv: "sometimes"}),
+	})
+	require.ErrorIs(t, err, config.ErrInvalid)
+}
+
 func TestLoadToolSearchNamePrecedenceAndProviderOverride(t *testing.T) {
 	t.Parallel()
 
@@ -167,32 +353,20 @@ func TestLoadSubagentBudgetsAndFieldProvenance(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "config.toml")
-	writeFile(t, path, `[subagent]
+	writeFile(t, path, `[subagents]
 max_depth = 2
 max_concurrent = 6
-max_spawned_per_root_interaction = 12
-max_auto_follow_ups = 5
-max_turns = 80
-max_tokens = 500000
-max_tool_calls = 200
-max_duration_minutes = 45
 `)
 	result, err := config.Load(config.LoadOptions{ConfigFile: path})
 	require.NoError(t, err)
 	assert.Equal(t, config.SubagentConfig{
 		MaxDepth:      2,
-		MaxConcurrent: 6, MaxSpawnedPerRootInteraction: 12, MaxAutoFollowUps: 5,
-		MaxTurns: 80, MaxTokens: 500_000, MaxToolCalls: 200, MaxDurationMinutes: 45,
+		MaxConcurrent: 6,
+		LimitBehavior: config.LimitBehaviorQueue,
 	}, result.Config.Subagent)
 	for _, field := range []config.Field{
 		config.FieldSubagentMaxDepth,
 		config.FieldSubagentMaxConcurrent,
-		config.FieldSubagentMaxSpawned,
-		config.FieldSubagentMaxFollowUps,
-		config.FieldSubagentMaxTurns,
-		config.FieldSubagentMaxTokens,
-		config.FieldSubagentMaxToolCalls,
-		config.FieldSubagentMaxDuration,
 	} {
 		source, ok := result.Config.Source(field)
 		require.True(t, ok)
@@ -201,32 +375,158 @@ max_duration_minutes = 45
 	}
 }
 
+// TestLoadSubagentRemovedKeysFailWithMigration pins the Phase L and Phase M
+// migrations: the per-child execution keys and the two admission keys no longer
+// exist, so a file that still carries one is named explicitly instead of
+// loading or failing as a generic unknown field.
+func TestLoadSubagentRemovedKeysFailWithMigration(t *testing.T) {
+	t.Parallel()
+
+	removed := []string{
+		"max_turns", "max_tokens", "max_tool_calls", "max_duration_minutes",
+		"max_spawned_per_root_interaction", "max_auto_follow_ups",
+	}
+	for _, key := range removed {
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, "[subagents]\n"+key+" = 1\n")
+			_, err := config.Load(config.LoadOptions{ConfigFile: path})
+			require.ErrorIs(t, err, config.ErrMigration)
+			assert.Contains(t, err.Error(), key)
+		})
+	}
+}
+
 func TestLoadSubagentPartialTableRetainsDefaultFieldSources(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "config.toml")
-	writeFile(t, path, "[subagent]\nmax_concurrent = 2\n")
+	writeFile(t, path, "[subagents]\nmax_depth = 2\n")
 	result, err := config.Load(config.LoadOptions{ConfigFile: path})
 	require.NoError(t, err)
-	assert.Equal(t, 2, result.Config.Subagent.MaxConcurrent)
-	assert.Equal(t, config.DefaultSubagentConfig().MaxTurns, result.Config.Subagent.MaxTurns)
-	source, ok := result.Config.Source(config.FieldSubagentMaxConcurrent)
+	assert.Equal(t, 2, result.Config.Subagent.MaxDepth)
+	assert.Equal(t, config.DefaultSubagentConfig().MaxConcurrent, result.Config.Subagent.MaxConcurrent)
+	source, ok := result.Config.Source(config.FieldSubagentMaxDepth)
 	require.True(t, ok)
 	assert.Equal(t, config.SourceConfigFile, source.Kind)
-	source, ok = result.Config.Source(config.FieldSubagentMaxTurns)
+	source, ok = result.Config.Source(config.FieldSubagentMaxConcurrent)
 	require.True(t, ok)
 	assert.Equal(t, config.SourceDefault, source.Kind)
+}
+
+func TestLoadSubagentStructuredResults(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[subagents]\nstructured_results = true\n")
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.True(t, result.Config.Subagent.StructuredResults)
+	source, ok := result.Config.Source(config.FieldSubagentStructuredResults)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+
+	// A partial table that omits the field keeps the free-text default.
+	partial := filepath.Join(t.TempDir(), "partial.toml")
+	writeFile(t, partial, "[subagents]\nmax_concurrent = 2\n")
+	kept, err := config.Load(config.LoadOptions{ConfigFile: partial})
+	require.NoError(t, err)
+	assert.False(t, kept.Config.Subagent.StructuredResults)
+	source, ok = kept.Config.Source(config.FieldSubagentStructuredResults)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+}
+
+// TestLoadTodoGate pins the opt-in gate's key: it defaults to off, and a config
+// file that sets it wins and reports its own provenance.
+func TestLoadTodoGate(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "todo_gate = true\n")
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.True(t, result.Config.TodoGate)
+	source, ok := result.Config.Source(config.FieldTodoGate)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+
+	// With no key the gate stays off with default provenance.
+	empty := filepath.Join(t.TempDir(), "empty.toml")
+	writeFile(t, empty, "[subagents]\nmax_concurrent = 2\n")
+	kept, err := config.Load(config.LoadOptions{ConfigFile: empty})
+	require.NoError(t, err)
+	assert.False(t, kept.Config.TodoGate)
+	source, ok = kept.Config.Source(config.FieldTodoGate)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+
+	assert.Contains(t, config.Fields(), config.FieldTodoGate)
+}
+
+func TestLoadSubagentLimitBehaviorDefaultsAndSources(t *testing.T) {
+	t.Parallel()
+
+	// A partial table keeps the queue default with default provenance.
+	partial := filepath.Join(t.TempDir(), "partial.toml")
+	writeFile(t, partial, "[subagents]\nmax_concurrent = 2\n")
+	kept, err := config.Load(config.LoadOptions{ConfigFile: partial})
+	require.NoError(t, err)
+	assert.Equal(t, config.LimitBehaviorQueue, kept.Config.Subagent.LimitBehavior)
+	source, ok := kept.Config.Source(config.FieldSubagentLimitBehavior)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[subagents]\nlimit_behavior = \"fail\"\n")
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, config.LimitBehaviorFail, result.Config.Subagent.LimitBehavior)
+	source, ok = result.Config.Source(config.FieldSubagentLimitBehavior)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+
+	invalid := filepath.Join(t.TempDir(), "invalid.toml")
+	writeFile(t, invalid, "[subagents]\nlimit_behavior = \"retry\"\n")
+	_, err = config.Load(config.LoadOptions{ConfigFile: invalid})
+	require.ErrorIs(t, err, config.ErrInvalid)
+}
+
+func TestLoadSubagentLimitBehaviorEnvPrecedence(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[subagents]\nlimit_behavior = \"fail\"\n")
+	result, err := config.Load(config.LoadOptions{
+		ConfigFile: path,
+		LookupEnv:  mapLookup(map[string]string{config.SubagentLimitBehaviorEnv: "queue"}),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.LimitBehaviorQueue, result.Config.Subagent.LimitBehavior)
+	source, ok := result.Config.Source(config.FieldSubagentLimitBehavior)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceEnvironment, source.Kind)
+	assert.Equal(t, config.SubagentLimitBehaviorEnv, source.Detail)
+
+	// An unrecognized value falls back to queue instead of failing the load.
+	fallback, err := config.Load(config.LoadOptions{
+		ConfigFile: path,
+		LookupEnv:  mapLookup(map[string]string{config.SubagentLimitBehaviorEnv: "retry"}),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.LimitBehaviorQueue, fallback.Config.Subagent.LimitBehavior)
 }
 
 func TestLoadSubagentBudgetsRejectInvalidAndUnknownValues(t *testing.T) {
 	t.Parallel()
 
 	for _, content := range []string{
-		"[subagent]\nmax_depth = 4\n",
-		"[subagent]\nmax_turns = 1\n",
-		"[subagent]\nmax_tokens = 999999999\n",
-		"[subagent]\nmax_duration_minutes = 0\n",
-		"[subagent]\nunknown = 1\n",
+		"[subagents]\nmax_depth = 4\n",
+		"[subagents]\nunknown = 1\n",
 	} {
 		t.Run(content, func(t *testing.T) {
 			t.Parallel()
@@ -628,6 +928,93 @@ func TestLoadRejectsStreamIdleTimeoutOutOfRange(t *testing.T) {
 	}
 }
 
+func TestLoadUserAgentPerProviderAndModel(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[providers.openai]
+user_agent = "gateway-probe/1"
+
+[providers.openai.models."named"]
+default = true
+user_agent = "pips-coder"
+
+[providers.openai.models."silent"]
+user_agent_enabled = false
+
+[providers.openai.models."inherits"]
+`)
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+
+	assert.Equal(t, new("gateway-probe/1"), result.Config.Providers[ai.ProviderOpenAI].UserAgent)
+
+	byRef := make(map[string]config.ModelConfig, len(result.Config.Models))
+	for _, model := range result.Config.Models {
+		byRef[model.Ref.String()] = model
+	}
+
+	assert.Equal(t, new("pips-coder"), byRef["openai/named"].UserAgent,
+		"the model's own value wins over the provider's")
+	assert.Equal(t, new(false), byRef["openai/silent"].UserAgentEnabled,
+		"a model switches the header off on its own")
+	assert.Nil(t, byRef["openai/inherits"].UserAgent, "an absent key declares nothing")
+	assert.Nil(t, byRef["openai/inherits"].UserAgentEnabled, "an absent switch declares nothing")
+}
+
+func TestLoadRejectsUnusableUserAgent(t *testing.T) {
+	t.Parallel()
+
+	// "Send nothing" has its own switch, so an empty value is a mistake to
+	// report rather than a second way of saying it, and declaring a value beside
+	// a disabled switch is a contradiction rather than a precedence rule.
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "provider declares an empty value",
+			content: "[providers.openai]\nuser_agent = \"\"\n",
+			want:    "user_agent is empty",
+		},
+		{
+			name:    "model declares a blank value",
+			content: "[providers.openai.models.\"m\"]\nuser_agent = \"   \"\n",
+			want:    "user_agent is empty",
+		},
+		{
+			name:    "provider declares both fields",
+			content: "[providers.openai]\nuser_agent_enabled = false\nuser_agent = \"x/1\"\n",
+			want:    "user_agent_enabled is false",
+		},
+		{
+			name:    "model declares both fields",
+			content: "[providers.openai.models.\"m\"]\nuser_agent_enabled = false\nuser_agent = \"x/1\"\n",
+			want:    "user_agent_enabled is false",
+		},
+		{
+			name:    "a value carries a control character",
+			content: "[providers.openai]\nuser_agent = \"probe\\u0001\"\n",
+			want:    "unsupported characters",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, test.content)
+
+			_, err := config.Load(config.LoadOptions{ConfigFile: path})
+			require.ErrorIs(t, err, config.ErrInvalid)
+			assert.Contains(t, err.Error(), test.want)
+		})
+	}
+}
+
 func TestLoadMultipleModelsRequireDefaultOrProcessSelection(t *testing.T) {
 	t.Parallel()
 
@@ -705,6 +1092,11 @@ func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 			wantText: "default = true",
 		},
 		{name: "legacy flat models", content: "[[models]]\nid = \"openai/gpt\"\n", want: config.ErrMigration},
+		{
+			name:    "legacy subagent table",
+			content: "[subagent]\nmax_concurrent = 2\n",
+			want:    config.ErrMigration, wantText: "[subagents]",
+		},
 		{
 			name:    "legacy provider api",
 			content: "[providers.openai]\napi = \"responses\"\n",
@@ -888,4 +1280,35 @@ prompt_cache_key = true
 	require.True(t, ok, "the declared provider must be registered")
 	require.NotNil(t, provider.Compatibility.PromptCacheKey)
 	assert.True(t, *provider.Compatibility.PromptCacheKey)
+}
+
+func TestLoadMediaConfigDefaultsAndOverrides(t *testing.T) {
+	t.Parallel()
+
+	result, err := config.Load(config.LoadOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, config.DefaultMediaConfig(), result.Config.Media)
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[media]\nmax_request_bytes = 1048576\ncleanup_ttl_days = 7\ngc_grace_hours = 1\n")
+
+	result, err = config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, config.MediaConfig{MaxRequestBytes: 1 << 20, CleanupTTLDays: 7, GCGraceHours: 1}, result.Config.Media)
+
+	// A partial table keeps the other defaults.
+	partial := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, partial, "[media]\ncleanup_ttl_days = 0\n")
+
+	result, err = config.Load(config.LoadOptions{ConfigFile: partial})
+	require.NoError(t, err)
+	assert.Equal(t, 30<<20, result.Config.Media.MaxRequestBytes)
+	assert.Equal(t, 0, result.Config.Media.CleanupTTLDays)
+	assert.Equal(t, 24, result.Config.Media.GCGraceHours)
+
+	invalid := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, invalid, "[media]\nmax_request_bytes = -1\n")
+
+	_, err = config.Load(config.LoadOptions{ConfigFile: invalid})
+	require.ErrorIs(t, err, config.ErrInvalid)
 }

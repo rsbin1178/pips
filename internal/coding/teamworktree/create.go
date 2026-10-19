@@ -161,7 +161,7 @@ func (m *Manager) Create(
 		return partial, &RetainedError{Resource: partial, Cause: err}
 	}
 
-	if err := m.materializeBase(ctx, resource); err != nil {
+	if err := m.materializeBase(ctx, resource.base()); err != nil {
 		return resource, &RetainedError{Resource: resource, Cause: err}
 	}
 
@@ -214,8 +214,8 @@ func (m *Manager) bindCreatedResource(
 }
 
 //nolint:gocyclo // Raw materialization audits each supported Git entry and failure edge in order.
-func (m *Manager) materializeBase(ctx context.Context, resource Resource) error {
-	entries, err := m.git.ListTree(ctx, resource.Workspace.Path, resource.BaseOID)
+func (m *Manager) materializeBase(ctx context.Context, base worktreeBase) error {
+	entries, err := m.git.ListTree(ctx, base.workspace, base.baseOID)
 	if err != nil {
 		return mapGitError(err)
 	}
@@ -224,12 +224,12 @@ func (m *Manager) materializeBase(ctx context.Context, resource Resource) error 
 		return ErrLimit
 	}
 
-	indexPath := filepath.Join(resource.GitDir.Path, "index")
-	if err := m.git.ReadTree(ctx, resource.Directory.Path, indexPath, resource.BaseOID); err != nil {
+	indexPath := filepath.Join(base.gitDir, "index")
+	if err := m.git.ReadTree(ctx, base.directory, indexPath, base.baseOID); err != nil {
 		return mapGitError(err)
 	}
 
-	root, err := os.OpenRoot(resource.Directory.Path)
+	root, err := os.OpenRoot(base.directory)
 	if err != nil {
 		return fmt.Errorf("%w: open Worktree root: %w", ErrIdentity, err)
 	}
@@ -247,7 +247,7 @@ func (m *Manager) materializeBase(ctx context.Context, resource Resource) error 
 			return fmt.Errorf("%w: unsupported base tree entry", ErrUnsafeRepository)
 		}
 
-		content, err := m.git.CatBlob(ctx, resource.Workspace.Path, entry.OID)
+		content, err := m.git.CatBlob(ctx, base.workspace, entry.OID)
 		if err != nil {
 			return mapGitError(err)
 		}

@@ -50,7 +50,7 @@ func New(
 			openai.WithBaseURL(resolved.Endpoint.BaseURL),
 			openai.WithAPI(openAIAPI(resolved.Protocol)),
 			openai.WithCompatibility(resolved.Compatibility),
-		}, openai.WithAllowHTTP, openai.WithAllowPrivateIPs, openai.WithStreamIdleTimeout)
+		}, openai.WithAllowHTTP, openai.WithAllowPrivateIPs, openai.WithStreamIdleTimeout, openai.WithUserAgent)
 
 		return withCodingModel(openai.New(resolved.Ref.Model, options...), resolved), nil
 	case config.ProtocolAnthropicMessages:
@@ -58,7 +58,7 @@ func New(
 			anthropic.WithAPIKey(secret.APIKey()),
 			anthropic.WithProvider(resolved.Ref.Provider),
 			anthropic.WithBaseURL(resolved.Endpoint.BaseURL),
-		}, anthropic.WithAllowHTTP, anthropic.WithAllowPrivateIPs, anthropic.WithStreamIdleTimeout)
+		}, anthropic.WithAllowHTTP, anthropic.WithAllowPrivateIPs, anthropic.WithStreamIdleTimeout, anthropic.WithUserAgent)
 
 		return withCodingModel(anthropic.New(resolved.Ref.Model, options...), resolved), nil
 	case config.ProtocolGeminiGenerateContent:
@@ -66,7 +66,7 @@ func New(
 			gemini.WithAPIKey(secret.APIKey()),
 			gemini.WithProvider(resolved.Ref.Provider),
 			gemini.WithBaseURL(resolved.Endpoint.BaseURL),
-		}, gemini.WithAllowHTTP, gemini.WithAllowPrivateIPs, gemini.WithStreamIdleTimeout)
+		}, gemini.WithAllowHTTP, gemini.WithAllowPrivateIPs, gemini.WithStreamIdleTimeout, gemini.WithUserAgent)
 
 		return withCodingModel(gemini.New(resolved.Ref.Model, options...), resolved), nil
 	default:
@@ -85,6 +85,7 @@ func adapterOptions[T any](
 	allowHTTP func() T,
 	allowPrivateIPs func() T,
 	streamIdleTimeout func(time.Duration) T,
+	userAgent func(string) T,
 ) []T {
 	options := slices.Clone(base)
 	if resolved.Endpoint.AllowHTTP {
@@ -95,6 +96,11 @@ func adapterOptions[T any](
 	}
 	if resolved.StreamIdleTimeout > 0 {
 		options = append(options, streamIdleTimeout(resolved.StreamIdleTimeout))
+	}
+	// A declared User-Agent is applied whether or not it carries a value: an
+	// empty one is how a declaration switches the header off.
+	if resolved.UserAgent != nil {
+		options = append(options, userAgent(*resolved.UserAgent))
 	}
 
 	return options

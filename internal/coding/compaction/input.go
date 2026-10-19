@@ -118,7 +118,7 @@ func renderMessage(message ai.Message, parts []ai.Part, lossy bool) string {
 		case ai.ReasoningPart:
 			out.WriteString("[reasoning omitted]")
 		case ai.ImagePart:
-			out.WriteString("[image]")
+			renderImage(&out, value)
 		case ai.FilePart:
 			fmt.Fprintf(&out, "[file %s]", value.Name)
 		case ai.ToolCallPart:
@@ -162,13 +162,32 @@ func renderResult(out *strings.Builder, parts []ai.Part) {
 				fmt.Fprintf(out, "[binary resource %s]", value.URI)
 			}
 		case ai.ImagePart:
-			out.WriteString("[image]")
+			renderImage(out, value)
 		case ai.FilePart:
 			fmt.Fprintf(out, "[file %s]", value.Name)
 		}
 
 		out.WriteByte('\n')
 	}
+}
+
+// renderImage keeps a persisted media reference in the compaction summary so
+// the image stays reachable after compaction. Inline media has no reference to
+// keep and renders as before.
+func renderImage(out *strings.Builder, image ai.ImagePart) {
+	if image.Source.Path == "" {
+		out.WriteString("[image]")
+
+		return
+	}
+
+	fmt.Fprintf(out, "[image %s", image.Source.Path)
+
+	if image.Source.Width > 0 && image.Source.Height > 0 {
+		fmt.Fprintf(out, " %d×%d", image.Source.Width, image.Source.Height)
+	}
+
+	out.WriteByte(']')
 }
 
 func joinGroups(groups []inputGroup) string {

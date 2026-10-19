@@ -109,8 +109,8 @@ type toolActivityRecord struct {
 }
 
 type durableSubagentArgs struct {
-	Role subagent.Role `json:"role"`
-	Task string        `json:"task"`
+	Role subagent.Role `json:"subagent_type"`
+	Task string        `json:"prompt"`
 }
 
 type durableSubagentResult struct {
@@ -295,6 +295,16 @@ func describeToolActivities(scan *toolScanState, cache *toolProjectionCache) []t
 		record.described = true
 	}
 
+	// The TUI suppresses todo_write calls from the scrollback and lets the
+	// dedicated todo surface carry the state. The transient spinner still comes
+	// from runningToolActivities, a completed call leaves no card, and a failure
+	// stays visible as an error card.
+	activities = slices.DeleteFunc(activities, func(activity toolActivity) bool {
+		return activity.class == toolClassTaskList &&
+			activity.state != toolStateFailed &&
+			activity.state != toolStateInterrupted
+	})
+
 	sort.SliceStable(activities, func(left, right int) bool {
 		if activities[left].position != activities[right].position {
 			return activities[left].position < activities[right].position
@@ -425,7 +435,7 @@ func describeToolCall(call coding.ToolCall) (toolActivityClass, string, string) 
 		)
 	case toolNamePatch:
 		return toolClassPatch, "Update", workspaceLabel
-	case tasklist.ToolName:
+	case tasklist.ToolName, tasklist.LegacyToolName:
 		return toolClassTaskList, "", ""
 	case harness.SkillToolName:
 		return toolClassGeneric, "Loaded skill", toolArgumentString(arguments, "name")
@@ -433,11 +443,11 @@ func describeToolCall(call coding.ToolCall) (toolActivityClass, string, string) 
 		return toolClassPlan, "Enter plan mode", ""
 	case planmode.ExitToolName:
 		return toolClassPlan, "Submit for approval", ""
-	case subagent.ToolName, subagent.SpawnToolName:
-		role := subagent.Role(toolArgumentString(arguments, "role"))
+	case subagent.ToolName:
+		role := subagent.Role(toolArgumentString(arguments, "subagent_type"))
 
 		return toolClassSubagent, subagentActivityLabel(role, subagent.StateRunning),
-			oneLineSubagentTask(toolArgumentString(arguments, "task"))
+			oneLineSubagentTask(toolArgumentString(arguments, "prompt"))
 	default:
 		return toolClassGeneric, "Call", call.Name
 	}
@@ -459,8 +469,15 @@ func subjectInPath(subject, path string) string {
 func safeWorkspaceToolPath(value string) string {
 	value = oneLineToolText(value)
 	clean := path.Clean(value)
-	if value != "" && (path.IsAbs(value) || filepath.IsAbs(value) ||
-		clean == ".." || strings.HasPrefix(clean, "../")) {
+	if value != "" && (path.IsAbs(value) || filepath.IsAbs(value)) {
+		base := filepath.Base(value)
+		if base == "" || base == "." || base == string(filepath.Separator) {
+			return "[absolute path]"
+		}
+
+		return "…/" + base
+	}
+	if value != "" && (clean == ".." || strings.HasPrefix(clean, "../")) {
 		return "[invalid path]"
 	}
 
@@ -835,19 +852,22 @@ func isShellExecutable(value string) bool {
 	}
 }
 
-// taskListActivityLabel names the update_plan Tool the way the user sees it.
+// taskListActivityLabel names the todo_write Tool the way the user sees it.
+// Legacy update_plan calls render through the same label. The running form is
+// the transient spinner; a completed call is suppressed from the timeline, while
+// a failed or interrupted call stays visible as an error card.
 func taskListActivityLabel(state toolActivityState) string {
 	switch state {
 	case toolStateRunning:
-		return "Updating plan"
+		return "Updating todo list"
 	case toolStateFailed:
-		return "Plan update failed"
+		return "Todo update failed"
 	case toolStateInterrupted:
-		return "Plan update interrupted"
+		return "Todo update interrupted"
 	case toolStateSucceeded:
-		return "Updated plan"
+		return "Updated todo list"
 	default:
-		return "Update plan"
+		return "Update todo list"
 	}
 }
 
@@ -874,7 +894,7 @@ func taskListRows(activity toolActivity, maximum int) []string {
 
 	rows := make([]string, 0, len(update.Plan))
 	for _, item := range update.Plan {
-		rows = append(rows, taskListGlyph(item.Status)+" "+oneLineToolText(item.Step))
+		rows = append(rows, taskListGlyph(item.Status)+" "+taskListItemLabel(item))
 	}
 	if maximum > 0 && len(rows) > maximum {
 		rows = rows[:maximum]
@@ -883,12 +903,24 @@ func taskListRows(activity toolActivity, maximum int) []string {
 	return rows
 }
 
+// taskListItemLabel names an item by its step, falling back to its id when a
+// status-only merge omits the step, so the row still reads as a step.
+func taskListItemLabel(item tasklist.Item) string {
+	if item.Step == "" {
+		return oneLineToolText(item.ID)
+	}
+
+	return oneLineToolText(item.Step)
+}
+
 func taskListGlyph(status tasklist.Status) string {
 	switch status {
 	case tasklist.StatusCompleted:
 		return "✔"
 	case tasklist.StatusInProgress:
 		return "◐"
+	case tasklist.StatusCancelled:
+		return "⊘"
 	case tasklist.StatusPending:
 		return "□"
 	default:

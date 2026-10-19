@@ -18,12 +18,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestInputSurfacesAskForTheBarCursor pins the cursor everywhere text is typed.
-// The Composer, the question and plan-review editors, the find box and the route
-// search all take their cursor style from the two shared builders, so both
-// builders carrying the shape and the palette accent covers every surface in
-// every theme.
-func TestInputSurfacesAskForTheBarCursor(t *testing.T) {
+// TestInputSurfacesAskForABlinkingBarCursor pins the cursor everywhere text is
+// typed. The Composer, the question and plan-review editors, the find box and the
+// route search all take their cursor style from the two shared builders, so both
+// builders carrying the shape, the blink and the palette accent covers every
+// surface in every theme.
+func TestInputSurfacesAskForABlinkingBarCursor(t *testing.T) {
 	t.Parallel()
 
 	for _, theme := range []colorTheme{
@@ -36,29 +36,36 @@ func TestInputSurfacesAskForTheBarCursor(t *testing.T) {
 		textInputStyles := sessionSearchStyles(theme, false)
 		assert.Equal(t, tea.CursorBar, textareaStyles.Cursor.Shape, "textarea shape %s", theme.id)
 		assert.Equal(t, tea.CursorBar, textInputStyles.Cursor.Shape, "text input shape %s", theme.id)
+		assert.True(t, textareaStyles.Cursor.Blink, "textarea blink %s", theme.id)
+		assert.True(t, textInputStyles.Cursor.Blink, "text input blink %s", theme.id)
 		assert.Equal(t, theme.palette.session, textareaStyles.Cursor.Color, "textarea cursor color %s", theme.id)
 		assert.Equal(t, theme.palette.session, textInputStyles.Cursor.Color, "text input cursor color %s", theme.id)
 
 		// NO_COLOR drops the color with the rest of the palette and keeps the
-		// shape, which is structure rather than styling.
+		// shape and the blink, which are structure rather than styling.
 		assert.Equal(t, tea.CursorBar, composerStyles(theme, true).Cursor.Shape, "no-color textarea shape %s", theme.id)
 		assert.Equal(t, tea.CursorBar, sessionSearchStyles(theme, true).Cursor.Shape, "no-color text input shape %s", theme.id)
+		assert.True(t, composerStyles(theme, true).Cursor.Blink, "no-color textarea blink %s", theme.id)
+		assert.True(t, sessionSearchStyles(theme, true).Cursor.Blink, "no-color text input blink %s", theme.id)
 		assert.Nil(t, composerStyles(theme, true).Cursor.Color, "no-color textarea color %s", theme.id)
 		assert.Nil(t, sessionSearchStyles(theme, true).Cursor.Color, "no-color text input color %s", theme.id)
 	}
 
-	// The widgets hand the same shape to the renderer through their views.
+	// The widgets hand the same shape and blink to the renderer through their views.
 	model := readyModel(t, true)
 	require.NotNil(t, model.View().Cursor)
 	assert.Equal(t, tea.CursorBar, model.View().Cursor.Shape, "the Composer")
+	assert.True(t, model.View().Cursor.Blink, "the Composer blinks")
 
 	model.openSearch("")
 	require.NotNil(t, model.View().Cursor)
 	assert.Equal(t, tea.CursorBar, model.View().Cursor.Shape, "the find box")
+	assert.True(t, model.View().Cursor.Blink, "the find box blinks")
 
 	model.route = newSessionPickerState("", model.theme, true)
 	require.NotNil(t, model.View().Cursor)
 	assert.Equal(t, tea.CursorBar, model.View().Cursor.Shape, "the route search")
+	assert.True(t, model.View().Cursor.Blink, "the route search blinks")
 
 	// A live theme switch re-applies the same builders, so the cursor color the
 	// renderer is asked for follows the new palette.

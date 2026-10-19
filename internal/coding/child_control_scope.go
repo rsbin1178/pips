@@ -18,6 +18,7 @@ import (
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes/git"
 	"github.com/rsbin1178/pips/internal/coding/compaction"
 	"github.com/rsbin1178/pips/internal/coding/config"
@@ -35,16 +36,19 @@ import (
 // parent approval controller, parent pending runner, parent harness, or parent
 // interaction pointer.
 type childScopeFactory struct {
-	repository        *session.Repository
-	fullCompaction    *compaction.Policy
-	workspace         workspace.Workspace
-	tree              *workspace.Tree
-	toolLimits        tools.Limits
-	policy            execution.Policy
-	executor          *execution.Executor
-	sandbox           config.SandboxMode
-	network           config.SandboxNetworkMode
-	requestPolicy     func(*ai.Request)
+	repository     *session.Repository
+	fullCompaction *compaction.Policy
+	workspace      workspace.Workspace
+	tree           *workspace.Tree
+	toolLimits     tools.Limits
+	policy         execution.Policy
+	executor       *execution.Executor
+	sandbox        config.SandboxMode
+	network        config.SandboxNetworkMode
+	requestPolicy  func(*ai.Request)
+	// mediaBudget is the parent Runtime's `[media] max_request_bytes`, so a
+	// child's assembled request shares the conversation's byte budget.
+	mediaBudget       int
 	toolTimeout       time.Duration
 	inspector         *git.Inspector
 	hooks             []hooks.Definition
@@ -60,14 +64,50 @@ type childScopeFactory struct {
 	// recovery episode is derived from. Zero leaves the transport default.
 	streamIdleTimeout time.Duration
 	mcpEntries        []catalog.Entry
+	// backgroundTasks is the session's one background-task registry. A child
+	// watch registers on it, so a monitor a child starts is the same kind of
+	// session task the conversation's own watches are, and its events reach the
+	// one conversation the Runtime owns.
+	backgroundTasks *background.Registry
+	// killBackground is the one control operation a background-task stop routes
+	// through, shared with the conversation's own stop Tool, and
+	// knownBackgroundIDs is the enumeration a not-found stop names.
+	killBackground     tools.KillBackground
+	knownBackgroundIDs tools.KnownBackgroundIDs
+	// readBackgroundTasks and taskLogRead are the read half of the same
+	// registry: the task-output/wait Tools' one read operation, and the exact
+	// path admission that lets the read Tool open a child's own watch log.
+	readBackgroundTasks tools.ReadBackgroundTasks
+	taskLogRead         tools.TaskLogRead
+	// monitorOwner resolves the interaction a child's background task belongs
+	// to, so a cancelled interaction cancels the watches and commands its
+	// children started too.
+	monitorOwner func() string
+	// executorConfig and gitConfig let a child that runs outside the parent
+	// workspace build its own process executor and Git inspector there.
+	executorConfig execution.ExecutorConfig
+	gitConfig      git.Config
+	// worktrees provisions a preserved child Worktree on first use.
+	worktrees *childWorktrees
+	// messages is the tree's child messaging coordinator. It is nil while the
+	// messaging gate is closed, which keeps the messaging Tool unoffered.
+	messages *subagent.MessageCoordinator
+	// wakeManager, wakeDispatcher, and wakeObserver let a child sender start
+	// the continuation of a completed sibling. The woken child's lifecycle
+	// belongs to the sender's own Run rather than the conversation's, so
+	// wakeObserver projects it without entering the conversation timeline.
+	// wakeDispatcher is a provider because the dispatcher is built from this
+	// factory.
+	wakeManager    *subagent.Manager
+	wakeDispatcher func() subagent.Dispatcher
+	wakeObserver   subagent.Observer
+	// directoryResources is the child-scoped binding set the constructed scope
+	// takes ownership of. It is nil for a child in the parent workspace.
+	directoryResources *childDirectoryResources
 	// toolSearchNameFor resolves the discovery tool name for the provider that
 	// serves this child; nil uses catalog.DefaultToolSearchName.
-	toolSearchNameFor    func(ai.Provider) string
-	controls             *childControlRegistry
-	subagents            *subagent.Manager
-	delegationDispatcher subagent.Dispatcher
-	delegationOwner      subagent.Ownership
-	delegationObserver   subagent.Observer
+	toolSearchNameFor func(ai.Provider) string
+	controls          *childControlRegistry
 	// onPauseChanged projects only the child Session phase transition. It is
 	// deliberately separate from parent interaction state so a child waiting
 	// for input can be surfaced and controlled without pausing its parent.
@@ -203,6 +243,14 @@ type childControlScope struct {
 	cancel         context.CancelFunc
 	generation     *IntegrationGeneration
 	factory        childScopeFactory
+	// directoryResources owns the child-scoped tree and Git inspector when the
+	// child runs outside the parent workspace. It is nil for a shared child.
+	directoryResources *childDirectoryResources
+	// directoryOverride is the child's effective working directory when it
+	// differs from the parent workspace, and worktreePath is its preserved
+	// Worktree when it has one.
+	directoryOverride string
+	worktreePath      string
 
 	resolver    activeResolver
 	pending     pendingRunner
@@ -215,7 +263,6 @@ type childControlScope struct {
 	hooks       childHookScope
 	guard       childToolGuard
 	validator   subagent.OutputValidator
-	nested      *subagent.Manager
 
 	pause       ChildPauseKind
 	approval    approval.State
@@ -226,6 +273,28 @@ type childControlScope struct {
 	closed      bool
 	closeOnce   sync.Once
 	closeErr    error
+
+	// ownership is this child's own durable ownership. It binds the child's
+	// messaging sender identity.
+	ownership subagent.Ownership
+	// inbound holds admitted messages that no live hand-off has consumed yet.
+	// They are injected at this child's next turn boundary.
+	inbound []inboundMessage
+	// runActive reports that a prompt run is in flight, so an admitted message
+	// can be handed to the harness immediately. runEnded reports that the run
+	// has finished, so this scope accepts nothing further.
+	runActive bool
+	runEnded  bool
+}
+
+// inboundMessage is one admitted message waiting for this child's next turn
+// boundary. release frees its tree-wide admission once the message is consumed
+// or dropped.
+type inboundMessage struct {
+	id       string
+	delivery subagent.MessageDelivery
+	text     string
+	release  func()
 }
 
 func newChildControlScope(
@@ -256,11 +325,7 @@ func newChildControlScope(
 		return nil, err
 	}
 	acquired := true
-	var nested *subagent.Manager
 	defer func() {
-		if returnErr != nil && nested != nil {
-			returnErr = errors.Join(returnErr, nested.Close(context.WithoutCancel(ctx)))
-		}
 		if returnErr != nil && acquired {
 			returnErr = errors.Join(returnErr, generation.release(context.WithoutCancel(ctx)))
 		}
@@ -277,6 +342,11 @@ func newChildControlScope(
 		generation:     generation,
 		factory:        factory.clone(),
 		resume:         make(chan struct{}, 1),
+
+		directoryResources: factory.directoryResources,
+		directoryOverride:  strings.TrimSpace(input.Directory),
+		worktreePath:       input.WorktreePath,
+		ownership:          input.Request.Ownership,
 	}
 	scope.hooks = newChildHookScope(
 		factory.hooks, factory.privateHooks, factory.hookRunner,
@@ -288,23 +358,21 @@ func newChildControlScope(
 		return nil, err
 	}
 	scope.validator = validator
-	if factory.delegationDispatcher != nil {
-		if factory.subagents == nil || len(scope.plan.DelegationTargets) == 0 {
-			cancel()
-			return nil, fmt.Errorf("%w: incomplete recursive delegation dependencies", subagent.ErrInvalid)
-		}
-		nested, err = subagent.New(subagent.Config{
-			Context: lifecycle, Parent: input.Child, Model: factory.model,
-			RequestPolicy: factory.requestPolicy, Share: factory.subagents,
-			DelegationDepth: scope.plan.DelegationDepth + 1,
-		})
-		if err != nil {
-			cancel()
-			return nil, err
-		}
-		scope.nested = nested
-	}
 
+	handlers := []approval.Handler{tools.NewShellHandlerForSandboxWithOwner(
+		factory.backgroundTasks,
+		factory.sandbox,
+		factory.network,
+		factory.monitorOwner,
+	)}
+	if factory.backgroundTasks != nil {
+		handlers = append(handlers, tools.NewMonitorHandlerForSandboxWithOwner(
+			factory.backgroundTasks,
+			factory.sandbox,
+			factory.network,
+			factory.monitorOwner,
+		))
+	}
 	controller, err := approval.New(
 		factory.workspace,
 		scope.child,
@@ -312,7 +380,7 @@ func newChildControlScope(
 		&scope.pending,
 		factory.policy,
 		factory.executor,
-		tools.NewShellHandlerForSandbox(factory.sandbox, factory.network),
+		handlers...,
 	)
 	if err != nil {
 		cancel()
@@ -332,9 +400,15 @@ func newChildControlScope(
 		cancel()
 		return nil, err
 	}
+	scope.guard.risks = childToolRisks(descriptors)
 	scope.changes = newInteractionChangeTracker(factory.inspector, descriptors)
 	policy := catalog.AllowAll(factory.workspace.Identity().Key(), catalog.RiskPrivileged)
-	searchOptions := catalog.ToolSearchOptions{Enabled: scope.plan.ToolSearch}
+	searchOptions := catalog.ToolSearchOptions{
+		Enabled: scope.plan.ToolSearch,
+		// A child whose plan enables the search surface offers the dispatch Tool
+		// too, resolving through the child's own catalog and policy.
+		UseTool: tools.NewUseToolTool,
+	}
 	if factory.toolSearchNameFor != nil {
 		searchOptions.Name = factory.toolSearchNameFor(factory.model.Provider())
 	}
@@ -344,8 +418,11 @@ func newChildControlScope(
 		return nil, fmt.Errorf("%w: tool search: %w", ErrRuntimeInvalid, err)
 	}
 	searchName := ""
+	dispatchName := ""
 	if scope.plan.ToolSearch {
 		searchName = search.Name()
+		// The dispatch Tool is leased on exactly the terms the search surface is.
+		dispatchName = tools.UseToolName
 	}
 	executableTools, err := search.ExecutableTools(ctx)
 	if err != nil {
@@ -365,9 +442,12 @@ func newChildControlScope(
 		return nil, err
 	}
 	composed := extension.ComposeHooks(
+		// The capability gate runs first, so the refusal it writes is what every
+		// later hook observes and what reaches the provider.
+		extension.Hooks{AfterTool: mediaGateAfterTool(factory.model)},
 		extension.Hooks{BeforeTool: scope.guard.before(scope.plan.Limits)},
 		extension.Hooks{BeforeTool: scope.hooks.beforeTool},
-		extension.Hooks{BeforeTool: leasedToolGuard(scope.factory.mode, descriptors, searchName, allTools)},
+		extension.Hooks{BeforeTool: leasedToolGuard(scope.factory.mode, descriptors, searchName, dispatchName, allTools)},
 		extension.Hooks{BeforeTool: scope.questions.BeforeTool},
 		extension.Hooks{BeforeTool: scope.changes.beforeTool},
 		extension.Hooks{BeforeTool: scope.controller.BeforeTool},
@@ -397,11 +477,21 @@ func newChildControlScope(
 		agent.WithRequest(scope.requestPolicy),
 		agent.WithOutputGuardrail("subagent_result", scope.validateOutput),
 	)
+	if hydrator := childMediaHydrator(scope.childHandle, factory.mediaBudget); hydrator != nil {
+		options = append(options, agent.WithTransformContext(hydrator.Hydrate))
+	}
+	systemSuffix := strings.TrimSpace(input.SystemSuffix)
+	if preloaded != "" {
+		if systemSuffix != "" {
+			systemSuffix += "\n"
+		}
+		systemSuffix += preloaded
+	}
 	h, err := harness.New(
 		compaction.GuardModel(factory.model, factory.fullCompaction),
 		scope.child,
 		harness.WithSystem(scope.plan.Instructions),
-		harness.WithSystemSuffix(preloaded),
+		harness.WithSystemSuffix(systemSuffix),
 		harness.WithTools(executableTools...),
 		harness.WithSkillCatalog(skillCatalog),
 		harness.WithOnEvent(func(eventCtx context.Context, event agent.Event) {
@@ -443,7 +533,33 @@ func (s *childControlScope) buildCatalog(
 	if !found {
 		return nil, nil, nil, fmt.Errorf("%w: child controlled shell is unavailable", subagent.ErrInvalid)
 	}
-	local, err := tools.NewCatalog(s.factory.tree, s.factory.toolLimits, tools.WithControlledShell(shell))
+	localOptions := []tools.CatalogOption{tools.WithControlledShell(shell)}
+	// A child keeps the watch surface exactly when its capability mode does, and
+	// every watch it starts registers on the session's own registry, so its
+	// events land in the one conversation this Runtime owns rather than opening
+	// a second delivery queue.
+	if monitor, ok := s.controller.Tool(tools.MonitorName); ok {
+		localOptions = append(localOptions, tools.WithControlledMonitor(monitor))
+		if s.factory.killBackground != nil {
+			localOptions = append(localOptions, tools.WithKillBackground(s.factory.killBackground))
+		}
+		if s.factory.knownBackgroundIDs != nil {
+			localOptions = append(
+				localOptions,
+				tools.WithKnownBackgroundIDs(s.factory.knownBackgroundIDs),
+			)
+		}
+		if s.factory.readBackgroundTasks != nil {
+			localOptions = append(
+				localOptions,
+				tools.WithReadBackgroundTasks(s.factory.readBackgroundTasks),
+			)
+		}
+		if s.factory.taskLogRead.Admit != nil {
+			localOptions = append(localOptions, tools.WithTaskLogRead(s.factory.taskLogRead))
+		}
+	}
+	local, err := tools.NewCatalog(s.factory.tree, s.factory.toolLimits, localOptions...)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -519,6 +635,7 @@ func (s *childControlScope) buildCatalog(
 		}
 		entries = append(entries, catalog.Local("coding.skills", catalog.RiskRead, skillTool)...)
 	}
+	entries = append(entries, s.messageCatalogEntries()...)
 	for _, entry := range s.factory.mcpEntries {
 		// Never reuse an ambient history implementation, even if accidentally
 		// supplied in this integration snapshot. Its binding may belong to a parent.
@@ -534,15 +651,8 @@ func (s *childControlScope) buildCatalog(
 			})
 		}
 	}
-	if s.nested != nil {
-		delegationTool := s.nested.ToolForTargets(
-			s.factory.delegationOwner,
-			s.factory.delegationObserver,
-			s.factory.delegationDispatcher,
-			s.plan.DelegationTargets,
-		)
-		entries = append(entries, catalog.Local("coding.subagent", catalog.RiskRead, delegationTool)...)
-	}
+	// Depth is capped at one: a child never receives a delegation tool, so
+	// recursion cannot start below the root conversation.
 	childCatalog, err := catalog.New(entries...)
 	if err != nil {
 		return nil, nil, nil, err
@@ -561,6 +671,69 @@ func (s *childControlScope) buildCatalog(
 	s.historyAllowed = slices.ContainsFunc(descriptors, childHistoryDescriptor)
 
 	return childCatalog, skillCatalog, descriptors, nil
+}
+
+// messageCatalogEntries returns this child's messaging Tool when its plan
+// selects one and the messaging gate is open. The child's own binding carries
+// its sender identity, so a message it sends is attributed to this child.
+func (s *childControlScope) messageCatalogEntries() []catalog.Entry {
+	if s == nil || s.plan.Identity.ID == "" || s.factory.messages == nil {
+		return nil
+	}
+	descriptor := catalog.Descriptor{
+		Name:   SendMessageToolName,
+		Source: catalog.Source{Kind: catalog.SourceLocal, ID: messageCatalogID},
+		Risk:   catalog.RiskRead,
+	}
+	if !planSelectsDescriptor(s.plan, descriptor) {
+		return nil
+	}
+	// A child-initiated wake is attributed to this child's own Tool call, not to
+	// the conversation's Run, so the woken child is projected without entering
+	// the conversation timeline.
+	identity := subagent.MessageSenderIdentity{
+		SessionID: s.childSessionID,
+		AttemptID: s.childSessionID,
+		Child:     true,
+		Ownership: s.ownership,
+		AgentID:   s.plan.Identity.ID,
+	}
+	tool := newSendMessageTool(
+		s.factory.messages,
+		subagent.NewMessageBinding(identity, s.childWakePort(identity)),
+	)
+	if tool == nil {
+		return nil
+	}
+
+	return catalog.Local(messageCatalogID, catalog.RiskRead, tool)
+}
+
+// childWakePort starts the continuation of a completed sibling on behalf of
+// this child. A wake's lifecycle must belong to an active Tool call of the Run
+// that asked for it, and a child's own Run is not the conversation's Run, so
+// the woken child is attributed to this child's Tool call and only its own
+// projection is opened. A factory with no wake route keeps the port closed,
+// which refuses the wake rather than dropping it.
+func (s *childControlScope) childWakePort(sender subagent.MessageSenderIdentity) subagent.WakePort {
+	if s == nil || s.factory.wakeManager == nil || s.factory.wakeObserver == nil ||
+		s.factory.wakeDispatcher == nil {
+		return nil
+	}
+
+	return func(ctx context.Context, target subagent.WakeTarget) error {
+		return startSubagentWake(
+			ctx, s.factory.wakeManager, s.factory.wakeDispatcher(), s.factory.wakeObserver,
+			subagent.Ownership{
+				ParentSessionID:     sender.Ownership.ParentSessionID,
+				ParentInteractionID: sender.SessionID,
+				ParentRunID:         target.Call.RunID,
+				ParentToolCallID:    target.Call.ID,
+				RootInteractionID:   sender.Ownership.RootInteractionID,
+			},
+			target,
+		)
+	}
 }
 
 func childHistoryDescriptor(descriptor catalog.Descriptor) bool {
@@ -647,14 +820,33 @@ func (s *childControlScope) Run(ctx context.Context, task string) (subagent.Runn
 	if s == nil || s.harness == nil {
 		return subagent.RunnerResult{}, fmt.Errorf("%w: child control scope is unavailable", subagent.ErrClosed)
 	}
-	messages := []ai.Message{ai.UserText(task)}
+	messages, err := s.initialMessages(task)
+	if err != nil {
+		return s.finishRun(ctx, subagent.RunnerResult{}, err)
+	}
+	s.beginRun()
+	defer s.markRunEnded()
 	for {
-		result, err := s.harness.PromptMessages(ctx, messages...)
+		// A message admitted before this run started, or while it was paused,
+		// is injected at the next turn boundary instead of being lost.
+		messages = append(messages, s.drainPending()...)
+		result, err := s.harness.PromptMessagesRun(ctx, messages...)
 		messages = nil
 		if err != nil {
 			return s.finishRun(ctx, subagent.RunnerResult{Run: result, ToolCalls: s.guard.count()}, err)
 		}
 		if result == nil || result.Stop != agent.StopPaused {
+			// Closing the run and taking its last pending set happen under one
+			// critical section, so a concurrent admission either lands in this
+			// set and gets its turn, or sees the ended run and is refused. A
+			// message is therefore never accepted into a run that will not
+			// continue.
+			if pending := s.endRunAndDrain(); len(pending) > 0 {
+				s.beginRun()
+				messages = pending
+
+				continue
+			}
 			value, text := s.output()
 
 			return s.finishRun(ctx, subagent.RunnerResult{
@@ -673,11 +865,231 @@ func (s *childControlScope) Run(ctx context.Context, task string) (subagent.Runn
 	}
 }
 
+// AdmitMessage implements subagent.MessageSink. It is the single entry point
+// for a message into this child. The message is queued here and injected at the
+// child's next turn boundary, or handed to the live run immediately.
+func (s *childControlScope) AdmitMessage(
+	ctx context.Context,
+	delivery subagent.MessageDelivery,
+	messageID string,
+	text string,
+	onRelease func(),
+) error {
+	if s == nil {
+		return subagent.ErrMessageClosed
+	}
+	release := releaseOnce(onRelease)
+	if err := ctx.Err(); err != nil {
+		release()
+
+		return err
+	}
+
+	s.mu.Lock()
+	switch {
+	case s.closed:
+		s.mu.Unlock()
+		release()
+
+		return subagent.ErrMessageClosed
+	case s.runEnded:
+		s.mu.Unlock()
+		release()
+
+		return subagent.ErrMessageFinalizing
+	case len(s.inbound) >= subagent.MaxChildMessageAdmissions:
+		s.mu.Unlock()
+		release()
+
+		return subagent.ErrMessageSaturated
+	}
+	s.inbound = append(s.inbound, inboundMessage{
+		id: messageID, delivery: delivery, text: text, release: release,
+	})
+	live := s.runActive
+	s.mu.Unlock()
+
+	if live {
+		s.forwardPending()
+	}
+
+	return nil
+}
+
+// beginRun records that this child's prompt run is in flight.
+func (s *childControlScope) beginRun() {
+	s.mu.Lock()
+	s.runActive = true
+	s.runEnded = false
+	s.mu.Unlock()
+}
+
+// endRunAndDrain closes this child's run and takes the messages no live
+// hand-off consumed. Closing and draining under one critical section is what
+// keeps an admission from being accepted into a run that has already stopped.
+func (s *childControlScope) endRunAndDrain() []ai.Message {
+	s.mu.Lock()
+	s.runActive = false
+	s.runEnded = true
+	pending := s.inbound
+	s.inbound = nil
+	s.mu.Unlock()
+
+	return inboundMessages(pending)
+}
+
+// markRunEnded records that this child's run has finished, so the scope
+// accepts no further message.
+func (s *childControlScope) markRunEnded() {
+	s.mu.Lock()
+	s.runActive = false
+	s.runEnded = true
+	s.mu.Unlock()
+}
+
+// forwardPending hands every pending message to the live run, oldest first. A
+// message the run cannot take yet stays pending for the next turn boundary.
+func (s *childControlScope) forwardPending() {
+	for {
+		s.mu.Lock()
+		if len(s.inbound) == 0 {
+			s.mu.Unlock()
+
+			return
+		}
+		item := s.inbound[0]
+		s.inbound = s.inbound[1:]
+		s.mu.Unlock()
+
+		if err := s.injectMessage(item); err != nil {
+			s.requeueMessage(item)
+
+			return
+		}
+		item.release()
+	}
+}
+
+// injectMessage hands one message to the running harness under its delivery
+// verb. The harness reports ErrIdle when no run is active.
+func (s *childControlScope) injectMessage(item inboundMessage) error {
+	message := ai.UserText(item.text)
+	switch item.delivery {
+	case subagent.MessageDeliveryQueue:
+		return s.harness.FollowUp(message)
+	case subagent.MessageDeliveryInterject:
+		return s.harness.Interject(message)
+	default:
+		return s.harness.Steer(message)
+	}
+}
+
+// requeueMessage returns one message to the head of the pending set.
+func (s *childControlScope) requeueMessage(item inboundMessage) {
+	s.mu.Lock()
+	s.inbound = append([]inboundMessage{item}, s.inbound...)
+	s.mu.Unlock()
+}
+
+// drainPending removes and returns the pending messages as user turns, oldest
+// first, releasing each admission as it is consumed.
+func (s *childControlScope) drainPending() []ai.Message {
+	s.mu.Lock()
+	pending := s.inbound
+	s.inbound = nil
+	s.mu.Unlock()
+
+	return inboundMessages(pending)
+}
+
+// inboundMessages renders admitted messages as user turns, releasing each
+// admission as it is consumed.
+func inboundMessages(pending []inboundMessage) []ai.Message {
+	if len(pending) == 0 {
+		return nil
+	}
+	messages := make([]ai.Message, 0, len(pending))
+	for _, item := range pending {
+		messages = append(messages, ai.UserText(item.text))
+		item.release()
+	}
+
+	return messages
+}
+
+// releaseOnce bounds one admitted message's release to a single call.
+func releaseOnce(release func()) func() {
+	if release == nil {
+		return func() {}
+	}
+	var once sync.Once
+
+	return func() { once.Do(release) }
+}
+
+const (
+	personaReminderPrefix = "<system-reminder>\n"
+	personaReminderSuffix = "\n</system-reminder>"
+)
+
+func personaReminderText(instructions string) string {
+	return personaReminderPrefix + instructions + personaReminderSuffix
+}
+
+// initialMessages builds the child's first prompt. A persona contributes one
+// synthetic user item inserted before the task prompt at the inherited-prefix
+// boundary. It is persisted with the run, it is not re-inserted when the
+// transcript already carries it, and it is never injected into a resumed
+// child, whose forked transcript already carries whatever its source had.
+func (s *childControlScope) initialMessages(task string) ([]ai.Message, error) {
+	messages := make([]ai.Message, 0, 2)
+	reminder := s.plan.PersonaReminder
+	if reminder != "" && s.plan.ResumeFrom == "" {
+		present, err := s.transcriptCarriesReminder(reminder)
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			messages = append(messages, ai.UserText(personaReminderText(reminder)))
+		}
+	}
+
+	return append(messages, ai.UserText(task)), nil
+}
+
+func (s *childControlScope) transcriptCarriesReminder(reminder string) (bool, error) {
+	conversation, err := s.child.Context()
+	if err != nil {
+		return false, err
+	}
+
+	return messagesCarryReminder(conversation.Messages, reminder), nil
+}
+
+// messagesCarryReminder reports whether a persisted conversation already holds
+// this exact persona reminder. It is what keeps a resumed child from
+// re-inserting the reminder it already carries.
+func messagesCarryReminder(messages []ai.Message, reminder string) bool {
+	expected := personaReminderText(reminder)
+	for _, message := range messages {
+		if childMessageText(message) == expected {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (s *childControlScope) finishRun(
 	ctx context.Context,
 	result subagent.RunnerResult,
 	runErr error,
 ) (subagent.RunnerResult, error) {
+	s.markRunEnded()
+	result.Cwd = s.directoryOverride
+	result.WorktreePath = s.worktreePath
+	result.StopCause = s.guard.stopCause()
+
 	return result, errors.Join(runErr, s.finishChanges(context.WithoutCancel(ctx)))
 }
 
@@ -1001,12 +1413,30 @@ func (s *childControlScope) requestPolicy(request *ai.Request) {
 			Strict: true,
 		}
 	}
+	s.applyReasoningEffort(request)
 	if s.factory.fullCompaction != nil {
 		fixed, err := compaction.RequestOverheadTokens(*request)
 		s.mu.Lock()
 		s.fixedTokens, s.fixedTokensErr = fixed, err
 		s.mu.Unlock()
 	}
+}
+
+// applyReasoningEffort applies the resolved role or persona reasoning level.
+// It is applied only for a model that exposes reasoning controls, so a level
+// declared for a non-reasoning model cannot reach the wire.
+func (s *childControlScope) applyReasoningEffort(request *ai.Request) {
+	if s.plan.ReasoningEffort == "" {
+		return
+	}
+	capabilities := s.factory.model.Capabilities()
+	if !capabilities.Reasoning {
+		return
+	}
+	if request.Reasoning == nil {
+		request.Reasoning = &ai.ReasoningConfig{}
+	}
+	request.Reasoning.Effort = ai.ReasoningEffort(s.plan.ReasoningEffort)
 }
 
 // prepareCompaction runs after ToolSearch and the durable TurnCompleted save
@@ -1076,6 +1506,15 @@ func (s *childControlScope) afterPendingTool(
 	if s == nil {
 		return parts, isError
 	}
+
+	// A paused call skips the child's AfterTool chain, so the media gate runs
+	// here too before the lifecycle hook sees the result.
+	if s.factory.model != nil {
+		if gated, refused := MediaGateForCapabilities(s.factory.model.Capabilities()).Check(call.Name, parts); refused {
+			parts = gated
+		}
+	}
+
 	override := s.hooks.afterTool(ctx, agent.ToolResultInfo{
 		ToolCall: call,
 		Result: ai.ToolResultPart{
@@ -1102,16 +1541,24 @@ func (s *childControlScope) Close(ctx context.Context) error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closed = true
+		undelivered := s.inbound
+		s.inbound = nil
 		s.mu.Unlock()
+		for _, item := range undelivered {
+			// A message this child never consumed still frees its tree-wide
+			// admission.
+			item.release()
+		}
 		s.cancel()
 		s.signalResume()
 		s.pending.clear()
 		s.resolver.set(nil)
 		s.factory.controls.remove(s.childSessionID, s)
-		if s.nested != nil {
-			s.closeErr = errors.Join(s.closeErr, s.nested.Close(ctx))
-		}
-		s.closeErr = errors.Join(s.closeErr, s.generation.release(ctx))
+		s.closeErr = errors.Join(
+			s.closeErr,
+			s.generation.release(ctx),
+			s.directoryResources.Close(),
+		)
 	})
 
 	s.mu.Lock()
@@ -1122,11 +1569,19 @@ func (s *childControlScope) Close(ctx context.Context) error {
 }
 
 type childToolGuard struct {
-	mu        sync.Mutex
-	toolCalls int
-	exhausted bool
-	last      [sha256.Size]byte
-	repeats   int
+	mu         sync.Mutex
+	toolCalls  int
+	exhausted  bool
+	noProgress bool
+	last       [sha256.Size]byte
+	repeats    int
+	// problematic reports that every call in the current identical run is
+	// read risk, the reference's ToolKind::Read | ToolKind::Plan tier. A mixed
+	// run falls back to the looser thresholds.
+	problematic bool
+	// risks maps one Tool's wire name to its catalog risk, so the guard can
+	// classify a run without re-reading the child catalog.
+	risks map[string]catalog.Risk
 }
 
 func (g *childToolGuard) before(limits subagent.Limits) func(context.Context, agent.ToolCallInfo) agent.ToolDecision {
@@ -1142,11 +1597,17 @@ func (g *childToolGuard) before(limits subagent.Limits) func(context.Context, ag
 		fingerprint := childToolFingerprint(info.ToolCall)
 		if fingerprint == g.last {
 			g.repeats++
+			g.problematic = g.problematic && g.readRisk(info.Name)
 		} else {
 			g.last = fingerprint
 			g.repeats = 1
+			g.problematic = g.readRisk(info.Name)
 		}
-		if g.repeats >= limits.RepeatedToolCallLimit {
+		nudge, stop := g.thresholds(limits)
+		if g.repeats >= stop {
+			g.noProgress = true
+		}
+		if g.repeats >= nudge {
 			return agent.DenyTool("identical tool call repeated; use existing evidence or choose a different action")
 		}
 
@@ -1154,12 +1615,39 @@ func (g *childToolGuard) before(limits subagent.Limits) func(context.Context, ag
 	}
 }
 
+// thresholds returns the nudge and hard-stop counts for the current run's tier.
+func (g *childToolGuard) thresholds(limits subagent.Limits) (int, int) {
+	if g.problematic {
+		return limits.RepeatedProblematicToolCallLimit, limits.RepeatedProblematicToolCallStopLimit
+	}
+
+	return limits.RepeatedToolCallLimit, limits.RepeatedToolCallStopLimit
+}
+
+func (g *childToolGuard) readRisk(name string) bool {
+	risk, known := g.risks[name]
+
+	return known && risk == catalog.RiskRead
+}
+
 func (g *childToolGuard) stopWhen(_ agent.RunInfo) bool {
 	g.mu.Lock()
-	stop := g.exhausted
+	stop := g.exhausted || g.noProgress
 	g.mu.Unlock()
 
 	return stop
+}
+
+// stopCause names a stop the repeat guard raised, so the Manager can classify
+// it as no_progress rather than an unexpected stop.
+func (g *childToolGuard) stopCause() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.noProgress {
+		return subagent.StopCauseNoProgress
+	}
+
+	return ""
 }
 
 func (g *childToolGuard) count() int {
@@ -1168,6 +1656,17 @@ func (g *childToolGuard) count() int {
 	g.mu.Unlock()
 
 	return count
+}
+
+// childToolRisks maps each child Tool's wire name to its catalog risk, so the
+// repeat guard can tell a read/plan run from a mixed one.
+func childToolRisks(descriptors []catalog.Descriptor) map[string]catalog.Risk {
+	risks := make(map[string]catalog.Risk, len(descriptors))
+	for _, descriptor := range descriptors {
+		risks[descriptor.Name] = descriptor.Risk
+	}
+
+	return risks
 }
 
 func childToolFingerprint(call agent.ToolCall) [sha256.Size]byte {

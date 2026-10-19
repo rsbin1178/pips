@@ -84,6 +84,19 @@ func (r childModelResolver) planModel(selection string) (string, error) {
 	return resolved.Ref.String(), nil
 }
 
+// planModelOrParent resolves one model selection and reports whether it fell
+// back to the parent model. An unresolvable or unusable selection never fails
+// the spawn: the caller records a diagnostic and the parent model runs instead,
+// matching the source's warn-and-fall-through behavior.
+func (r childModelResolver) planModelOrParent(selection string) (string, bool) {
+	model, err := r.planModel(selection)
+	if err != nil {
+		return r.base.Ref.String(), true
+	}
+
+	return model, false
+}
+
 // bind creates the model/request-policy pair after a child plan has been
 // persisted. The model identity comes only from the frozen plan and is
 // re-resolved against the interaction-captured catalog; it never re-reads a

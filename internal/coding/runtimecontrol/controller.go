@@ -18,6 +18,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/approval"
 	"github.com/rsbin1178/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/credential"
@@ -759,6 +760,7 @@ func (c *Controller) ListSessions(ctx context.Context) ([]session.Metadata, erro
 	}
 	directory := c.base.Paths.SessionsDir()
 	workspaceID := c.base.Workspace.Identity().Key()
+	workspacePath := c.base.Workspace.Root()
 	c.mu.Unlock()
 
 	metas, err := c.deps.listSession(ctx, directory)
@@ -768,7 +770,7 @@ func (c *Controller) ListSessions(ctx context.Context) ([]session.Metadata, erro
 
 	filtered := make([]session.Metadata, 0, len(metas))
 	for _, meta := range metas {
-		if meta.WorkspaceID == workspaceID {
+		if meta.BelongsToWorkspace(workspacePath, workspaceID) {
 			filtered = append(filtered, meta)
 		}
 	}
@@ -1143,6 +1145,64 @@ func (c *Controller) CancelSubagent(ctx context.Context, childSessionID string) 
 
 		return canceler.CancelSubagent(ctx, childSessionID)
 	})
+}
+
+// KillBackgroundTask stops one background task or child owned by the selected
+// Session. The tasks pane and the model's own stop Tool therefore share one
+// control method, and a stop requested from the pane is a user action. The
+// subject names which producer answered, so the caller can word its own report.
+func (c *Controller) KillBackgroundTask(
+	ctx context.Context,
+	taskID string,
+) (background.Outcome, background.Subject, error) {
+	var (
+		outcome background.Outcome
+		subject background.Subject
+	)
+
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		killer, ok := runtime.(interface {
+			KillBackgroundTask(
+				context.Context, string, background.KillSource,
+			) (background.Outcome, background.Subject, error)
+		})
+		if !ok {
+			return fmt.Errorf("%w: runtime does not expose background control", ErrInvalid)
+		}
+
+		var err error
+		outcome, subject, err = killer.KillBackgroundTask(ctx, taskID, background.KillUser)
+
+		return err
+	})
+
+	return outcome, subject, err
+}
+
+// InspectBackgroundTask returns the selected Session's bounded view of one
+// background task: its snapshot and a bounded tail of its own output.
+//
+//nolint:dupl // Typed optional Runtime capabilities deliberately share the same lock boundary.
+func (c *Controller) InspectBackgroundTask(
+	ctx context.Context,
+	taskID string,
+) (coding.BackgroundTaskInspection, error) {
+	var value coding.BackgroundTaskInspection
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		inspector, ok := runtime.(interface {
+			InspectBackgroundTask(context.Context, string) (coding.BackgroundTaskInspection, error)
+		})
+		if !ok {
+			return fmt.Errorf("%w: runtime does not expose background inspection", ErrInvalid)
+		}
+
+		var err error
+		value, err = inspector.InspectBackgroundTask(ctx, taskID)
+
+		return err
+	})
+
+	return value, err
 }
 
 // NewSession replaces the current Runtime with a new writable Session.

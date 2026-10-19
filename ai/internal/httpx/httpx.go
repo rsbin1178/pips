@@ -19,11 +19,12 @@
 //   - The transport runs its own liveness checks, so a peer that stops
 //     answering is reported rather than parked: an HTTP/2 ping after a stretch
 //     of silence, a close when the ping goes unanswered, and explicit TCP
-//     keep-alive probes for a path that drops the connection's state. They
-//     mirror what the other agent frontends configure.
+//     keep-alive probes for a path that drops the connection's state.
 //   - Every request carries a User-Agent naming this client and its build, so a
-//     gateway's logs can attribute the traffic. Config.UserAgent overrides it,
-//     and an adapter or Config.Header entry that sets the header wins over both.
+//     gateway's logs can attribute the traffic. Config.UserAgent replaces that
+//     value, and a declared value that is empty sends no User-Agent header at
+//     all. An adapter or Config.Header entry that sets the header wins over
+//     both.
 //   - By default the client refuses plain HTTP and connections to private,
 //     loopback, link-local, or unspecified addresses (SSRF guard). Local
 //     endpoints opt out via Config.
@@ -129,10 +130,11 @@ type Config struct {
 	// Header is applied to every request. Adapter-set headers are written
 	// first, so Header entries override them on key collision.
 	Header http.Header
-	// UserAgent is sent as the request's User-Agent; empty sends
-	// DefaultUserAgent. A Header entry or an adapter-set User-Agent wins over
-	// both.
-	UserAgent string
+	// UserAgent replaces the User-Agent every request carries. Nil sends
+	// DefaultUserAgent, an empty value sends no User-Agent header at all, and
+	// any other value is sent verbatim. A Header entry or an adapter-set
+	// User-Agent wins over all three.
+	UserAgent *string
 	// AllowHTTP permits plain-HTTP base URLs (local inference servers).
 	AllowHTTP bool
 	// AllowPrivateIPs disables the SSRF dial guard (local inference servers).
@@ -159,7 +161,8 @@ type Client struct {
 	httpClient *http.Client
 	base       *url.URL
 	header     http.Header
-	userAgent  string
+	// userAgent is the value every request carries, or empty to send none.
+	userAgent string
 
 	maxStreamLineSize     int
 	streamIdleTimeout     time.Duration
@@ -448,13 +451,27 @@ func resolveResponseHeaderTimeout(configured time.Duration) time.Duration {
 	return configured
 }
 
-// resolveUserAgent maps an unset User-Agent onto this client's own name.
-func resolveUserAgent(configured string) string {
-	if configured = strings.TrimSpace(configured); configured != "" {
-		return configured
+// resolveUserAgent maps the caller's declaration onto the value a request
+// carries. A nil declaration sends the client's own name; an empty one sends no
+// header at all, which is how net/http omits a header that is present but blank.
+func resolveUserAgent(configured *string) string {
+	if configured == nil {
+		return DefaultUserAgent()
 	}
 
-	return DefaultUserAgent()
+	return strings.TrimSpace(*configured)
+}
+
+// hasHeader reports whether header carries name, including the present-but-blank
+// form net/http omits from the wire.
+func hasHeader(header http.Header, name string) bool {
+	for key := range header {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // idleReadCloser fails a read that stays blocked longer than its bound, and
@@ -637,8 +654,10 @@ func (c *Client) send(ctx context.Context, method, path string, headers http.Hea
 	maps.Copy(req.Header, c.header)
 
 	// The client names itself unless the caller already did: an adapter's own
-	// header or a Config.Header entry wins over the default.
-	if req.Header.Get("User-Agent") == "" {
+	// header or a Config.Header entry wins over the resolved value. An empty
+	// resolved value is deliberate, and net/http omits a header that is present
+	// but blank.
+	if !hasHeader(req.Header, "User-Agent") {
 		req.Header.Set("User-Agent", c.userAgent)
 	}
 

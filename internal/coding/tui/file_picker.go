@@ -102,10 +102,11 @@ func (m *Model) selectFilePicker(
 	}
 
 	selected := filtered[m.picker.cursor]
+	reference := selected.Reference()
 	if err := m.composer.InsertFile(
 		m.picker.tokenStart,
 		m.picker.tokenEnd,
-		selected.Reference(),
+		reference,
 	); err != nil {
 		m.picker.err = err
 
@@ -115,6 +116,11 @@ func (m *Model) selectFilePicker(
 	m.composer.InsertString(" ")
 	m.picker = pickerState{}
 	m.setLayout()
+
+	// The image stays in the draft, and the refusal explains why it will not send.
+	if reference.Kind == attachment.KindImage {
+		return m, tea.Batch(m.publishRefusal(m.composerImageRefusal()), m.composer.Focus())
+	}
 
 	return m, m.composer.Focus()
 }
@@ -148,14 +154,15 @@ func (m *Model) restoreFilePicker() tea.Cmd {
 	line := m.picker.previousLine
 	column := m.picker.previousCol
 	m.picker = pickerState{}
+	var refusal error
 	if err := m.composer.Restore(previousComposer); err != nil {
 		m.composer.SetValue(previous)
 		setComposerPosition(&m.composer, line, column)
-		m.streamErr = err
+		refusal = err
 	}
 	m.setLayout()
 
-	return m.composer.Focus()
+	return tea.Batch(m.publishRefusal(refusal), m.composer.Focus())
 }
 
 type rankedFile struct {

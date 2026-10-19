@@ -3,8 +3,11 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 )
@@ -28,12 +31,91 @@ type ResponseFormat struct {
 	Strict bool
 }
 
+// portableSchemaInstructions is the prompt-only JSON convention, and its only
+// owner. The Goal fallback transport and a builtin child's portable result
+// contract both render it, so the two can never drift apart.
+const portableSchemaInstructions = `
+Native structured output is unavailable. Return exactly one JSON object that
+matches the JSON Schema below. Include every required property and use [] for
+empty arrays. Do not use Markdown fences or add commentary outside the object.
+JSON Schema: `
+
+// PortableSchemaInstructions returns the prompt text that asks a model without
+// native schema support for one JSON object matching schema. The schema is
+// serialized with [json.Marshal], so the returned text is exactly what the
+// portable transport sends.
+func PortableSchemaInstructions(schema *Schema) (string, error) {
+	if schema == nil {
+		return "", errors.New("ai: portable schema instructions need a schema")
+	}
+
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return "", fmt.Errorf("ai: encoding portable response schema: %w", err)
+	}
+
+	return portableSchemaInstructions + string(encoded), nil
+}
+
 // GenerateTyped calls Generate and decodes the schema-constrained JSON output
 // into T. When req.ResponseFormat is nil, the schema is derived from T with
 // [SchemaFor]. The raw [Response] is returned alongside the decoded value for
 // usage accounting.
+//
+// GenerateTyped always asks through the provider's own schema mechanism. A
+// model that may not support it should use [GenerateTypedAdaptive].
 func GenerateTyped[T any](ctx context.Context, model LanguageModel, req Request) (T, *Response, error) {
+	return generateTyped[T](ctx, model, req, false)
+}
+
+// StructuredOption configures one typed structured-output call.
+type StructuredOption func(*structuredConfig)
+
+type structuredConfig struct {
+	disallowUnknownFields bool
+}
+
+// WithDisallowUnknownFields makes the decode reject an answer that carries a
+// field the target type does not declare. Without it the decode keeps
+// encoding/json's lenient rule and ignores such a field, which is what a
+// caller whose model answers with extra keys wants.
+func WithDisallowUnknownFields() StructuredOption {
+	return func(config *structuredConfig) {
+		config.disallowUnknownFields = true
+	}
+}
+
+// GenerateTypedAdaptive asks for the JSON document described by
+// req.ResponseFormat through the transport the model declares: the provider's
+// own schema mechanism when Capabilities().StructuredOutput is true, and the
+// portable prompt-only convention otherwise. When req.ResponseFormat is nil the
+// schema is derived from T with [SchemaFor], exactly as [GenerateTyped] does.
+//
+// The portable transport omits ResponseFormat and appends
+// [PortableSchemaInstructions] to the last system message of a clone of
+// req.Messages, so the caller's slice and its messages are never mutated. Both
+// transports decode the answer with one json.Unmarshal — unless
+// [WithDisallowUnknownFields] was passed, which adds the unknown-field rule — and
+// an answer that is not one JSON object is reported as
+// [ErrMalformedStructuredOutput] rather than as a transport failure.
+func GenerateTypedAdaptive[T any](
+	ctx context.Context, model LanguageModel, req Request, options ...StructuredOption,
+) (T, *Response, error) {
+	return generateTyped[T](ctx, model, req, true, options...)
+}
+
+func generateTyped[T any](
+	ctx context.Context, model LanguageModel, req Request, adaptive bool, options ...StructuredOption,
+) (T, *Response, error) {
 	var out T
+
+	config := structuredConfig{}
+
+	for _, option := range options {
+		if option != nil {
+			option(&config)
+		}
+	}
 
 	if req.ResponseFormat == nil {
 		schema, err := SchemaFor[T]()
@@ -44,17 +126,92 @@ func GenerateTyped[T any](ctx context.Context, model LanguageModel, req Request)
 		req.ResponseFormat = &ResponseFormat{Name: "output", Schema: schema}
 	}
 
+	if adaptive && !model.Capabilities().StructuredOutput {
+		instructions, err := PortableSchemaInstructions(req.ResponseFormat.Schema)
+		if err != nil {
+			return out, nil, err
+		}
+
+		req.Messages = appendPortableSchemaInstructions(req.Messages, instructions)
+		req.ResponseFormat = nil
+	}
+
 	resp, err := model.Generate(ctx, req)
 	if err != nil {
 		return out, resp, err
 	}
 
-	text := resp.Text()
-	if err := json.Unmarshal([]byte(text), &out); err != nil {
+	if err := decodeStructured(resp.Text(), &out, config.disallowUnknownFields); err != nil {
+		if adaptive {
+			return out, resp, fmt.Errorf(
+				"%w: ai: decoding structured output into %T: %w", ErrMalformedStructuredOutput, out, err,
+			)
+		}
+
 		return out, resp, fmt.Errorf("ai: decoding structured output into %T: %w", out, err)
 	}
 
 	return out, resp, nil
+}
+
+// decodeStructured decodes one JSON document, optionally rejecting fields the
+// target type does not declare. Trailing content is rejected either way, which
+// is what json.Unmarshal does for the lenient path.
+func decodeStructured(text string, value any, disallowUnknownFields bool) error {
+	if !disallowUnknownFields {
+		return json.Unmarshal([]byte(text), value)
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return errors.New("unexpected trailing JSON")
+	}
+
+	return nil
+}
+
+// appendPortableSchemaInstructions returns messages with instructions appended
+// to its last system message, prepending one when the conversation has none.
+// Only the one system message is replaced in a clone of the slice, so the
+// caller's messages keep their exact content.
+func appendPortableSchemaInstructions(messages Messages, instructions string) Messages {
+	cloned := slices.Clone(messages)
+
+	last := lastSystemIndex(cloned)
+	if last < 0 {
+		return append(Messages{SystemText(instructions)}, cloned...)
+	}
+
+	system, ok := cloned[last].(SystemMessage)
+	if !ok {
+		return append(Messages{SystemText(instructions)}, cloned...)
+	}
+
+	cloned[last] = System(append(slices.Clone(system.Parts), Text(instructions))...)
+
+	return cloned
+}
+
+// lastSystemIndex returns the index of the last message in the leading system
+// prefix, or -1 when the conversation starts with a non-system message.
+func lastSystemIndex(messages Messages) int {
+	last := -1
+
+	for index, message := range messages {
+		if _, ok := message.(SystemMessage); !ok {
+			break
+		}
+
+		last = index
+	}
+
+	return last
 }
 
 // SchemaFor derives a [Schema] from T by reflection. T must be a struct (or

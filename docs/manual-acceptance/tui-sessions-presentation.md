@@ -49,7 +49,7 @@
 - 前置条件：Session 有足够历史可压缩；记录关键事实和当前 Git 状态。
 - 隔离夹具：在早期消息提供一个无秘密、可核验的标记事实。
 - 步骤：打开 `/compact`，先取消并确认 transcript 未变；再次打开，检查预览边界后确认；压缩完成后询问早期标记事实并继续一轮正常请求；退出再 resume。
-- 预期证据：取消不写入 compaction；确认只压缩预览范围；摘要不包含隐藏 reasoning/秘密工具参数；当前工作状态、关键事实和未完成交互保持；resume 后压缩状态一致。
+- 预期证据：取消不写入 compaction；确认只压缩预览范围；压缩成功后消息流在压缩边界显示一条 `Context compacted · manual · <before> → <after> tokens` 分割线；摘要不包含隐藏 reasoning/秘密工具参数；当前工作状态、关键事实和未完成交互保持；resume 后分割线仍在（触发方式不持久化，因此不再显示 `manual`/`auto`），压缩状态一致。
 - 通过条件：有明确预览与确认、无意外消息删除、连续性可验证、无重复工具副作用。
 - 失败条件：未确认即压缩、摘要泄密、活动交互被压缩、恢复后历史损坏。
 - 清理/回滚：Session 随隔离 home 清理；记录压缩前后 Session ID/节点数而非完整私有文本。
@@ -87,12 +87,12 @@
 - 分类：实时 Provider、交互终端。变更等级：本地持久状态；可能产生费用。
 - 前置条件：配置至少两个本地 catalog models；其中一个请求能保持 streaming 足够久以输入控制消息。
 - 隔离夹具：三个带顺序标记的无秘密 prompt；记录原 Session ID、model 和 transcript 长度。
-- 步骤：idle 时打开 `/model`，先 Esc 取消，再选择另一 model；确认 Session ID 不变并发一轮请求。下一轮 running 时在 Composer 输入 steer 文本并按 Enter；再输入 follow-up 并按 Tab；另起一轮按 Ctrl+C 取消；测试 bracketed multiline paste 与普通输入的边界。
-- 预期证据：model 只来自本地配置 catalog，不请求远端 `/models`，切换原子 reopen 同一 Session，失败时可恢复旧 model；Enter 在 running 时调用 Steer，Tab 只排一个 Follow-up，二者在 Controller 接受后才清草稿；Ctrl+C 终止当前 interaction 但不损坏 Session；粘贴多行不拆成多次提交。
+- 步骤：idle 时打开 `/model`，先 Esc 取消，再选择另一 model；确认 Session ID 不变并发一轮请求。再次打开 `/model`，直接按 Enter 应用并保存为默认，检查当前 config 只保留该 model 的 `default = true` 以及所选 `variant`/`reasoning`；重启后确认选择恢复。下一轮 running 时在 Composer 输入 steer 文本并按 Enter；再输入 follow-up 并按 Tab；另起一轮按 Ctrl+C 取消；测试 bracketed multiline paste 与普通输入的边界。
+- 预期证据：model 只来自本地配置 catalog，不请求远端 `/models`，切换原子 reopen 同一 Session，失败时可恢复旧 model；`Enter` 在切换成功后写入当前 config，保存失败只报告错误且不撤销当前进程选择；`Enter` 在 running 时调用 Steer，Tab 只排一个 Follow-up，二者在 Controller 接受后才清草稿；Ctrl+C 终止当前 interaction 但不损坏 Session；粘贴多行不拆成多次提交。
 - 通过条件：model attribution 按 interaction 固定，控制消息顺序正确、无丢失/重复，取消后可继续使用同一 Session。
 - 失败条件：model switch 新建 Session/改写旧 attribution、失败后旧 Runtime 丢失、Steer/Follow-up 串型、多个 follow-up 无界排队、或取消仍完成原请求。
 - 清理/回滚：等待取消收敛，切回验收默认 model 并正常退出。
-- 来源/测试锚点：[control.go](../../internal/coding/tui/control.go)、[model.go](../../internal/coding/tui/model.go)、[model_test.go](../../internal/coding/tui/model_test.go)。
+- 来源/测试锚点：[control.go](../../internal/coding/tui/control.go)、[model.go](../../internal/coding/tui/model.go)、[model_test.go](../../internal/coding/tui/model_test.go)、[selection_store_test.go](../../internal/coding/config/selection_store_test.go)。
 - 结果：`未执行`。
 
 ## 分册判定

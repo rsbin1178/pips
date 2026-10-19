@@ -1,6 +1,9 @@
 package ai
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // JSON is raw JSON bytes. It aliases [json.RawMessage], so values convert
 // freely between the two.
@@ -197,8 +200,35 @@ func (TextPart) isAssistantPart()      {}
 func (ReasoningPart) isAssistantPart() {}
 func (ToolCallPart) isAssistantPart()  {}
 
+// PartKind names a part's concrete kind for diagnostics and errors. It returns
+// the Go type name for a concrete type this package does not classify.
+func PartKind(part Part) string {
+	switch part.(type) {
+	case TextPart:
+		return "text"
+	case ImagePart:
+		return "image"
+	case FilePart:
+		return "file"
+	case ReasoningPart:
+		return "reasoning"
+	case ToolCallPart:
+		return "tool call"
+	case ToolResultPart:
+		return "tool result"
+	case StructuredContentPart:
+		return "structured content"
+	case ResourceLinkPart:
+		return "resource link"
+	case EmbeddedResourcePart:
+		return "embedded resource"
+	default:
+		return fmt.Sprintf("%T", part)
+	}
+}
+
 // MediaSource locates binary media for an [ImagePart] or [FilePart]. Exactly
-// one of ID, URL, or Data should be set. When Data is set, MIMEType must
+// one of ID, URL, Data, or Path should be set. When Data is set, MIMEType must
 // describe it (for example "image/png").
 type MediaSource struct {
 	// ID references a file already uploaded to the target provider. IDs are
@@ -214,6 +244,17 @@ type MediaSource struct {
 	// MIMEType is the IANA media type of Data (for example "image/jpeg"). It
 	// is required for a Data source and optional for a URL source.
 	MIMEType string
+	// Path is a session-relative reference to persisted media, for example
+	// "assets/image-0123456789abcdef.jpg". The transport layer never resolves
+	// it; the owning application hydrates it into Data before provider
+	// conversion.
+	Path string
+	// Digest is the lowercase hex SHA-256 of the bytes Path names. It lets a
+	// hydrator verify what it loaded.
+	Digest string
+	// Width and Height are the media's pixel dimensions when known.
+	Width  int
+	Height int
 }
 
 // IsURL reports whether the source references media by URL rather than
@@ -225,4 +266,10 @@ func (s MediaSource) IsURL() bool {
 // IsID reports whether the source references a provider-uploaded file.
 func (s MediaSource) IsID() bool {
 	return s.ID != ""
+}
+
+// IsPath reports whether the source references application-persisted media
+// that a hydrator must load before the request can carry the bytes.
+func (s MediaSource) IsPath() bool {
+	return s.Path != ""
 }

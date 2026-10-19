@@ -228,7 +228,7 @@ func (e *fakeControllerExecutor) Prepare(
 	context.Context,
 	execution.Operation,
 	execution.Authorization,
-) (preparedExecution, error) {
+) (PreparedExecution, error) {
 	e.prepareCount++
 
 	if e.prepareErr != nil {

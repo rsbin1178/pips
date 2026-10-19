@@ -43,8 +43,11 @@ type interaction struct {
 	activeRunID              string
 	contextRecoveryAttempted bool
 	modelResponseObserved    bool
-	observer                 *guardedAgentObserver
-	userDispatcher           subagent.Dispatcher
+	// planTurn marks an interaction that carried a user turn's input, which is
+	// the unit the todo nudge counts.
+	planTurn       bool
+	observer       *guardedAgentObserver
+	userDispatcher subagent.Dispatcher
 }
 
 func (i *interaction) requestHookStop() {

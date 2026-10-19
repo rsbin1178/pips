@@ -23,7 +23,6 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/agentprofile"
 	"github.com/rsbin1178/pips/internal/coding/approval"
-	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	"github.com/rsbin1178/pips/internal/coding/paths"
 	"github.com/rsbin1178/pips/internal/coding/question"
@@ -69,7 +68,7 @@ Read only the delegated target and report the verification evidence.
 	))
 
 	model := newRuntimeModel(
-		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"agent_id":"go-checker","task":"Inspect target.txt."}`),
+		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"prompt":"Inspect target.txt.","description":"delegate","subagent_type":"go-checker","run_in_background":false}`),
 		runtimeToolResponse("child-read", "read", `{"path":"target.txt"}`),
 		runtimeTextResponse(`{"summary":"target read","verification":["target.txt"]}`),
 		runtimeTextResponse("delegation complete"),
@@ -109,6 +108,73 @@ Read only the delegated target and report the verification evidence.
 	assert.Equal(t, []string{"read"}, toolNamesFromRequest(requests[1]))
 	assert.NotContains(t, toolNamesFromRequest(requests[1]), subagent.ToolName)
 	assert.Nil(t, requests[1].ResponseFormat)
+}
+
+// TestRuntimeCustomProfileChildLimitsFollowTheDefinitionAndTheDefault pins Phase
+// L's resolved child policy end-to-end: a custom definition with no `limits`
+// block yields a plan with no execution budget, while a declared
+// `limits.max_turns` caps the child and reserves finalization turns below it.
+func TestRuntimeCustomProfileChildLimitsFollowTheDefinitionAndTheDefault(t *testing.T) {
+	t.Parallel()
+
+	inspectPlan := func(t *testing.T, limitsBlock string) subagent.ExecutionPlan {
+		t.Helper()
+
+		base := t.TempDir()
+		layout, err := paths.New(filepath.Join(base, "home"))
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(layout.AgentsDir(), "go-checker.md"),
+			fmt.Appendf(nil, `---
+schema: pips.agent/v1alpha1
+name: Go checker
+description: Read one file and report the result.
+model: openai/runtime-test
+tools:
+  allow: ["tool:read"]
+%soutput:
+  format: text
+---
+Read only the delegated target.
+`, limitsBlock),
+			0o600,
+		))
+
+		model := newRuntimeModel(
+			runtimeToolResponse("parent-delegate", subagent.ToolName, `{"prompt":"Inspect target.txt.","description":"delegate","subagent_type":"go-checker","run_in_background":false}`),
+			runtimeToolResponse("child-read", "read", `{"path":"target.txt"}`),
+			runtimeTextResponse("target read"),
+			runtimeTextResponse("delegation complete"),
+		)
+		runtime := openDynamicTestRuntimeAt(t, base, SessionTarget{}, model)
+		require.NoError(t, os.WriteFile(
+			filepath.Join(runtime.workspace.Root(), "target.txt"), []byte("verified\n"), 0o600,
+		))
+
+		events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate the check")))
+		assert.Contains(t, eventTypes(events), EventSubagentCompleted)
+
+		summaries, err := runtime.ListSubagents(t.Context())
+		require.NoError(t, err)
+		require.Len(t, summaries, 1)
+		detail, err := runtime.InspectSubagent(t.Context(), summaries[0].ChildSessionID)
+		require.NoError(t, err)
+
+		return detail.Plan
+	}
+
+	uncapped := inspectPlan(t, "")
+	assert.Zero(t, uncapped.Limits.MaxTurns)
+	assert.Zero(t, uncapped.Limits.MaxTokens)
+	assert.Zero(t, uncapped.Limits.MaxToolCalls)
+	assert.Zero(t, uncapped.Limits.MaxDuration)
+	assert.Zero(t, uncapped.Limits.FinalizationTurns)
+
+	capped := inspectPlan(t, "limits:\n  max_turns: 7\n")
+	assert.Equal(t, 7, capped.Limits.MaxTurns)
+	assert.Positive(t, capped.Limits.FinalizationTurns)
+	assert.Less(t, capped.Limits.FinalizationTurns, capped.Limits.MaxTurns)
 }
 
 func TestRuntimeKeepsAgentPrivateMCPOutOfParentAndBindsItToSelectedChild(t *testing.T) {
@@ -157,7 +223,7 @@ Use the private lookup tool and report its evidence.
 `), 0o600))
 
 	model := newRuntimeModel(
-		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"agent_id":"private-reader","task":"Look up the evidence."}`),
+		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"prompt":"Look up the evidence.","description":"delegate","subagent_type":"private-reader","run_in_background":false}`),
 		runtimeToolResponse("child-lookup", "private_docs_lookup", `{}`),
 		runtimeTextResponse("private evidence verified"),
 		runtimeTextResponse("delegation complete"),
@@ -222,7 +288,7 @@ Attempt the requested read and report the policy result.
 
 	model := newRuntimeModel(
 		runtimeToolResponse("parent-read", "read", `{"path":"target.txt"}`),
-		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"agent_id":"hooked-reader","task":"Read target.txt."}`),
+		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"prompt":"Read target.txt.","description":"delegate","subagent_type":"hooked-reader","run_in_background":false}`),
 		runtimeToolResponse("child-read", "read", `{"path":"target.txt"}`),
 		runtimeTextResponse("the child policy denied the read"),
 		runtimeTextResponse("delegation complete"),
@@ -243,213 +309,6 @@ Attempt the requested read and report the policy result.
 	require.NoError(t, err)
 	require.Len(t, detail.Plan.PrivateHooks, 1)
 	assert.Equal(t, "deny-child-read", detail.Plan.PrivateHooks[0].ID)
-}
-
-func TestRuntimeDispatchesBoundedExactTargetRecursiveChain(t *testing.T) {
-	t.Parallel()
-
-	base := t.TempDir()
-	layout, err := paths.New(filepath.Join(base, "home"))
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
-	definitions := map[string]string{
-		"root-agent.md": `---
-schema: pips.agent/v1alpha1
-name: Root agent
-description: Delegate one exact middle task.
-delegation:
-  allow: [middle-agent]
----
-Delegate the task to middle-agent and return its result.
-`,
-		"middle-agent.md": `---
-schema: pips.agent/v1alpha1
-name: Middle agent
-description: Delegate one exact leaf task.
-visibility:
-  user: false
-  model: true
-delegation:
-  allow: [leaf-agent]
----
-Delegate the task to leaf-agent and return its result.
-`,
-		"leaf-agent.md": `---
-schema: pips.agent/v1alpha1
-name: Leaf agent
-description: Return one bounded leaf result.
-visibility:
-  user: false
-  model: true
----
-Return the leaf result without tools.
-`,
-	}
-	for name, body := range definitions {
-		require.NoError(t, os.WriteFile(filepath.Join(layout.AgentsDir(), name), []byte(body), 0o600))
-	}
-
-	model := newRuntimeModel(
-		runtimeToolResponse("parent-root", subagent.ToolName, `{"agent_id":"root-agent","task":"Complete the chain."}`),
-		runtimeToolResponse("root-middle", subagent.ToolName, `{"agent_id":"middle-agent","task":"Delegate to the leaf."}`),
-		runtimeToolResponse("middle-leaf", subagent.ToolName, `{"agent_id":"leaf-agent","task":"Return the leaf evidence."}`),
-		runtimeTextResponse("leaf evidence"),
-		runtimeTextResponse("middle received leaf evidence"),
-		runtimeTextResponse("root received middle evidence"),
-		runtimeTextResponse("recursive delegation complete"),
-	)
-	runtime := openTestRuntimeConfiguredWithSandboxAndConfig(
-		t, base, SessionTarget{}, model, nil, nil, nil, false,
-		config.SandboxWorkspaceWrite,
-		func(cfg *config.Config) {
-			cfg.DynamicSubagents = true
-			cfg.Subagent.MaxDepth = 2
-		},
-	)
-
-	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("run the recursive chain")))
-	assert.Contains(t, eventTypes(events), EventSubagentCompleted)
-	requests := model.Requests()
-	require.Len(t, requests, 7)
-	assert.Equal(t, []string{subagent.ToolName}, toolNamesFromRequest(requests[1]))
-	assert.Equal(t, []string{subagent.ToolName}, toolNamesFromRequest(requests[2]))
-	assert.Empty(t, toolNamesFromRequest(requests[3]))
-	assert.NotContains(t, toolNamesFromRequest(requests[1]), subagent.SpawnToolName)
-	assert.Equal(t, []any{"middle-agent"}, requests[1].Tools[0].InputSchema.Properties["agent_id"].Enum)
-	assert.Equal(t, []any{"leaf-agent"}, requests[2].Tools[0].InputSchema.Properties["agent_id"].Enum)
-
-	summaries, err := runtime.ListSubagents(t.Context())
-	require.NoError(t, err)
-	require.Len(t, summaries, 3)
-	byID := make(map[string]subagent.Summary, len(summaries))
-	for _, summary := range summaries {
-		byID[summary.Identity.ID] = summary
-	}
-	rootSummary := byID["root-agent"]
-	middleSummary := byID["middle-agent"]
-	leafSummary := byID["leaf-agent"]
-	assert.Equal(t, runtime.handle.Metadata().ID, rootSummary.Ownership.ParentSessionID)
-	assert.Equal(t, rootSummary.ChildSessionID, middleSummary.Ownership.ParentSessionID)
-	assert.Equal(t, middleSummary.ChildSessionID, leafSummary.Ownership.ParentSessionID)
-	assert.NotEmpty(t, middleSummary.Ownership.ParentRunID)
-	assert.NotEmpty(t, leafSummary.Ownership.ParentRunID)
-
-	var generationID uint64
-	for id, want := range map[string]struct {
-		depth    int
-		ancestry []string
-		targets  []string
-	}{
-		"root-agent":   {depth: 0, ancestry: []string{"root-agent"}, targets: []string{"middle-agent"}},
-		"middle-agent": {depth: 1, ancestry: []string{"root-agent", "middle-agent"}, targets: []string{"leaf-agent"}},
-		"leaf-agent":   {depth: 2, ancestry: []string{"root-agent", "middle-agent", "leaf-agent"}},
-	} {
-		detail, inspectErr := runtime.InspectSubagent(t.Context(), byID[id].ChildSessionID)
-		require.NoError(t, inspectErr, id)
-		if generationID == 0 {
-			generationID = detail.Plan.GenerationID
-		}
-		assert.Equal(t, generationID, detail.Plan.GenerationID, id)
-		assert.Equal(t, want.depth, detail.Plan.DelegationDepth, id)
-		assert.Equal(t, 2, detail.Plan.MaxDelegationDepth, id)
-		assert.Equal(t, want.ancestry, detail.Plan.Ancestry, id)
-		assert.Equal(t, want.targets, detail.Plan.DelegationTargets, id)
-		assert.Equal(t, rootSummary.Identity.DefinitionSchema, detail.Plan.Identity.DefinitionSchema)
-	}
-	leafResult, err := runtime.WaitSubagent(t.Context(), leafSummary.ChildSessionID)
-	require.NoError(t, err)
-	assert.Equal(t, "leaf evidence", leafResult.Value)
-	require.NoError(t, runtime.CancelSubagent(t.Context(), leafSummary.ChildSessionID))
-}
-
-func TestRuntimeRecursiveAdmissionRejectsBeforeCreatingAThirdChild(t *testing.T) {
-	tests := []struct {
-		name     string
-		mutate   func(*config.SubagentConfig)
-		wantText string
-	}{
-		{
-			name: "shared concurrent slots",
-			mutate: func(value *config.SubagentConfig) {
-				value.MaxDepth = 2
-				value.MaxConcurrent = 2
-			},
-			wantText: "capacity exhausted",
-		},
-		{
-			name: "shared cumulative descendants",
-			mutate: func(value *config.SubagentConfig) {
-				value.MaxDepth = 2
-				value.MaxSpawnedPerRootInteraction = 1
-			},
-			wantText: "spawn limit exhausted",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			base := t.TempDir()
-			layout, err := paths.New(filepath.Join(base, "home"))
-			require.NoError(t, err)
-			require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
-			for name, body := range map[string]string{
-				"root-agent.md": `---
-schema: pips.agent/v1alpha1
-name: Root agent
-description: Delegate one middle task.
-delegation:
-  allow: [middle-agent]
----
-Delegate to middle-agent.
-`,
-				"middle-agent.md": `---
-schema: pips.agent/v1alpha1
-name: Middle agent
-description: Delegate one leaf task.
-delegation:
-  allow: [leaf-agent]
----
-Delegate to leaf-agent.
-`,
-				"leaf-agent.md": `---
-schema: pips.agent/v1alpha1
-name: Leaf agent
-description: Return the leaf result.
----
-Return the leaf result.
-`,
-			} {
-				require.NoError(t, os.WriteFile(filepath.Join(layout.AgentsDir(), name), []byte(body), 0o600))
-			}
-			model := newRuntimeModel(
-				runtimeToolResponse("parent-root", subagent.ToolName, `{"agent_id":"root-agent","task":"Start."}`),
-				runtimeToolResponse("root-middle", subagent.ToolName, `{"agent_id":"middle-agent","task":"Continue."}`),
-				runtimeToolResponse("middle-leaf", subagent.ToolName, `{"agent_id":"leaf-agent","task":"Finish."}`),
-				runtimeTextResponse("middle handled admission rejection"),
-				runtimeTextResponse("root handled child result"),
-				runtimeTextResponse("parent complete"),
-			)
-			runtime := openTestRuntimeConfiguredWithSandboxAndConfig(
-				t, base, SessionTarget{}, model, nil, nil, nil, false,
-				config.SandboxWorkspaceWrite,
-				func(cfg *config.Config) {
-					cfg.DynamicSubagents = true
-					test.mutate(&cfg.Subagent)
-				},
-			)
-			collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("exercise recursive admission")))
-
-			requests := model.Requests()
-			require.Len(t, requests, 6)
-			assert.True(t, requestContainsToolText(requests[3], test.wantText))
-			summaries, err := runtime.ListSubagents(t.Context())
-			require.NoError(t, err)
-			require.Len(t, summaries, 2)
-			for _, summary := range summaries {
-				assert.NotEqual(t, "leaf-agent", summary.Identity.ID)
-			}
-		})
-	}
 }
 
 func TestRuntimeCustomProfileDispatchRequiresAlphaGate(t *testing.T) {
@@ -474,10 +333,12 @@ Inspect the delegated target.
 	))
 
 	model := newRuntimeModel(
-		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"agent_id":"go-checker","task":"Inspect target."}`),
+		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"prompt":"Inspect target.","description":"delegate","subagent_type":"go-checker","run_in_background":false}`),
 		runtimeTextResponse("custom delegation is unavailable"),
 	)
 	runtime := openTestRuntimeAt(t, base, SessionTarget{}, model)
+	// Custom subagents are on by default; this test pins the gate off.
+	runtime.config.DynamicSubagents = false
 
 	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate the check")))
 	summaries, err := runtime.ListSubagents(t.Context())
@@ -491,10 +352,114 @@ Inspect the delegated target.
 			continue
 		}
 		require.NotNil(t, tool.InputSchema)
-		assert.NotContains(t, tool.InputSchema.Properties["agent_id"].Enum, "go-checker")
+		assert.NotContains(t, tool.InputSchema.Properties["subagent_type"].Enum, "go-checker")
 		return
 	}
-	require.Fail(t, "run_subagent tool was not declared")
+	require.Fail(t, "spawn_subagent tool was not declared")
+}
+
+// writeToggleTestAgents writes two custom definitions so the model-visible
+// subagent_type enum still exists when one of them is toggled off.
+func writeToggleTestAgents(t *testing.T, layout paths.Layout) {
+	t.Helper()
+
+	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+	for _, id := range []string{"go-checker", "other-checker"} {
+		require.NoError(t, os.WriteFile(
+			filepath.Join(layout.AgentsDir(), id+".md"),
+			[]byte(`---
+schema: pips.agent/v1alpha1
+name: `+id+`
+description: Check one bounded target.
+tools:
+  allow: ["tool:read"]
+output:
+  format: text
+---
+Inspect the delegated target.
+`),
+			0o600,
+		))
+	}
+}
+
+func TestRuntimeSubagentToggleRefusesDisabledTypesAndHidesThem(t *testing.T) {
+	base := t.TempDir()
+	layout, err := paths.New(filepath.Join(base, "home"))
+	require.NoError(t, err)
+	writeToggleTestAgents(t, layout)
+
+	model := newRuntimeModel(
+		runtimeToolResponse(
+			"parent-delegate",
+			subagent.ToolName,
+			`{"prompt":"Inspect target.","description":"delegate","subagent_type":"go-checker","run_in_background":false}`,
+		),
+		runtimeToolResponse(
+			"parent-unknown",
+			subagent.ToolName,
+			`{"prompt":"Inspect target.","description":"delegate","subagent_type":"nope","run_in_background":false}`,
+		),
+		runtimeTextResponse("both delegations were refused"),
+	)
+	runtime := openDynamicTestRuntimeAt(t, base, SessionTarget{}, model)
+	runtime.config.Subagent.Toggle = map[string]bool{"go-checker": false, "explore": false}
+
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate the checks")))
+	summaries, err := runtime.ListSubagents(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, summaries)
+
+	requests := model.Requests()
+	require.GreaterOrEqual(t, len(requests), 3)
+	declared := false
+	for _, tool := range requests[0].Tools {
+		if tool.Name != subagent.ToolName {
+			continue
+		}
+		declared = true
+		require.NotNil(t, tool.InputSchema)
+		// A disabled type is not offered to the model at all.
+		assert.NotContains(t, tool.InputSchema.Properties["subagent_type"].Enum, "go-checker")
+		assert.Contains(t, tool.InputSchema.Properties["subagent_type"].Enum, "other-checker")
+	}
+	assert.True(t, declared, "spawn_subagent tool was not declared")
+
+	// A disabled type stays resolvable, so the refusal names the configuration
+	// instead of reporting an unknown type.
+	refused := recordedToolResultText(requests, "parent-delegate")
+	assert.Contains(t, refused, "Subagent 'go-checker' is disabled via [subagents.toggle] in config.toml")
+
+	// The unknown-type message lists only types that may actually be spawned.
+	unknown := recordedToolResultText(requests, "parent-unknown")
+	require.Contains(t, unknown, "unknown subagent type")
+	assert.Contains(t, unknown, "other-checker")
+	assert.Contains(t, unknown, "plan")
+	assert.NotContains(t, unknown, "go-checker")
+	assert.NotContains(t, unknown, "explore")
+
+	// A disabled builtin type is refused through the same gate.
+	_, err = runtime.RunAgent(t.Context(), AgentRunRequest{
+		AgentID: string(subagent.RoleExplore), Task: "Inspect the fixture.",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Subagent 'explore' is disabled via [subagents.toggle] in config.toml")
+
+	// The Agent Library reports the disabled type rather than hiding it.
+	library, err := runtime.ListAgentProfiles(t.Context())
+	require.NoError(t, err)
+	profile, found := agentLibraryEntry(library, "go-checker")
+	require.True(t, found)
+	assert.False(t, profile.Available)
+	assert.Equal(t, "disabled by configuration", profile.Unavailable)
+	builtin, found := agentLibraryEntry(library, "explore")
+	require.True(t, found)
+	assert.False(t, builtin.Available)
+	assert.Equal(t, "disabled by configuration", builtin.Unavailable)
+	other, found := agentLibraryEntry(library, "other-checker")
+	require.True(t, found)
+	assert.True(t, other.Available)
+	assert.Empty(t, other.Unavailable)
 }
 
 func TestRuntimeListAgentProfilesIsContentSafeAndReportsAvailability(t *testing.T) {
@@ -527,6 +492,7 @@ PRIVATE INSTRUCTIONS MUST NOT APPEAR IN THE LIBRARY.
 	))
 
 	runtime := openTestRuntimeAt(t, base, SessionTarget{}, newRuntimeModel(runtimeTextResponse("unused")))
+	runtime.config.DynamicSubagents = false
 	library, err := runtime.ListAgentProfiles(t.Context())
 	require.NoError(t, err)
 	require.NoError(t, ValidateAgentLibrary(library))
@@ -586,6 +552,8 @@ Return the delegated result.
 		`{"summary":"builtin after rollback","evidence":[],"unknowns":[]}`,
 	))
 	disabled := openTestRuntimeAt(t, base, SessionTarget{ID: parentID}, disabledModel)
+	// The rollback drill turns the default-on gate off.
+	disabled.config.DynamicSubagents = false
 	assert.False(t, disabled.config.DynamicSubagents)
 	library, err := disabled.ListAgentProfiles(t.Context())
 	require.NoError(t, err)
@@ -897,7 +865,7 @@ Make only the requested workspace edit and report completion.
 	))
 
 	model := newRuntimeModel(
-		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"agent_id":"writer","task":"Update target.txt."}`),
+		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"prompt":"Update target.txt.","description":"delegate","subagent_type":"writer","run_in_background":false}`),
 		runtimeToolResponse("child-patch", "apply_patch", `{"patch":"*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch\n"}`),
 		runtimeTextResponse("updated target"),
 		runtimeTextResponse("parent complete"),
@@ -1095,7 +1063,7 @@ Run the delegated verification and report the result.
 	require.NoError(t, err)
 
 	model := newRuntimeModel(
-		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"agent_id":"shell-checker","task":"Run the approved check."}`),
+		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"prompt":"Run the approved check.","description":"delegate","subagent_type":"shell-checker","run_in_background":false}`),
 		runtimeToolResponse("child-shell", "shell", string(shellArgs)),
 		runtimeTextResponse("external verification complete"),
 		runtimeTextResponse("parent complete"),
@@ -1188,7 +1156,7 @@ Ask for the missing decision, then summarize the selected answer.
 	))
 
 	model := newRuntimeModel(
-		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"agent_id":"decision-checker","task":"Ask for the framework."}`),
+		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"prompt":"Ask for the framework.","description":"delegate","subagent_type":"decision-checker","run_in_background":false}`),
 		runtimeQuestionResponse(t, "child-question"),
 		runtimeTextResponse("React selected"),
 		runtimeTextResponse("parent complete"),
@@ -1259,221 +1227,6 @@ Ask for the missing decision, then summarize the selected answer.
 	require.Len(t, requests, 4)
 	assert.Equal(t, []string{"ask_user"}, toolNamesFromRequest(requests[1]))
 	assert.True(t, requestContainsToolText(requests[2], "React"))
-}
-
-func TestRuntimeRoutesNestedQuestionByExactDescendantWithoutParentContamination(t *testing.T) {
-	base := t.TempDir()
-	layout, err := paths.New(filepath.Join(base, "home"))
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
-	for name, body := range map[string]string{
-		"root-agent.md": `---
-schema: pips.agent/v1alpha1
-name: Root agent
-description: Delegate one decision.
-delegation:
-  allow: [decision-agent]
----
-Delegate the decision and return its result.
-`,
-		"decision-agent.md": `---
-schema: pips.agent/v1alpha1
-name: Decision agent
-description: Ask one independently routed question.
-visibility:
-  user: false
-  model: true
-tools:
-  allow: ["tool:ask_user"]
----
-Ask for the framework and return the answer.
-`,
-	} {
-		require.NoError(t, os.WriteFile(filepath.Join(layout.AgentsDir(), name), []byte(body), 0o600))
-	}
-	model := newRuntimeModel(
-		runtimeToolResponse("parent-root", subagent.ToolName, `{"agent_id":"root-agent","task":"Get the decision."}`),
-		runtimeToolResponse("root-decision", subagent.ToolName, `{"agent_id":"decision-agent","task":"Ask for the framework."}`),
-		runtimeQuestionResponse(t, "nested-question"),
-		runtimeTextResponse("React selected"),
-		runtimeTextResponse("nested decision complete"),
-		runtimeTextResponse("parent complete"),
-	)
-	runtime := openTestRuntimeConfiguredWithSandboxAndConfig(
-		t, base, SessionTarget{}, model, nil, nil, nil, false,
-		config.SandboxWorkspaceWrite,
-		func(cfg *config.Config) {
-			cfg.DynamicSubagents = true
-			cfg.Subagent.MaxDepth = 1
-		},
-	)
-	done := make(chan error, 1)
-	go func() {
-		var sequenceErr error
-		runtime.Prompt(context.Background(), ai.UserText("run nested decision"))(func(_ Event, eventErr error) bool {
-			if eventErr != nil {
-				sequenceErr = eventErr
-
-				return false
-			}
-
-			return true
-		})
-		done <- sequenceErr
-	}()
-
-	deadline := time.After(10 * time.Second)
-	var rootID, decisionID string
-	var state ChildControlState
-	for decisionID == "" {
-		summaries, listErr := runtime.ListSubagents(context.Background())
-		if listErr == nil {
-			for _, summary := range summaries {
-				switch summary.Identity.ID {
-				case "root-agent":
-					rootID = summary.ChildSessionID
-				case "decision-agent":
-					control, controlErr := runtime.SubagentControlState(summary.ChildSessionID)
-					if controlErr == nil && control.Pause == ChildPauseQuestion && control.Question != nil {
-						decisionID, state = summary.ChildSessionID, control
-					}
-				}
-			}
-		}
-		select {
-		case <-deadline:
-			require.FailNow(t, "timed out waiting for nested question")
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-	require.NotEmpty(t, rootID)
-	request := question.CloneRequest(*state.Question)
-	_, err = runtime.ResolveSubagentQuestion(context.Background(), rootID, question.Resolution{
-		RequestID: request.ID, SchemaDigest: request.SchemaDigest,
-		Answers: []question.Answer{{Selections: []string{"React"}}},
-	})
-	require.Error(t, err)
-	unchanged, err := runtime.SubagentControlState(decisionID)
-	require.NoError(t, err)
-	assert.Equal(t, request.ID, unchanged.Question.ID)
-	assert.Nil(t, runtime.Snapshot().Question.Required)
-	rootControl, err := runtime.SubagentControlState(rootID)
-	require.NoError(t, err)
-	assert.Equal(t, ChildPauseNone, rootControl.Pause)
-
-	resolved, err := runtime.ResolveSubagentQuestion(context.Background(), decisionID, question.Resolution{
-		RequestID: request.ID, SchemaDigest: request.SchemaDigest,
-		Answers: []question.Answer{{Selections: []string{"React"}}},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, ChildPauseNone, resolved.Pause)
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(10 * time.Second):
-		require.FailNow(t, "timed out waiting for nested question completion")
-	}
-
-	summaries, err := runtime.ListSubagents(context.Background())
-	require.NoError(t, err)
-	require.Len(t, summaries, 2)
-	for _, summary := range summaries {
-		assert.Equal(t, subagent.StateSucceeded, summary.State)
-	}
-}
-
-func TestRuntimeCancelsLiveNestedDescendantWithoutCancelingItsParent(t *testing.T) {
-	base := t.TempDir()
-	layout, err := paths.New(filepath.Join(base, "home"))
-	require.NoError(t, err)
-	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
-	for name, body := range map[string]string{
-		"root-agent.md": `---
-schema: pips.agent/v1alpha1
-name: Root agent
-description: Delegate one cancelable leaf.
-delegation:
-  allow: [leaf-agent]
----
-ROOT_CANCEL_MARKER: delegate to leaf-agent and handle cancellation.
-`,
-		"leaf-agent.md": `---
-schema: pips.agent/v1alpha1
-name: Leaf agent
-description: Wait until explicitly canceled.
-visibility:
-  user: false
-  model: true
----
-LEAF_CANCEL_MARKER: wait for cancellation.
-`,
-	} {
-		require.NoError(t, os.WriteFile(filepath.Join(layout.AgentsDir(), name), []byte(body), 0o600))
-	}
-	model := newNestedCancelRuntimeModel()
-	runtime := openTestRuntimeConfiguredWithSandboxAndConfig(
-		t, base, SessionTarget{}, model, nil, nil, nil, false,
-		config.SandboxWorkspaceWrite,
-		func(cfg *config.Config) {
-			cfg.DynamicSubagents = true
-			cfg.Subagent.MaxDepth = 1
-		},
-	)
-	done := make(chan error, 1)
-	go func() {
-		var sequenceErr error
-		runtime.Prompt(context.Background(), ai.UserText("start nested cancellation"))(func(_ Event, eventErr error) bool {
-			if eventErr != nil {
-				sequenceErr = eventErr
-
-				return false
-			}
-
-			return true
-		})
-		done <- sequenceErr
-	}()
-	select {
-	case <-model.leafStarted:
-	case <-time.After(10 * time.Second):
-		require.FailNow(t, "nested leaf did not start")
-	}
-
-	var leafID string
-	assert.Eventually(t, func() bool {
-		summaries, listErr := runtime.ListSubagents(context.Background())
-		if listErr != nil {
-			return false
-		}
-		for _, summary := range summaries {
-			if summary.Identity.ID == "leaf-agent" {
-				leafID = summary.ChildSessionID
-
-				return true
-			}
-		}
-
-		return false
-	}, 30*time.Second, 10*time.Millisecond)
-	require.NoError(t, runtime.CancelSubagent(context.Background(), leafID))
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(10 * time.Second):
-		require.FailNow(t, "nested cancellation did not complete")
-	}
-
-	summaries, err := runtime.ListSubagents(context.Background())
-	require.NoError(t, err)
-	require.Len(t, summaries, 2)
-	for _, summary := range summaries {
-		switch summary.Identity.ID {
-		case "leaf-agent":
-			assert.Equal(t, subagent.StateCanceled, summary.State)
-		case "root-agent":
-			assert.Equal(t, subagent.StateSucceeded, summary.State)
-		}
-	}
 }
 
 func TestRuntimeRejectsCrossChildAndCrossKindControlSubstitution(t *testing.T) {
@@ -1832,7 +1585,7 @@ func appendInterruptedChildLifecycle(
 ) {
 	t.Helper()
 
-	limits := subagent.ProductionLimits()
+	limits := subagent.DefaultLimits()
 	record := map[string]any{
 		"schema":            "pips.coding.subagent.record/v1alpha1",
 		"state":             string(subagent.StateCreated),
@@ -1877,10 +1630,9 @@ func openDynamicTestRuntimeAt(
 ) *Runtime {
 	t.Helper()
 
-	runtime := openTestRuntimeAt(t, base, target, model)
-	runtime.config.DynamicSubagents = true
-
-	return runtime
+	// The gate is not forced: custom dispatch must work from the product
+	// default (config.Defaults), which is what these tests exercise.
+	return openTestRuntimeAt(t, base, target, model)
 }
 
 type backgroundCustomRuntimeModel struct {
@@ -1891,80 +1643,6 @@ type backgroundCustomRuntimeModel struct {
 	childStarted      chan struct{}
 	releaseChild      chan struct{}
 	sawPrivateContext atomic.Bool
-}
-
-type nestedCancelRuntimeModel struct {
-	mu          sync.Mutex
-	mainCalls   int
-	rootCalls   int
-	leafOnce    sync.Once
-	leafStarted chan struct{}
-}
-
-func newNestedCancelRuntimeModel() *nestedCancelRuntimeModel {
-	return &nestedCancelRuntimeModel{leafStarted: make(chan struct{})}
-}
-
-func (m *nestedCancelRuntimeModel) Generate(ctx context.Context, request ai.Request) (*ai.Response, error) {
-	switch {
-	case strings.Contains(requestSystemText(request), "LEAF_CANCEL_MARKER"):
-		m.leafOnce.Do(func() { close(m.leafStarted) })
-		<-ctx.Done()
-
-		return nil, ctx.Err()
-	case strings.Contains(requestSystemText(request), "ROOT_CANCEL_MARKER"):
-		m.mu.Lock()
-		m.rootCalls++
-		call := m.rootCalls
-		m.mu.Unlock()
-		if call == 1 {
-			return runtimeToolResponse(
-				"root-leaf",
-				subagent.ToolName,
-				`{"agent_id":"leaf-agent","task":"Wait until canceled."}`,
-			), nil
-		}
-
-		return runtimeTextResponse("root handled leaf cancellation"), nil
-	default:
-		m.mu.Lock()
-		m.mainCalls++
-		call := m.mainCalls
-		m.mu.Unlock()
-		if call == 1 {
-			return runtimeToolResponse(
-				"parent-root",
-				subagent.ToolName,
-				`{"agent_id":"root-agent","task":"Run the cancelable leaf."}`,
-			), nil
-		}
-
-		return runtimeTextResponse("parent complete"), nil
-	}
-}
-
-func (m *nestedCancelRuntimeModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
-	return func(yield func(ai.StreamEvent, error) bool) {
-		response, err := m.Generate(ctx, request)
-		if err != nil {
-			yield(ai.StreamEvent{}, err)
-
-			return
-		}
-		for _, event := range runtimeResponseEvents(response) {
-			if !yield(event, nil) {
-				return
-			}
-		}
-	}
-}
-
-func (m *nestedCancelRuntimeModel) Provider() ai.Provider { return ai.ProviderOpenAI }
-
-func (m *nestedCancelRuntimeModel) ModelID() string { return "runtime-test" }
-
-func (m *nestedCancelRuntimeModel) Capabilities() ai.Capabilities {
-	return ai.Capabilities{Text: true, Tools: true}
 }
 
 func newBackgroundCustomRuntimeModel() *backgroundCustomRuntimeModel {
@@ -2004,8 +1682,8 @@ func (m *backgroundCustomRuntimeModel) Generate(
 	case 1:
 		return runtimeToolResponse(
 			"spawn-custom",
-			subagent.SpawnToolName,
-			`{"agent_id":"slow-checker","task":"Inspect in the background."}`,
+			subagent.ToolName,
+			`{"prompt":"Inspect in the background.","description":"delegate","subagent_type":"slow-checker"}`,
 		), nil
 	case 2:
 		return runtimeTextResponse("parent continued"), nil
@@ -2159,14 +1837,15 @@ func (m *authorityRedTeamModel) generateParent() (*ai.Response, error) {
 	call := m.parentCalls
 	if call <= len(m.spawnOrder) {
 		task := m.spawnOrder[call-1]
-		definition := m.tasks[task]
 		m.mu.Unlock()
-		args, err := json.Marshal(map[string]string{"agent_id": definition.agentID, "task": task})
+		args, err := json.Marshal(map[string]any{
+			"prompt": task, "description": "delegate", "subagent_type": m.tasks[task].agentID,
+		})
 		if err != nil {
 			return nil, err
 		}
 
-		return runtimeToolResponse("spawn-"+task, subagent.SpawnToolName, string(args)), nil
+		return runtimeToolResponse("spawn-"+task, subagent.ToolName, string(args)), nil
 	}
 	m.mu.Unlock()
 

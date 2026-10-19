@@ -22,7 +22,10 @@ func TestDefaults(t *testing.T) {
 	assert.Empty(t, cfg.Models)
 	assert.False(t, cfg.ToolSearch)
 	assert.Equal(t, "pips_tool_search", cfg.ToolSearchName)
-	assert.False(t, cfg.DynamicSubagents)
+	// Custom subagents are on by default; the flag/env/file can force them off.
+	assert.True(t, cfg.DynamicSubagents)
+	// Builtin agents return free text unless structured results are opted in.
+	assert.False(t, cfg.Subagent.StructuredResults)
 	assert.Equal(t, config.ModeAgent, cfg.Mode)
 	assert.Equal(t, config.ThemeAuto, cfg.TUI.Theme)
 	assert.Equal(t, statusline.Default(), cfg.TUI.StatusLine)
@@ -193,12 +196,10 @@ func TestValidateSubagentConfig(t *testing.T) {
 	}{
 		{name: "depth", mutate: func(value *config.SubagentConfig) { value.MaxDepth = 4 }},
 		{name: "concurrent", mutate: func(value *config.SubagentConfig) { value.MaxConcurrent = 33 }},
-		{name: "spawned", mutate: func(value *config.SubagentConfig) { value.MaxSpawnedPerRootInteraction = 0 }},
-		{name: "follow ups", mutate: func(value *config.SubagentConfig) { value.MaxAutoFollowUps = 33 }},
-		{name: "turns", mutate: func(value *config.SubagentConfig) { value.MaxTurns = 1 }},
-		{name: "tokens", mutate: func(value *config.SubagentConfig) { value.MaxTokens = 16_383 }},
-		{name: "tool calls", mutate: func(value *config.SubagentConfig) { value.MaxToolCalls = 4097 }},
-		{name: "duration", mutate: func(value *config.SubagentConfig) { value.MaxDurationMinutes = 1441 }},
+		// Phase M removed max_spawned_per_root_interaction and
+		// max_auto_follow_ups, so max_concurrent is the only remaining
+		// admission budget that rejects zero.
+		{name: "concurrent below minimum", mutate: func(value *config.SubagentConfig) { value.MaxConcurrent = 0 }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

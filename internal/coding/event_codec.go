@@ -178,6 +178,8 @@ func decodeEventPayload(eventType EventType, data []byte) (EventPayload, error) 
 		EventSubagentCompleted, EventSubagentFailed, EventSubagentCanceled,
 		EventSubagentInterrupted:
 		return decodePayload[SubagentLifecycle](data)
+	case EventBackgroundStarted, EventBackgroundCompleted:
+		return decodePayload[BackgroundTaskLifecycle](data)
 	case EventGoalChanged:
 		return decodePayload[GoalChanged](data)
 	case EventTeamLifecycle:
@@ -315,6 +317,7 @@ func validateNestedPayloadJSON(eventType EventType, data []byte) error {
 			Transcript    []json.RawMessage `json:"transcript"`
 			ContextTokens int               `json:"context_tokens"`
 			Tasks         tasklist.Snapshot `json:"tasks"`
+			Compaction    CompactionState   `json:"compaction,omitzero"`
 		}
 		if err := strictDecode(data, &payload); err != nil {
 			return err
@@ -502,6 +505,10 @@ func validateStrictMediaSourceJSON(data []byte) error {
 		URL      string `json:"url,omitempty"`
 		Data     []byte `json:"data,omitempty"`
 		MIMEType string `json:"mime_type,omitempty"`
+		Path     string `json:"path,omitempty"`
+		Digest   string `json:"digest,omitempty"`
+		Width    int    `json:"width,omitempty"`
+		Height   int    `json:"height,omitempty"`
 	}
 
 	return strictDecode(data, &source)

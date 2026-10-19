@@ -105,6 +105,10 @@ func (p *eventPublisher) publishLocked(
 
 	diagnostics := p.runtime.observeEvent(ctx, event)
 	p.hub.publish(event)
+	// The journal and sidecars commit after the reducer state, so disk I/O
+	// never runs under runtime.mu.
+	p.runtime.artifacts.appendJournalEvent(event)
+	p.runtime.recordCommittedEvent(event)
 
 	consumerStopped := emitter != nil && !emitter.deliver(event)
 	for _, diagnostic := range diagnostics {
@@ -202,6 +206,7 @@ func (p *eventPublisher) publishChildLocked(
 
 	diagnostics := p.runtime.observeEvent(ctx, event)
 	p.hub.publish(event)
+	p.runtime.artifacts.appendJournalEvent(event)
 	for _, diagnostic := range diagnostics {
 		if err := p.publishChildGeneratedLocked(
 			ctx,

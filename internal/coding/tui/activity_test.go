@@ -99,7 +99,7 @@ func TestResolveActivity(t *testing.T) {
 			kind: activityTool, label: activityLabelExploring, detail: "2 actions", visible: true,
 		},
 		{
-			name: "subagent uses role activity", context: activityContext{state: withSubagents(
+			name: "foreground subagent makes the parent wait", context: activityContext{state: withSubagents(
 				withTools(
 					running,
 					coding.ToolState{
@@ -109,13 +109,57 @@ func TestResolveActivity(t *testing.T) {
 				),
 				coding.SubagentState{
 					Role: subagent.RoleExplore, State: subagent.StateRunning,
+					Delivery: subagent.DeliveryForeground,
 					Activity: subagent.ActivitySummary{
 						Action: subagent.ActivityActionRead, Target: "runtime.go",
 					},
 				},
 			)},
-			kind: activityTool, label: activityLabelExploring,
+			kind: activityTool, label: activityLabelWaitingSubagent,
 			detail: "Read runtime.go", visible: true,
+		},
+		{
+			name: "two foreground subagents name the count", context: activityContext{state: withSubagents(
+				withTools(
+					running,
+					coding.ToolState{
+						Call:   coding.ToolCall{ID: "call-1", Name: subagent.ToolName},
+						Status: coding.ToolStatusRunning,
+					},
+				),
+				coding.SubagentState{
+					Role: subagent.RolePlan, State: subagent.StateRunning,
+					Delivery: subagent.DeliveryForeground,
+				},
+				coding.SubagentState{
+					Role: subagent.RoleExplore, State: subagent.StateRunning,
+					Delivery: subagent.DeliveryForeground,
+					Activity: subagent.ActivitySummary{
+						Action: subagent.ActivityActionRead, Target: "runtime.go",
+					},
+				},
+			)},
+			kind: activityTool, label: "Waiting for 2 subagents…",
+			detail: "Read runtime.go", visible: true,
+		},
+		{
+			name: "a background child does not make the parent wait", context: activityContext{state: withSubagents(
+				withTools(
+					running,
+					coding.ToolState{
+						Call:   coding.ToolCall{ID: "call-1", Name: subagent.ToolName},
+						Status: coding.ToolStatusRunning,
+					},
+				),
+				coding.SubagentState{
+					Role: subagent.RoleExplore, State: subagent.StateRunning,
+					Delivery: subagent.DeliveryBackground,
+					Activity: subagent.ActivitySummary{
+						Action: subagent.ActivityActionRead, Target: "runtime.go",
+					},
+				},
+			)},
+			kind: activityTool, label: activityLabelWaitingSubagent, visible: true,
 		},
 		{
 			name: "approval takes priority over tool", context: activityContext{state: withApproval(
@@ -286,7 +330,7 @@ func TestResolveActivityUsesSemanticToolLabels(t *testing.T) {
 			tool: coding.ToolState{
 				Call: coding.ToolCall{
 					ID: "call-1", Name: "exa.web_search_exa",
-					Arguments: ai.JSON(`{"query":"Codex CLI"}`),
+					Arguments: ai.JSON(`{"query":"example CLI"}`),
 				},
 				Status: coding.ToolStatusRunning,
 			},
@@ -697,7 +741,53 @@ func TestActivityLabelsRemainSingleLine(t *testing.T) {
 		activityLabelRetrying,
 		activityLabelWaiting,
 		activityLabelInterrupting,
+		activityLabelWaitingSubagent,
+		activityLabelWaitingActivity,
 	} {
 		assert.False(t, strings.ContainsAny(label, "\r\n"))
 	}
+}
+
+func TestClampActivitySubjectTakesFirstLineAndBoundsRunes(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "first line", clampActivitySubject("\n  first line \nsecond line"))
+	assert.Equal(t, "only line", clampActivitySubject("   only line   "))
+	assert.Empty(t, clampActivitySubject(" \n \t "))
+	// Forty characters pass unchanged; the forty-first is dropped without an
+	// ellipsis, matching the source's clamp.
+	forty := strings.Repeat("a", activitySubjectLimit)
+	assert.Equal(t, forty, clampActivitySubject(forty+"b"))
+	assert.Len(t, []rune(clampActivitySubject(forty+"b")), activitySubjectLimit)
+	// The bound counts characters, so a multi-byte subject keeps its runes whole.
+	assert.Len(
+		t,
+		[]rune(clampActivitySubject(strings.Repeat("å", activitySubjectLimit+5))),
+		activitySubjectLimit,
+	)
+}
+
+func TestSubagentActivitySummaryBoundsTheTarget(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("p", activitySubjectLimit+10)
+	assert.Equal(
+		t,
+		"Read "+strings.Repeat("p", activitySubjectLimit),
+		subagentActivitySummary(subagent.ActivitySummary{
+			Action: subagent.ActivityActionRead, Target: long,
+		}),
+	)
+	assert.Equal(t, "Read runtime.go", subagentLiveActivityLabel(coding.SubagentState{
+		State: subagent.StateRunning,
+		Activity: subagent.ActivitySummary{
+			Action: subagent.ActivityActionRead, Target: "runtime.go",
+		},
+	}))
+	assert.Equal(t, activityLabelWaitingActivity, subagentLiveActivityLabel(coding.SubagentState{
+		State: subagent.StateRunning,
+	}))
+	assert.Empty(t, subagentLiveActivityLabel(coding.SubagentState{
+		State: subagent.StateSucceeded,
+	}))
 }

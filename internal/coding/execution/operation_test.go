@@ -344,6 +344,47 @@ func FuzzParseFingerprint(f *testing.F) {
 	})
 }
 
+// TestNoDeadlineIsRepresentableOnlyForMonitor pins the explicit no-deadline
+// state: only a monitor may have no deadline, and the state cannot be combined
+// with a duration. An interactive shell keeps its unchanged bounded window.
+func TestNoDeadlineIsRepresentableOnlyForMonitor(t *testing.T) {
+	t.Parallel()
+
+	fixture := newOperationFixture(t)
+
+	spec := fixture.spec()
+	spec.Kind = execution.KindMonitor
+	spec.Tool = "monitor"
+	spec.Timeout = 0
+	spec.NoDeadline = true
+
+	op, err := execution.NewOperation(t.Context(), fixture.workspace, spec)
+	require.NoError(t, err)
+	assert.True(t, op.NoDeadline())
+	assert.Zero(t, op.Timeout())
+
+	for name, mutate := range map[string]func(*execution.OperationSpec){
+		"shell cannot be unbounded": func(spec *execution.OperationSpec) {
+			spec.NoDeadline = true
+			spec.Timeout = 0
+		},
+		"no-deadline cannot carry a duration": func(spec *execution.OperationSpec) {
+			spec.Kind = execution.KindMonitor
+			spec.Tool = "monitor"
+			spec.NoDeadline = true
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			probe := fixture.spec()
+			mutate(&probe)
+			_, err := execution.NewOperation(t.Context(), fixture.workspace, probe)
+			assert.ErrorIs(t, err, execution.ErrInvalidOperation)
+		})
+	}
+}
+
 type operationFixture struct {
 	base       string
 	workspace  workspace.Workspace

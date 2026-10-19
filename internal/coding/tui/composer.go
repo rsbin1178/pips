@@ -22,17 +22,28 @@ const (
 	maximumComposerHistoryBytes   = 16 << 20
 	largePasteCharacterThreshold  = 1_000
 	largePasteLineThreshold       = 8
+	// maximumExpandablePasteBytes bounds the paste a chip expands back into the
+	// editor in place. See composerState.expandPaste.
+	maximumExpandablePasteBytes = 100_000
 )
 
 var (
-	errComposerElementLimit      = errors.New("coding tui: composer attachment limit reached")
-	errComposerImageLimit        = errors.New("coding tui: composer image limit reached")
-	errComposerInvalidPaste      = errors.New("coding tui: pasted text is invalid or too large")
-	errComposerCorruptDraft      = errors.New("coding tui: composer protected element is invalid")
+	errComposerElementLimit = errors.New("coding tui: composer attachment limit reached")
+	errComposerImageLimit   = errors.New("coding tui: composer image limit reached")
+	errComposerInvalidPaste = errors.New("coding tui: pasted text is invalid or too large")
+	errComposerCorruptDraft = errors.New("coding tui: composer protected element is invalid")
+	// errComposerVisionUnsupported refuses a draft holding an image the active
+	// model cannot accept. It is rendered to the operator, so it names the remedy:
+	// a draft that silently will not send reads as a frozen TUI.
 	errComposerVisionUnsupported = errors.New(
-		"coding tui: active model does not declare image input support",
+		"the active model does not accept image input: remove the image, " +
+			"or declare capabilities.vision = true for this model",
 	)
 )
+
+// composerSelectionNotice states what a whole-draft selection does, because the
+// keys that act on it are not visible anywhere else.
+const composerSelectionNotice = "all selected · type or paste to replace · backspace clears · Esc keeps the draft"
 
 type composerElementKind uint8
 
@@ -86,6 +97,14 @@ type composerState struct {
 	elements []composerElement
 	nextID   uint64
 
+	// styles is the editor styling the theme installed. It is retained so a
+	// whole-draft selection can be drawn on top of it and a theme change cannot
+	// drop a live selection.
+	styles textarea.Styles
+	// selectAll reports that the whole draft is selected: it renders as one
+	// selection, and the next input replaces or clears it instead of editing it.
+	selectAll bool
+
 	history           []composerSnapshot
 	historyBytes      int
 	historyIndex      int
@@ -94,16 +113,125 @@ type composerState struct {
 }
 
 func newComposerState(editor textarea.Model) composerState {
-	return composerState{Model: editor}
+	return composerState{Model: editor, styles: editor.Styles()}
+}
+
+// ApplyStyles installs the theme's editor styling and keeps it, so the selection
+// rendering can be composed on top of it.
+func (c *composerState) ApplyStyles(styles textarea.Styles) {
+	c.styles = styles
+	c.SetStyles(c.activeStyles())
+}
+
+// activeStyles returns the styling to render with: the theme's, with a live
+// whole-draft selection drawn on top.
+func (c composerState) activeStyles() textarea.Styles {
+	if !c.selectAll {
+		return c.styles
+	}
+
+	return composerSelectionStyles(c.styles)
+}
+
+// SelectionActive reports whether the whole draft is selected.
+func (c composerState) SelectionActive() bool { return c.selectAll }
+
+// ToggleSelectAll selects the whole draft, or drops the selection it finds. It
+// reports the state it left, so the caller can say what happened: false means
+// nothing is selected, either because the draft is empty or because the gesture
+// collapsed the selection.
+func (c *composerState) ToggleSelectAll() bool {
+	if c.selectAll {
+		c.CollapseSelection()
+
+		return false
+	}
+
+	if c.Value() == "" {
+		return false
+	}
+
+	c.selectAll = true
+	c.SetStyles(c.activeStyles())
+
+	return true
+}
+
+// CollapseSelection drops the selection and keeps the draft.
+func (c *composerState) CollapseSelection() {
+	if !c.selectAll {
+		return
+	}
+
+	c.selectAll = false
+	c.SetStyles(c.activeStyles())
+}
+
+// replaceSelection swaps the whole draft for value, which is what typing, pasting
+// or deleting does to a selection. Every element belonged to the replaced display,
+// so they go with it.
+func (c *composerState) replaceSelection(value string) {
+	c.CollapseSelection()
+	c.Model.SetValue(value)
+	c.elements = nil
+	c.MoveToEnd()
+	c.exitHistoryBrowse()
+}
+
+// composerSelectionOutcome says what one input did to a whole-draft selection.
+type composerSelectionOutcome uint8
+
+const (
+	// selectionConsumed means the input was applied to the selection itself.
+	selectionConsumed composerSelectionOutcome = iota
+	// selectionCollapsed means the selection is dropped and the input continues to
+	// the draft, which is how Enter, the arrows and the picker keys keep working
+	// over a selection.
+	selectionCollapsed
+	// selectionPassed means the input continues and the selection stays, for an
+	// input that reads the draft rather than editing it.
+	selectionPassed
+)
+
+// updateSelection applies one input to a whole-draft selection.
+func (c composerState) updateSelection(message tea.Msg) (composerState, composerSelectionOutcome) {
+	switch value := message.(type) {
+	case tea.MouseWheelMsg:
+		// Scrolling the view is not an edit, so a selection survives looking at it.
+		return c, selectionPassed
+	case tea.PasteMsg:
+		c.replaceSelection(value.Content)
+
+		return c, selectionConsumed
+	case tea.KeyPressMsg:
+		// Key.Text is set only for printable characters, so a control chord falls
+		// through to the key's own handling instead of being typed over the draft.
+		if text := value.Key().Text; text != "" {
+			c.replaceSelection(text)
+
+			return c, selectionConsumed
+		}
+
+		switch value.Code {
+		case tea.KeyBackspace, tea.KeyDelete:
+			c.replaceSelection("")
+
+			return c, selectionConsumed
+		}
+	}
+
+	return c, selectionCollapsed
 }
 
 func (c *composerState) SetValue(value string) {
+	c.CollapseSelection()
 	c.Model.SetValue(value)
 	c.elements = nil
 	c.exitHistoryBrowse()
 }
 
 func (c *composerState) Reset() {
+	c.CollapseSelection()
 	c.Model.Reset()
 	c.elements = nil
 	c.exitHistoryBrowse()
@@ -122,6 +250,19 @@ func (c *composerState) InsertString(value string) {
 }
 
 func (c composerState) Update(message tea.Msg) (composerState, tea.Cmd) {
+	if c.selectAll {
+		updated, outcome := c.updateSelection(message)
+
+		c = updated
+		if outcome == selectionConsumed {
+			return c, nil
+		}
+
+		if outcome == selectionCollapsed {
+			c.CollapseSelection()
+		}
+	}
+
 	before := c.Snapshot()
 	if key, ok := message.(tea.KeyPressMsg); ok {
 		if c.removeElementForKey(key) {
@@ -187,7 +328,19 @@ func (c *composerState) InsertPaste(content string) (bool, error) {
 		return false, err
 	}
 
+	// A paste over a whole-draft selection replaces the draft, the way typing does.
+	if c.selectAll {
+		c.replaceSelection(content)
+
+		return false, nil
+	}
+
 	c.snapCursorToElementEdge()
+
+	if c.expandPaste(content) {
+		return false, nil
+	}
+
 	characters := utf8.RuneCountInString(content)
 	lines := logicalLineCount(content)
 	if characters <= largePasteCharacterThreshold && lines <= largePasteLineThreshold {
@@ -239,6 +392,54 @@ func (c *composerState) InsertPaste(content string) (bool, error) {
 	return true, nil
 }
 
+// expandPaste replaces the collapsed paste chip the cursor sits on or after with
+// the text it stands for, so a large paste can be edited in place instead of only
+// in an external editor. Pasting the same content again is the gesture: it is the
+// one action that can only mean "I want this text, not a chip". It reports
+// whether a chip was expanded.
+//
+// The content has to match the chip's payload exactly, which bounds the gesture to
+// a chip the operator just pasted from: no other content can expand one.
+func (c *composerState) expandPaste(content string) bool {
+	if len(content) > maximumExpandablePasteBytes {
+		// The editor rewraps its whole buffer on every change, so a larger paste
+		// costs more than the editor it is standing in for. The chip stays, and the
+		// text is still sent in full.
+		return false
+	}
+
+	cursor := composerCursorByte(c.Value(), c.Line(), c.Column())
+	for _, span := range composerElementSpans(c.Snapshot()) {
+		element := c.elements[span.elementIndex]
+		if element.kind != composerElementPaste || element.payload != content {
+			continue
+		}
+
+		if cursor < span.start || cursor > span.end {
+			continue
+		}
+
+		before := c.Snapshot()
+		updated := before.display[:span.start] + content + before.display[span.end:]
+		c.Model.SetValue(updated)
+		c.elements = slices.Delete(slices.Clone(c.elements), span.elementIndex, span.elementIndex+1)
+		line, column := composerPositionAtByte(updated, span.start+len(content))
+		setComposerPosition(c, line, column)
+
+		if !c.hasValidElements() {
+			c.applySnapshot(before)
+
+			return false
+		}
+
+		c.exitHistoryOnChange(before.display)
+
+		return true
+	}
+
+	return false
+}
+
 func (c *composerState) InsertFile(
 	start int,
 	end int,
@@ -257,6 +458,10 @@ func (c *composerState) InsertFile(
 		composerSnapshotImageCount(c.Snapshot()) >= attachment.MaxImagesPerMessage {
 		return errComposerImageLimit
 	}
+
+	// An attachment lands in the draft the selection was about, so the selection
+	// ends before the label is inserted.
+	c.CollapseSelection()
 
 	before := c.Snapshot()
 	if !composerRangeAvailable(before, start, end) {
@@ -305,6 +510,7 @@ func (c *composerState) InsertImage(image attachment.Image) error {
 		return errComposerImageLimit
 	}
 
+	c.CollapseSelection()
 	c.snapCursorToElementEdge()
 	before := c.Snapshot()
 	label := c.nextAttachmentLabel(before.display, "Image", image.Name())
@@ -434,6 +640,7 @@ func (c *composerState) AtLastVisualRow() bool {
 }
 
 func (c *composerState) applySnapshot(snapshot composerSnapshot) {
+	c.CollapseSelection()
 	c.Model.SetValue(snapshot.display)
 	c.elements = slices.Clone(snapshot.elements)
 	setComposerPosition(c, snapshot.position.line, snapshot.position.column)

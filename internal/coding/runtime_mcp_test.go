@@ -78,7 +78,7 @@ func writeTestMCPDefinitions(t *testing.T, base, servers string) {
 }`, servers), 0o600))
 }
 
-func TestRuntimeOpensBeforeMCPConnectsAndFirstPromptWaitsForTools(t *testing.T) {
+func TestRuntimeFirstPromptWaitsForMCPWithinStartupGrace(t *testing.T) {
 	t.Parallel()
 
 	gated := newGatedMCPServer(t, "lookup")
@@ -118,7 +118,7 @@ func TestRuntimeOpensBeforeMCPConnectsAndFirstPromptWaitsForTools(t *testing.T) 
 	require.Eventually(t, func() bool {
 		return runtime.Snapshot().Interaction.ID != ""
 	}, 30*time.Second, 10*time.Millisecond)
-	assert.Empty(t, model.Requests(), "the prompt must wait for MCP before reaching the model")
+	assert.Empty(t, model.Requests(), "a server that settles inside the grace must reach the first model request")
 	snapshot, err = runtime.MCP(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, codingmcp.ServerStateConnecting, snapshot.Servers[0].State)
@@ -142,6 +142,55 @@ func TestRuntimeOpensBeforeMCPConnectsAndFirstPromptWaitsForTools(t *testing.T) 
 	assert.Equal(t, []string{"docs_lookup"}, snapshot.Servers[0].Tools)
 	assert.False(t, snapshot.Servers[0].SettledAt.IsZero())
 	assert.Empty(t, runtime.Snapshot().Diagnostics)
+}
+
+func TestRuntimeFirstPromptProceedsAfterMCPStartupGrace(t *testing.T) {
+	t.Parallel()
+
+	gated := newGatedMCPServer(t, "lookup")
+	base := t.TempDir()
+	writeTestMCPDefinitions(t, base, fmt.Sprintf(
+		`{"id":"docs","type":"streamable_http","url":%q,"connect_timeout":"30s"}`, gated.http.URL,
+	))
+	model := newRuntimeModel(runtimeTextResponse("first"), runtimeTextResponse("second"))
+	runtime := openTestRuntimeAt(t, base, SessionTarget{}, model)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := collectRuntimeEventsAndError(
+			t, runtime.Prompt(context.WithoutCancel(t.Context()), ai.UserText("start")),
+		)
+		firstDone <- err
+	}()
+
+	select {
+	case <-gated.started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("MCP server never received the initialize request")
+	}
+	require.Eventually(t, func() bool {
+		return len(model.Requests()) == 1
+	}, 30*time.Second, 10*time.Millisecond)
+	assert.NotContains(t, toolNamesFromRequest(model.Requests()[0]), "docs_lookup",
+		"a server still connecting at the startup grace must not delay the first request")
+
+	gated.release()
+	select {
+	case err := <-firstDone:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("first prompt did not finish")
+	}
+	require.Eventually(t, func() bool {
+		snapshot, err := runtime.MCP(t.Context())
+		return err == nil && snapshot.Settled &&
+			snapshot.Servers[0].State == codingmcp.ServerStateConnected
+	}, 30*time.Second, 10*time.Millisecond)
+
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("use the docs")))
+	requests := model.Requests()
+	require.Len(t, requests, 2)
+	assert.Contains(t, toolNamesFromRequest(requests[1]), "docs_lookup")
 }
 
 func TestRuntimePromptCancelledWhileWaitingForMCPLeavesRuntimeUsable(t *testing.T) {

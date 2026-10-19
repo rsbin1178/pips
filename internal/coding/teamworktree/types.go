@@ -150,3 +150,21 @@ type Cleanup struct {
 	WorktreeRemoved bool
 	ResultRetained  bool
 }
+
+// worktreeBase is the minimal identity raw materialization needs: the parent
+// workspace and its Git directory, the new Worktree directory, and the exact
+// base commit.
+type worktreeBase struct {
+	workspace string
+	gitDir    string
+	directory string
+	baseOID   string
+}
+
+// base projects one Attempt Worktree into its materialization identity.
+func (r Resource) base() worktreeBase {
+	return worktreeBase{
+		workspace: r.Workspace.Path, gitDir: r.GitDir.Path,
+		directory: r.Directory.Path, baseOID: r.BaseOID,
+	}
+}

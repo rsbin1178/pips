@@ -14,17 +14,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPermissionsRequireMatchingDualRecordsAndInvalidateOnChange(t *testing.T) {
+func TestPermissionsEnableTrustedProjectServersWithoutApproval(t *testing.T) {
 	t.Parallel()
 
 	fixture := newPermissionFixture(t, true)
 	definitions := fixture.loadDefinitions(t, nil)
 
+	// Folder trust already admitted the project file; there is no second
+	// per-server approval and no pending state.
 	resolved, err := fixture.permissions.Resolve(t.Context(), definitions)
 	require.NoError(t, err)
 	require.Len(t, resolved, 1)
-	assert.Equal(t, codingmcp.StatusPending, resolved[0].Status)
+	assert.Equal(t, codingmcp.StatusEnabled, resolved[0].Status)
 
+	// An allow record remains a local audit entry but does not change status.
 	require.NoError(t, fixture.permissions.Decide(
 		t.Context(),
 		resolved[0].Definition,
@@ -49,10 +52,11 @@ func TestPermissionsRequireMatchingDualRecordsAndInvalidateOnChange(t *testing.T
 	assert.Contains(t, string(content), `schema = 'pips.permissions/v1alpha1'`)
 	assert.NotContains(t, string(content), "secret")
 
+	// A changed definition stays enabled under folder trust.
 	changed := fixture.loadDefinitions(t, []string{"--changed"})
 	resolved, err = fixture.permissions.Resolve(t.Context(), changed)
 	require.NoError(t, err)
-	assert.Equal(t, codingmcp.StatusPending, resolved[0].Status)
+	assert.Equal(t, codingmcp.StatusEnabled, resolved[0].Status)
 }
 
 func TestPermissionsPersistExplicitDeny(t *testing.T) {
@@ -71,9 +75,16 @@ func TestPermissionsPersistExplicitDeny(t *testing.T) {
 	resolved, err := fixture.permissions.Resolve(t.Context(), definitions)
 	require.NoError(t, err)
 	assert.Equal(t, codingmcp.StatusDisabled, resolved[0].Status)
+
+	// A user deny is name-based, so changing the definition does not silently
+	// re-enable it.
+	changed := fixture.loadDefinitions(t, []string{"--changed"})
+	resolved, err = fixture.permissions.Resolve(t.Context(), changed)
+	require.NoError(t, err)
+	assert.Equal(t, codingmcp.StatusDisabled, resolved[0].Status)
 }
 
-func TestPermissionsCrashWindowStaysPending(t *testing.T) {
+func TestPermissionsCrashWindowKeepsProjectServerEnabled(t *testing.T) {
 	t.Parallel()
 
 	fixture := newPermissionFixture(t, false)
@@ -85,7 +96,7 @@ func TestPermissionsCrashWindowStaysPending(t *testing.T) {
 
 	resolved, err := fixture.permissions.Resolve(t.Context(), definitions)
 	require.NoError(t, err)
-	assert.Equal(t, codingmcp.StatusPending, resolved[0].Status)
+	assert.Equal(t, codingmcp.StatusEnabled, resolved[0].Status)
 
 	_, err = os.Stat(filepath.Join(
 		fixture.workspace.Root(),
@@ -122,7 +133,11 @@ func TestPermissionsRejectTrackedAndSymlinkFiles(t *testing.T) {
 		writeFile(t, target, `schema = "pips.permissions/v1alpha1"`)
 		require.NoError(t, os.Symlink(target, filepath.Join(projectPips, "permissions.toml")))
 
-		_, err := fixture.permissions.Resolve(t.Context(), definitions)
+		err := fixture.permissions.Decide(
+			t.Context(),
+			definitions.List()[0],
+			workspace.PermissionAllow,
+		)
 		require.ErrorIs(t, err, codingmcp.ErrUnsafeFile)
 	})
 }

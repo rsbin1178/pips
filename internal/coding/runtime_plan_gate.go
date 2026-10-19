@@ -101,7 +101,7 @@ func (r *Runtime) planReminderText(current *interaction) string {
 
 // takeFullPlanReminder reports whether this turn's plan reminder is the full
 // variant and advances the alternation. Even counts are full, odd counts are the
-// sparse variant, matching grok-build's reminder_count.
+// sparse variant.
 func (r *Runtime) takeFullPlanReminder() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

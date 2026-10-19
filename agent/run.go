@@ -15,7 +15,7 @@ import (
 )
 
 // lengthSalvageAttempts bounds how many times one turn continues a response
-// the output-token limit cut off. Two continues match Grok Build's default.
+// the output-token limit cut off. The default budget is two continues per turn.
 const lengthSalvageAttempts = 2
 
 // lengthSalvageInstruction asks the model to resume a response the
@@ -36,6 +36,20 @@ const lengthSalvageInstruction = "Your previous response exceeded the output tok
 // fully effective. Use [Agent.Stream] for incremental output.
 func (a *Agent) Run(ctx context.Context, sess *Session, msgs ...ai.Message) (*RunResult, error) {
 	return a.loop(ctx, sess, msgs, func(Event) bool { return true }, false)
+}
+
+// RunStream is [Agent.Run] with streaming model calls: it reports every event
+// to deliver and returns the same terminal result Run does. It exists for
+// callers that must stream — a provider whose non-streaming response carries no
+// content still answers a stream — but that also need the terminal result
+// rather than an event iterator.
+//
+// deliver must return true. Returning false abandons the run exactly as
+// breaking out of [Agent.Stream] does, and RunStream then returns a nil result.
+func (a *Agent) RunStream(
+	ctx context.Context, sess *Session, deliver func(Event) bool, msgs ...ai.Message,
+) (*RunResult, error) {
+	return a.loop(ctx, sess, msgs, deliver, true)
 }
 
 // Stream is [Agent.Run] as an event sequence: it yields run, turn, and tool

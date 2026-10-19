@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 )
@@ -31,6 +33,14 @@ type toolDetailView struct {
 	title   string
 	callIDs []string
 	rows    []toolDetailRow
+	// watchTaskID and watchRunning identify a page that shows a background
+	// watch rather than a Tool call. They are what lets the route re-read a
+	// running watch's output and follow its tail while it streams.
+	watchTaskID  string
+	watchRunning bool
+	// todo marks the standalone todo_write checklist page, whose rows are
+	// rebuilt from the live projection on every render.
+	todo bool
 }
 
 // text renders the plain, unwrapped detail body. Tests and NO_COLOR parity
@@ -143,7 +153,13 @@ func (m *Model) toolDetailRows(width int) ([]string, bool) {
 		return []string{detailTitleDefault, "", detailEmptyBody}, false
 	}
 
-	rows := detailPhysicalRows(m.route.toolDetail.rows, width, m.theme, m.options.NoColor)
+	detail := m.route.toolDetail
+	if detail.todo {
+		fresh := newTodoDetailView(m.state.Tasks)
+		detail = &fresh
+	}
+
+	rows := detailPhysicalRows(detail.rows, width, m.theme, m.options.NoColor)
 	if len(rows) == 0 {
 		rows = []string{detailTitleDefault, "", detailEmptyBody}
 	}
@@ -299,7 +315,7 @@ func toolDetailTitle(block timelineBlock) string {
 	case toolClassSubagent:
 		return "Agent activity details"
 	case toolClassTaskList:
-		return "Plan details"
+		return "Todo details"
 	case toolClassGeneric, toolClassPlan:
 		return "Tool call details"
 	default:
@@ -370,7 +386,7 @@ func taskListChecklistRows(update tasklist.Update) []toolDetailRow {
 	for _, item := range update.Plan {
 		rows = append(rows, toolDetailRow{
 			tone: detailToneTask(item.Status), indent: 1,
-			text: taskListGlyph(item.Status) + " " + oneLineToolText(item.Step),
+			text: taskListGlyph(item.Status) + " " + taskListItemLabel(item),
 		})
 	}
 
@@ -383,11 +399,41 @@ func detailToneTask(status tasklist.Status) toolDetailTone {
 		return detailToneAdded
 	case tasklist.StatusInProgress:
 		return detailToneHeading
+	case tasklist.StatusCancelled:
+		return detailToneMuted
 	case tasklist.StatusPending, "":
 		return detailToneMuted
 	default:
 		return detailToneBody
 	}
+}
+
+// detailDispatchArguments reports the tool a dispatch call reached and the
+// target's own arguments. The detail document names that target and shows those
+// arguments instead of the wrapper's envelope, so a card reads as the call the
+// model made rather than as an opaque wrapper; the target's own card is never
+// synthesized. It reports false for every other call and for one whose
+// arguments do not carry a target name, so the row keeps its own name and the
+// argument tree degrades the way every other detail renderer does.
+func detailDispatchArguments(activity toolActivity) (string, ai.JSON, bool) {
+	if activity.name != tools.UseToolName {
+		return "", nil, false
+	}
+
+	var envelope struct {
+		ToolName  string  `json:"tool_name"`
+		ToolInput ai.JSON `json:"tool_input"`
+	}
+	if err := json.Unmarshal(activity.arguments, &envelope); err != nil {
+		return "", nil, false
+	}
+
+	target := oneLineToolText(envelope.ToolName)
+	if target == "" {
+		return "", nil, false
+	}
+
+	return target, envelope.ToolInput, true
 }
 
 // detailHeadingRowFor names one call the way the expanded timeline rows do, so
@@ -400,6 +446,9 @@ func detailHeadingRowFor(index int, activity toolActivity) toolDetailRow {
 		_, verb, subject := toolActivityHeading(activity.class, activity.state, []toolActivity{activity})
 		label = strings.TrimSpace(verb + " " + subject)
 	case toolClassExplore, toolClassGeneric, toolClassPlan, toolClassSubagent:
+		if target, _, ok := detailDispatchArguments(activity); ok {
+			label = target
+		}
 	}
 	if label == "" {
 		label = activity.name
@@ -412,8 +461,14 @@ func detailHeadingRowFor(index int, activity toolActivity) toolDetailRow {
 }
 
 // toolDetailArgumentRows renders the argument tree against a capped share of
-// the document budget, so the Result/Error body always has room of its own.
+// the document budget, so the Result/Error body always has room of its own. A
+// dispatch call renders the target's own argument object, which is the argument
+// tree the call it made carries.
 func toolDetailArgumentRows(activity toolActivity, budget *detailByteBudget) []toolDetailRow {
+	if _, input, ok := detailDispatchArguments(activity); ok && len(input) > 0 {
+		activity.arguments = input
+	}
+
 	fields, ok := detailArgumentFields(activity)
 	if !ok {
 		rows := []toolDetailRow{detailSection("Arguments")}

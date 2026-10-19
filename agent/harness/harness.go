@@ -284,6 +284,12 @@ func (h *Harness) Steer(msgs ...ai.Message) error {
 	return h.queue(func(s *agent.Session) { s.Steer(msgs...) })
 }
 
+// Interject queues messages ahead of the active run's pending steering (see
+// [agent.Session.Interject]). It fails with [ErrIdle] when no run is active.
+func (h *Harness) Interject(msgs ...ai.Message) error {
+	return h.queue(func(s *agent.Session) { s.Interject(msgs...) })
+}
+
 // FollowUp queues follow-up work into the active run (see
 // [agent.Session.FollowUp]). It fails with [ErrIdle] when no run is active.
 func (h *Harness) FollowUp(msgs ...ai.Message) error {
@@ -355,6 +361,45 @@ func (h *Harness) PromptMessages(ctx context.Context, msgs ...ai.Message) (*agen
 	}()
 
 	result, runErr := run.runner.Run(runCtx, run.session, msgs...)
+	recorderErr := h.finishPrompt(run)
+	run = nil
+
+	if recorderErr != nil {
+		return result, recorderErr
+	}
+
+	if runErr != nil {
+		return result, runErr
+	}
+
+	return result, nil
+}
+
+// PromptMessagesRun drives the agent loop in streaming mode and returns the
+// terminal result. It persists the same save points as [Harness.PromptMessages]
+// and reports events through the harness's configured observer, so a caller
+// that needs the result rather than an event iterator still streams the model
+// call.
+func (h *Harness) PromptMessagesRun(
+	ctx context.Context,
+	msgs ...ai.Message,
+) (*agent.RunResult, error) {
+	run, runCtx, err := h.preparePrompt(ctx, msgs)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if run != nil {
+			_ = h.finishPrompt(run)
+		}
+	}()
+
+	result, runErr := run.runner.RunStream(
+		runCtx,
+		run.session,
+		func(agent.Event) bool { return true },
+		msgs...,
+	)
 	recorderErr := h.finishPrompt(run)
 	run = nil
 
@@ -498,6 +543,19 @@ func (h *Harness) finishPrompt(run *promptRun) error {
 	run.cancel()
 	run.recorder.flush(nil) // save-point: whatever the outcome, keep what completed
 	h.exit()
+
+	// A run that never reported completion stopped somewhere between
+	// committing an assistant message and committing its results: the
+	// consumer stopped iterating mid-batch, or the run failed on the way to
+	// the results. The agent loop refuses to start a run whose tail holds
+	// those calls, so answer them here and keep the transcript runnable. A
+	// run that completed, including one that paused for approval, owns its
+	// pending calls and is left alone.
+	if !run.recorder.completed {
+		if _, err := h.SettleDanglingToolCalls(DanglingToolCallUserCancelled); err != nil {
+			run.recorder.err = errors.Join(run.recorder.err, err)
+		}
+	}
 
 	return run.recorder.err
 }
@@ -709,7 +767,11 @@ type recorder struct {
 
 	buffer  []ai.Message
 	lastCum ai.Usage
-	err     error
+	// completed records that the run reported its own terminal reason. A
+	// paused run reports completion too, which is what keeps its pending
+	// calls intact for the caller to resolve.
+	completed bool
+	err       error
 }
 
 func (r *recorder) onEvent(ctx context.Context, ev agent.Event) {
@@ -722,6 +784,8 @@ func (r *recorder) onEvent(ctx context.Context, ev agent.Event) {
 		delta := usageDelta(payload.Usage, r.lastCum)
 		r.lastCum = payload.Usage
 		r.flush(&delta)
+	case agent.RunCompleted:
+		r.completed = true
 	default:
 	}
 

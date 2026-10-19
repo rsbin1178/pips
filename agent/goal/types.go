@@ -36,14 +36,26 @@ type Outcome string
 // Goal evaluation outcomes.
 const (
 	OutcomeContinue Outcome = "continue"
-	OutcomeComplete Outcome = "complete"
+	// OutcomeComplete is a candidate completion: the deliverable looks complete
+	// enough to verify. Its spelling is the reference's own decision value.
+	OutcomeComplete Outcome = "candidate_complete"
 	OutcomeBlocked  Outcome = "blocked"
+
+	// legacyOutcomeComplete is the spelling OutcomeComplete was stored under
+	// before the assessment adopted the reference's decision vocabulary. The
+	// outcome is durable, so a controller state written by an older binary is
+	// still read with the spelling it was written with. It is deliberately not an
+	// Outcome: it is a spelling a state is read with, never one a decision
+	// produces.
+	legacyOutcomeComplete = "complete"
 )
 
 // EvaluationRecord is the bounded durable projection of one evaluation.
 type EvaluationRecord struct {
-	Outcome Outcome `json:"outcome"`
-	Reason  string  `json:"reason"`
+	Outcome    Outcome `json:"outcome"`
+	Reason     string  `json:"reason"`
+	NextStep   string  `json:"next_step,omitempty"`
+	BlockerKey string  `json:"blocker_key,omitempty"`
 }
 
 // State is the versioned Goal projection stored as continuation ControllerState.
@@ -52,6 +64,12 @@ type State struct {
 	Condition   string            `json:"condition"`
 	Evaluations int               `json:"evaluations"`
 	Last        *EvaluationRecord `json:"last,omitempty"`
+	// BlockerKey is the blocker the last blocked evaluation named and
+	// BlockerStreak is how many consecutive evaluations named it, so only a
+	// repeated declaration of the same blocker blocks the Goal. Both fields are
+	// additive: a state written before them decodes with no key and a zero streak.
+	BlockerKey    string `json:"blocker_key,omitempty"`
+	BlockerStreak int    `json:"blocker_streak,omitempty"`
 }
 
 // WorkInput is the stable Goal envelope supplied to one Worker invocation.
@@ -72,8 +90,15 @@ type Setup struct {
 
 // Evaluation is the immutable input to an Evaluator.
 type Evaluation struct {
-	Condition  string
-	Evidence   ai.JSON
+	Condition string
+	Evidence  ai.JSON
+	// Transcript is the bounded rendering of the session conversation the
+	// assessment reads. It is untrusted data, and it is empty when the embedder
+	// supplies none.
+	Transcript string
+	// Plan is the Goal's plan text as the assessment receives it. A Goal with no
+	// plan artifact carries a placeholder rather than nothing.
+	Plan       string
 	Attempt    int
 	Activation *continuation.Activation
 	Limits     continuation.Limits
@@ -83,12 +108,19 @@ type Evaluation struct {
 
 // EvaluationResult controls the Goal action after one Work result.
 type EvaluationResult struct {
-	Outcome  Outcome
-	Reason   string
-	Feedback ai.JSON
-	Output   ai.JSON
-	Block    *continuation.Block
-	Usage    ai.Usage
+	Outcome Outcome
+	Reason  string
+	// NextStep is the single best next action the evaluation named. It is
+	// required for a blocked decision, where the block message hands it to the
+	// user, and optional otherwise.
+	NextStep string
+	// BlockerKey identifies the blocker a blocked decision named, so the same
+	// blocker can be counted across rounds.
+	BlockerKey string
+	Feedback   ai.JSON
+	Output     ai.JSON
+	Block      *continuation.Block
+	Usage      ai.Usage
 }
 
 // Evaluator decides whether durable Work evidence satisfies a Goal condition.
@@ -152,8 +184,8 @@ func DecodeState(data ai.JSON) (State, error) {
 
 	state.Condition = condition
 
-	if state.Evaluations < 0 {
-		return State{}, fmt.Errorf("%w: negative evaluation count", ErrInvalid)
+	if err := validateCounts(state); err != nil {
+		return State{}, err
 	}
 
 	if state.Last == nil && state.Evaluations != 0 || state.Last != nil && state.Evaluations == 0 {
@@ -161,11 +193,15 @@ func DecodeState(data ai.JSON) (State, error) {
 	}
 
 	if state.Last != nil {
-		if err := validateRecord(*state.Last); err != nil {
+		last := *state.Last
+		if last.Outcome == legacyOutcomeComplete {
+			last.Outcome = OutcomeComplete
+		}
+
+		if err := validateRecord(last); err != nil {
 			return State{}, err
 		}
 
-		last := *state.Last
 		state.Last = &last
 	}
 
@@ -224,6 +260,20 @@ func validateCondition(condition string) (string, error) {
 	return condition, nil
 }
 
+// validateCounts rejects a state whose counters could never advance: a negative
+// evaluation count or blocker streak would make the Goal's own bounds unreachable.
+func validateCounts(state State) error {
+	if state.Evaluations < 0 {
+		return fmt.Errorf("%w: negative evaluation count", ErrInvalid)
+	}
+
+	if state.BlockerStreak < 0 {
+		return fmt.Errorf("%w: negative blocker streak", ErrInvalid)
+	}
+
+	return nil
+}
+
 func validateRecord(record EvaluationRecord) error {
 	if !validOutcome(record.Outcome) {
 		return fmt.Errorf("%w: invalid outcome %q", ErrInvalid, record.Outcome)
@@ -277,6 +327,12 @@ func validateResultOutcome(result EvaluationResult) error {
 	case OutcomeBlocked:
 		if result.Output != nil {
 			return fmt.Errorf("%w: blocked cannot carry output", ErrInvalid)
+		}
+
+		// The block message becomes the Decision's reason, so it is bounded like
+		// one here rather than at the engine's own validation.
+		if err := validateReason(blockedMessage(result), true); err != nil {
+			return err
 		}
 
 		if result.Block != nil {

@@ -10,6 +10,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/agentprofile"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	"github.com/rsbin1178/pips/internal/coding/resource"
+	"github.com/rsbin1178/pips/internal/coding/subagentprofile"
 )
 
 // integrationCandidate owns a complete, unpublished Coding integration
@@ -56,6 +57,15 @@ func (r *Runtime) buildIntegrationCandidate(
 	if err != nil {
 		return nil, err
 	}
+	subagentProfiles, err := subagentprofile.Load(ctx, subagentprofile.Options{
+		Paths: r.paths, Tree: r.tree, ProjectTrusted: r.trusted,
+		InlineRoles:    r.config.Subagent.Roles,
+		InlinePersonas: r.config.Subagent.Personas,
+		Limits:         r.opts.SubagentProfileLimits,
+	})
+	if err != nil {
+		return nil, err
+	}
 	trustedHooks, pendingHookDiagnostics, err := loadRuntimeHookDefinitions(
 		ctx, r.paths, r.tree, r.trusted, r.workspace.Identity().Key(),
 	)
@@ -98,6 +108,7 @@ func (r *Runtime) buildIntegrationCandidate(
 		connections,
 		loaded,
 		profiles,
+		subagentProfiles,
 		nextSkillPolicy,
 		nextProjectInstructions.SystemPrompt(),
 		plugins,

@@ -250,7 +250,7 @@ type Invocation struct {
 
 // Outcome is the merged result of one hook invocation.
 type Outcome struct {
-	// Blocked is the event-specific Codex-style block decision. Runtime glue
+	// Blocked is the event-specific block decision. Runtime glue
 	// maps it to prompt/tool denial, tool feedback, or a continuation request.
 	Blocked bool
 	// Allowed is meaningful to PermissionRequest and PreToolUse. It never
@@ -299,8 +299,8 @@ func (e Event) matcherTargets(target string) []string {
 		values = append(values, "Bash")
 	case "apply_patch":
 		values = append(values, "Edit", "Write")
-	case "run_subagent", "spawn_agent":
-		values = append(values, "Agent")
+	case "spawn_subagent":
+		values = append(values, "Agent", "Task")
 	}
 
 	return values

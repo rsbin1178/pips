@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestStatusLineRendersContextAndTaskProgress(t *testing.T) {
+func TestStatusLineRendersContextAndTodoProgress(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
@@ -30,7 +30,15 @@ func TestStatusLineRendersContextAndTaskProgress(t *testing.T) {
 	status := ansi.Strip(model.statusLine())
 	assert.Contains(t, status, "25% ctx")
 	assert.Contains(t, status, "75% cache")
-	assert.Contains(t, status, "Tasks 2/3")
+	assert.Contains(t, status, "Todo 2/3")
+
+	model.state.Tasks = tasklist.Snapshot{Completed: 3, Total: 3}
+	assert.NotContains(t, ansi.Strip(model.statusLine()), "Todo",
+		"a fully completed list is not a persistent status-line badge")
+
+	model.state.Tasks = tasklist.Snapshot{Completed: 2, Cancelled: 1, Total: 3}
+	assert.NotContains(t, ansi.Strip(model.statusLine()), "Todo",
+		"a fully terminal list is also complete")
 
 	model.width = 12
 	assert.LessOrEqual(t, ansi.StringWidth(model.statusLine()), model.statusLineWidth())

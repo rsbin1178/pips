@@ -18,20 +18,29 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/agentprofile"
 	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/changes/git"
 	"github.com/rsbin1178/pips/internal/coding/compaction"
+	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
+	"github.com/rsbin1178/pips/internal/coding/teamworktree"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 )
 
 var errConsumerStopped = errors.New("coding runtime: event consumer stopped")
 
-const planInteractionMaxTurns = 32
+const (
+	// mcpStartupGrace bounds how long a new interaction waits for MCP
+	// handshakes before freezing the tool catalog. Servers that are still
+	// connecting keep working in the background and join a later interaction.
+	mcpStartupGrace = 2 * time.Second
+)
 
 type eventEmitter struct {
 	mu        sync.Mutex
@@ -226,6 +235,11 @@ func (r *Runtime) run(
 			emitter.fail(errors.Join(err, finishErr))
 			return
 		}
+		if kind == operationPrompt {
+			// The gate's per-prompt cap and the turn's plan-write and nudge
+			// marks all start here, with the prompt.
+			r.beginTodoTurn()
+		}
 	case operationContinue:
 		if err = r.activatePendingPlanMode(ctx, emitter); err != nil {
 			emitter.fail(err)
@@ -401,57 +415,68 @@ func (r *Runtime) run(
 			return
 		}
 
-		if outcome, terminal := terminalInteractionOutcome(stop); terminal {
-			hookOutcome, hookErr := r.runStopHook(ctx, stopHookActive, emitter)
-			if hookErr != nil {
-				errorEventErr := r.emitRunError(current, hookErr, InteractionFailed, emitter)
+		outcome, terminal := terminalInteractionOutcome(stop)
+		if !terminal {
+			if err := r.reconcileAndContinue(ctx, current, emitter); err != nil {
 				finishErr := r.finishInteraction(
-					context.WithoutCancel(ctx), current, InteractionFailed, emitter,
+					context.WithoutCancel(ctx),
+					current,
+					InteractionFailed,
+					emitter,
 				)
-				emitter.fail(errors.Join(hookErr, errorEventErr, finishErr))
+				emitter.fail(errors.Join(err, finishErr))
 
 				return
 			}
-			if hookOutcome.Stopped || (hookOutcome.Blocked && stopHookActive && ctx.Value(goalContextKey{}) != nil) {
-				current.requestHookStop()
-			}
-			if hookOutcome.Blocked && !hookOutcome.Stopped && !current.hookStopRequestedNow() {
-				messages = []ai.Message{ai.UserText(hookContinuationReason(hookOutcome.Reason))}
-				stopHookActive = true
 
-				continue
+			if r.interactionPaused(current) {
+				return
 			}
-			if ctx.Value(goalContextKey{}) != nil && current.hookStopRequestedNow() {
-				stop = agent.StopWhen
-				outcome = InteractionIncomplete
-			}
-			current.stop = stop
+
+			continue
+		}
+
+		hookOutcome, hookErr := r.runStopHook(ctx, stopHookActive, emitter)
+		if hookErr != nil {
+			errorEventErr := r.emitRunError(current, hookErr, InteractionFailed, emitter)
 			finishErr := r.finishInteraction(
-				context.WithoutCancel(ctx),
-				current,
-				outcome,
-				emitter,
+				context.WithoutCancel(ctx), current, InteractionFailed, emitter,
 			)
-			emitter.fail(finishErr)
+			emitter.fail(errors.Join(hookErr, errorEventErr, finishErr))
 
 			return
 		}
+		if hookOutcome.Stopped || (hookOutcome.Blocked && stopHookActive && ctx.Value(goalContextKey{}) != nil) {
+			current.requestHookStop()
+		} else if hookOutcome.Blocked && !current.hookStopRequestedNow() {
+			messages = []ai.Message{ai.UserText(hookContinuationReason(hookOutcome.Reason))}
+			stopHookActive = true
 
-		if err := r.reconcileAndContinue(ctx, current, emitter); err != nil {
-			finishErr := r.finishInteraction(
-				context.WithoutCancel(ctx),
-				current,
-				InteractionFailed,
-				emitter,
-			)
-			emitter.fail(errors.Join(err, finishErr))
-
-			return
+			continue
 		}
-
-		if r.interactionPaused(current) {
-			return
+		if ctx.Value(goalContextKey{}) != nil && current.hookStopRequestedNow() {
+			stop = agent.StopWhen
+			outcome = InteractionIncomplete
 		}
+		// The opt-in gate runs one more turn when the run ended on a content-only
+		// assistant message with pending or in-progress plan items. It loops back
+		// to the harness inside this interaction, so the transcript, the
+		// notification claims, and the approval/question invariants are untouched.
+		if reminder, gate := r.todoGateReminder(current, stop); gate {
+			messages = []ai.Message{reminder}
+
+			continue
+		}
+		current.stop = stop
+		finishErr := r.finishInteraction(
+			context.WithoutCancel(ctx),
+			current,
+			outcome,
+			emitter,
+		)
+		emitter.fail(finishErr)
+
+		return
 	}
 }
 
@@ -599,6 +624,20 @@ func (r *Runtime) endOperation(operation *runtimeOperation) {
 	r.signalNotifications()
 }
 
+// currentTasks returns a detached copy of the runtime's projected plan, the
+// state the todo_write tool folds a merge onto. It is the same projection the
+// todo gate reads, so the tool's reported totals and the gate cannot disagree.
+func (r *Runtime) currentTasks() tasklist.Snapshot {
+	if r == nil {
+		return tasklist.Snapshot{}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.state.Tasks.Clone()
+}
+
 //nolint:gocyclo,funlen // Snapshot construction preserves catalog and lease rollback boundaries.
 func (r *Runtime) openInteraction(
 	ctx context.Context,
@@ -636,10 +675,12 @@ func (r *Runtime) openInteraction(
 
 	connections := integration.connectionsSnapshot()
 	// MCP servers connect in the background after Open and Reload. The
-	// interaction is the safe boundary that freezes the tool catalog, so it
-	// waits (bounded by each server's connect timeout) for the pending
-	// connections to settle and then reports any new failures exactly once.
-	if err := connections.Wait(ctx); err != nil {
+	// interaction is the safe boundary that freezes the tool catalog: retry
+	// transient failures whose cooldown elapsed, give pending connections a
+	// short startup grace, then report any settled failures exactly once.
+	// Servers that are still connecting join a later interaction.
+	connections.RetryFailed(ctx)
+	if err := connections.WaitGrace(ctx, mcpStartupGrace); err != nil {
 		return nil, err
 	}
 	r.recordOpenDiagnostics(ctx, emitter, connections)
@@ -694,7 +735,24 @@ func (r *Runtime) openInteraction(
 		return nil, errors.New("coding runtime: controlled shell is unavailable")
 	}
 
-	localOptions := []tools.CatalogOption{tools.WithControlledShell(shell)}
+	monitor, ok := r.controller.Tool(tools.MonitorName)
+	if !ok {
+		return nil, errors.New("coding runtime: controlled monitor is unavailable")
+	}
+
+	localOptions := []tools.CatalogOption{
+		tools.WithControlledShell(shell),
+		tools.WithControlledMonitor(monitor),
+		tools.WithKillBackground(func(ctx context.Context, taskID string) (background.Outcome, background.Subject, error) {
+			return r.KillBackgroundTask(ctx, taskID, background.KillModel)
+		}),
+		tools.WithKnownBackgroundIDs(r.KnownBackgroundTaskIDs),
+		tools.WithReadBackgroundTasks(r.readBackgroundTasks),
+		tools.WithTaskLogRead(tools.TaskLogRead{
+			Admit: r.admitBackgroundLogPath,
+			Bytes: backgroundLogReadBytes,
+		}),
+	}
 	if planFile := r.planFileBoundary(); planFile != nil {
 		localOptions = append(localOptions, tools.WithPlanFile(*planFile))
 	}
@@ -714,6 +772,22 @@ func (r *Runtime) openInteraction(
 	localCatalog, err = catalog.Merge(localCatalog, historyCatalog)
 	if err != nil {
 		return nil, err
+	}
+
+	// update_goal is the model's declaration channel for the Goal harness. It is
+	// offered wherever the Goal harness can run and stays offered outside a Goal
+	// run, so a call there is a refusal sentence rather than an unknown Tool. A
+	// Runtime that owns no Goal control — a Team Worker — offers none.
+	if r.goalControl != nil {
+		goalCatalog, goalErr := tools.NewUpdateGoalCatalog(r.declareGoal)
+		if goalErr != nil {
+			return nil, goalErr
+		}
+
+		localCatalog, err = catalog.Merge(localCatalog, goalCatalog)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	r.mu.Lock()
@@ -748,11 +822,20 @@ func (r *Runtime) openInteraction(
 
 	composedCatalogs := []*catalog.Catalog{localCatalog, questionCatalog, skillTools}
 	if started.Mode == ModeAgent {
-		taskCatalog, taskErr := tools.NewTaskCatalog()
+		taskCatalog, taskErr := tools.NewTaskCatalog(r.currentTasks)
 		if taskErr != nil {
 			return nil, taskErr
 		}
 		composedCatalogs = append(composedCatalogs, taskCatalog)
+		// The scheduler Tools are offered exactly where todo_write is offered.
+		// A runtime without a scheduler store — a Team Worker — offers none.
+		if r.scheduler != nil {
+			schedulerCatalog, schedulerErr := tools.NewSchedulerCatalog(r.schedulerSurface())
+			if schedulerErr != nil {
+				return nil, schedulerErr
+			}
+			composedCatalogs = append(composedCatalogs, schedulerCatalog)
+		}
 	}
 	var (
 		childOwner          subagent.Ownership
@@ -812,70 +895,118 @@ func (r *Runtime) openInteraction(
 	}
 	merged := ambientCatalog
 	var userDispatcher subagent.Dispatcher
-	//nolint:nestif // Dynamic dispatch must stay beside the frozen interaction snapshot it captures.
+	//nolint:nestif // The unified dispatcher must stay beside the frozen interaction snapshot it captures.
 	if attachSubagentTools {
-		var dispatcher subagent.Dispatcher
-		if r.config.DynamicSubagents {
-			childModel := snapshot.Model(r.model)
-			childModels, modelErr := newChildModelResolver(
-				r.modelCatalog,
-				r.resolved,
-				childModel,
-				r.requestPolicy,
-				r.credentials,
-				snapshot.Model,
-			)
-			if modelErr != nil {
-				return nil, modelErr
-			}
-			childFactory := childScopeFactory{
-				repository: r.repository, fullCompaction: r.childScopeCompactionPolicy(),
-				workspace: r.workspace, tree: r.tree, toolLimits: r.opts.ToolLimits,
-				policy: r.policy, executor: r.executor, sandbox: r.config.Sandbox,
-				network:       r.config.SandboxWorkspaceWrite.Network,
-				requestPolicy: r.requestPolicy, toolTimeout: r.opts.ToolTimeout,
-				inspector: r.inspector, hooks: r.hookDefinitions, hookRunner: r.hookRunner,
-				onHookDiagnostics: func(ctx context.Context, diagnostics []hooks.Diagnostic) {
-					r.recordHookDiagnostics(ctx, nil, diagnostics)
-				},
-				model: childModel, mode: started.Mode, mcpEntries: childMCPEntries, controls: r.childControls,
-				toolSearchNameFor:  r.config.ToolSearchNameFor,
-				streamContinuation: r.resolved.StreamContinuation,
-				streamIdleTimeout:  r.resolved.StreamIdleTimeout,
-				subagents:          r.subagents,
-				onPauseChanged:     r.projectChildPause,
-				onWorkspaceChanged: r.projectChildWorkspaceChanged,
-			}
-			newDispatcher := func(audience agentprofile.Audience) (*customSubagentDispatcher, error) {
-				return newCustomSubagentDispatcher(
-					integration,
-					integration.agentProfilesSnapshot(),
-					audience,
-					ambientDescriptors,
-					resolvedSkills.enabledSkills(),
-					runtimeSubagentLimits(r.opts.Subagent),
-					childModels,
-					childFactory,
-					r.config.ToolSearch,
-					r.opts.Subagent.MaxDepth,
-				)
-			}
-			customDispatcher, dispatchErr := newDispatcher(agentprofile.AudienceModel)
-			if dispatchErr != nil {
-				return nil, dispatchErr
-			}
-			dispatcher = customDispatcher
-			userDispatcher, dispatchErr = newDispatcher(agentprofile.AudienceUser)
-			if dispatchErr != nil {
-				return nil, dispatchErr
-			}
+		// The messaging Tool is registered before the interaction's dispatcher
+		// exists, so its wake port resolves that dispatcher lazily.
+		var modelDispatcher subagent.Dispatcher
+		messageEntries := r.subagentMessageEntry(
+			current.id, current.rootInteractionID, func() subagent.Dispatcher {
+				return modelDispatcher
+			}, childObserver,
+		)
+		ambientDescriptors = append(
+			ambientDescriptors, descriptorsForEntries(messageEntries)...,
+		)
+		childModel := snapshot.Model(r.model)
+		childModels, modelErr := newChildModelResolver(
+			r.modelCatalog,
+			r.resolved,
+			childModel,
+			r.requestPolicy,
+			r.credentials,
+			snapshot.Model,
+		)
+		if modelErr != nil {
+			return nil, modelErr
 		}
-		subagentTools, subagentErr := catalog.New(catalog.Local(
+		childFactory := childScopeFactory{
+			repository: r.repository, fullCompaction: r.childScopeCompactionPolicy(),
+			workspace: r.workspace, tree: r.tree, toolLimits: r.opts.ToolLimits,
+			policy: r.policy, executor: r.executor, sandbox: r.config.Sandbox,
+			network:       r.config.SandboxWorkspaceWrite.Network,
+			requestPolicy: r.requestPolicy, mediaBudget: r.config.Media.MaxRequestBytes, toolTimeout: r.opts.ToolTimeout,
+			inspector: r.inspector, hooks: r.hookDefinitions, hookRunner: r.hookRunner,
+			onHookDiagnostics: func(ctx context.Context, diagnostics []hooks.Diagnostic) {
+				r.recordHookDiagnostics(ctx, nil, diagnostics)
+			},
+			model: childModel, mode: started.Mode, mcpEntries: childMCPEntries, controls: r.childControls,
+			backgroundTasks: r.backgroundTasks,
+			killBackground: func(ctx context.Context, taskID string) (background.Outcome, background.Subject, error) {
+				return r.KillBackgroundTask(ctx, taskID, background.KillModel)
+			},
+			knownBackgroundIDs:  r.KnownBackgroundTaskIDs,
+			readBackgroundTasks: r.readBackgroundTasks,
+			taskLogRead: tools.TaskLogRead{
+				Admit: r.admitBackgroundLogPath,
+				Bytes: backgroundLogReadBytes,
+			},
+			monitorOwner:       r.currentInteractionID,
+			messages:           r.subagents.MessageCoordinator(),
+			wakeManager:        r.subagents,
+			wakeDispatcher:     func() subagent.Dispatcher { return modelDispatcher },
+			wakeObserver:       childObserver,
+			toolSearchNameFor:  r.config.ToolSearchNameFor,
+			streamContinuation: r.resolved.StreamContinuation,
+			streamIdleTimeout:  r.resolved.StreamIdleTimeout,
+			onPauseChanged:     r.projectChildPause,
+			onWorkspaceChanged: r.projectChildWorkspaceChanged,
+			executorConfig: execution.ExecutorConfig{
+				TempRoot:    r.opts.TempRoot,
+				Environment: r.opts.Environment,
+				Protected:   []string{r.paths.Root()},
+			},
+			gitConfig: git.Config{
+				GitPath: r.opts.GitPath, TempRoot: r.opts.TempRoot, Limits: r.opts.GitLimits,
+			},
+			worktrees: &childWorktrees{options: teamworktree.Options{
+				GitPath: r.opts.GitPath, ProductRoot: r.paths.Root(),
+				WorktreesRoot: r.paths.WorktreesRoot(), LeasesRoot: r.paths.TeamLeasesDir(),
+				Limits: teamworktree.DefaultLimits(),
+			}},
+		}
+		newDispatcher := func(audience agentprofile.Audience) (*customSubagentDispatcher, error) {
+			return newCustomSubagentDispatcher(
+				integration,
+				integration.agentProfilesSnapshot(),
+				audience,
+				ambientDescriptors,
+				resolvedSkills.enabledSkills(),
+				runtimeSubagentLimits(r.opts.Subagent),
+				childModels,
+				childFactory,
+				r.config.ToolSearch,
+				r.config.Subagent.StructuredResults,
+				r.config.DynamicSubagents,
+				subagentPresets{
+					registry:       integration.subagentProfilesSnapshot(),
+					modelOverrides: r.config.Subagent.Models,
+					toggle:         r.config.Subagent.Toggle,
+					onDiagnostic: func(ctx context.Context, code, message string) {
+						r.recordDiagnostic(ctx, IntegrationDiagnostic{
+							Component: componentSubagent, Code: code, Message: message,
+						})
+					},
+				},
+			)
+		}
+		customDispatcher, dispatchErr := newDispatcher(agentprofile.AudienceModel)
+		if dispatchErr != nil {
+			return nil, dispatchErr
+		}
+		var dispatcher subagent.Dispatcher = customDispatcher
+		modelDispatcher = customDispatcher
+		userDispatcher, dispatchErr = newDispatcher(agentprofile.AudienceUser)
+		if dispatchErr != nil {
+			return nil, dispatchErr
+		}
+		subagentEntries := catalog.Local(
 			"coding.subagent",
 			catalog.RiskRead,
-			r.subagents.ToolForDispatcher(childOwner, childObserver, dispatcher),
 			r.subagents.SpawnToolForDispatcher(childOwner, childObserver, dispatcher),
-		)...)
+		)
+		subagentEntries = append(subagentEntries, messageEntries...)
+		subagentTools, subagentErr := catalog.New(subagentEntries...)
 		if subagentErr != nil {
 			return nil, subagentErr
 		}
@@ -900,6 +1031,11 @@ func (r *Runtime) openInteraction(
 		// Activations outlive the interaction so a tool found once stays
 		// callable for the rest of the session.
 		Activations: r.toolActivations,
+		// The dispatch Tool is built here and offered only while the search
+		// surface is on. It carries that surface's own dispatcher, so a name it
+		// reaches is resolved with this interaction's policy and refused if the
+		// snapshot already shows it.
+		UseTool: tools.NewUseToolTool,
 	})
 	if err != nil {
 		// A name collision or malformed name is a configuration fault, not a
@@ -907,8 +1043,12 @@ func (r *Runtime) openInteraction(
 		return nil, fmt.Errorf("%w: tool search: %w", ErrRuntimeInvalid, err)
 	}
 	searchName := ""
+	dispatchName := ""
 	if r.config.ToolSearch {
 		searchName = search.Name()
+		// The dispatch Tool is offered on exactly the terms the search surface
+		// is: the lease that admits one admits the other.
+		dispatchName = tools.UseToolName
 	}
 
 	// visibleTools is what the model is told about; executableTools adds the
@@ -945,22 +1085,27 @@ func (r *Runtime) openInteraction(
 	if err != nil {
 		return nil, err
 	}
+	r.artifacts.writeSystemPrompt(systemPrompt)
 
 	allTools, err := merged.Snapshot(ctx, policy)
 	if err != nil {
 		return nil, err
 	}
 	allTools = appendUniqueTools(allTools, executableTools...)
+	r.artifacts.writeToolDefinitions(allTools)
 
 	extensionHooks := snapshot.Hooks()
 	extensionObserver := newGuardedAgentObserver(extensionHooks.Observe)
 	controlHooks := extensionHooks
 	controlHooks.Observe = nil
 	composed := extension.ComposeHooks(
+		// The capability gate runs first, so the refusal it writes is what every
+		// later hook observes and what reaches the provider.
+		extension.Hooks{AfterTool: mediaGateAfterTool(snapshot.Model(r.model))},
 		extension.Hooks{BeforeTool: r.hookBeforeTool(emitter)},
 		extension.Hooks{BeforeTool: r.teamGuard.beforeTool(descriptors)},
 		extension.Hooks{AfterTool: leadCoordinatorAfterTool(leadCoordinator)},
-		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, searchName, allTools)},
+		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, searchName, dispatchName, allTools)},
 		extension.Hooks{BeforeTool: search.BeforeTool},
 		extension.Hooks{BeforeTool: r.planEditGate()},
 		extension.Hooks{BeforeTool: r.planReviews.BeforeTool},
@@ -976,13 +1121,14 @@ func (r *Runtime) openInteraction(
 	composed.AfterTool = failureGuard.wrapAfterTool(composed.AfterTool)
 	composed = extension.ComposeHooks(composed, extension.Hooks{AfterTool: r.hookAfterTool(emitter)})
 
-	maxTurns := 0
-	if ctx.Value(goalContextKey{}) != nil {
-		maxTurns = goalWorkMaxTurns
-	}
+	// A main interaction installs no turn cap and no per-call token cap, matching
+	// the reference's goal loop: a goal is bounded by its own token budget (when
+	// it carries one), checked after each work segment, and by the no-progress
+	// guard and its own declarations — never by a cap on one call, which would cut
+	// a segment short instead of stopping the run.
 	agentOptions := append(
 		composed.AgentOptions(),
-		agent.WithMaxTurns(maxTurns),
+		agent.WithMaxTurns(0),
 		streamRecoveryOption(r.resolved.StreamContinuation, r.resolved.StreamIdleTimeout),
 		agent.WithStopWhen(func(info agent.RunInfo) bool {
 			return current.hookStopRequestedNow() || failureGuard.stopWhen(info)
@@ -991,12 +1137,10 @@ func (r *Runtime) openInteraction(
 		agent.WithRequest(r.applyContextRequest(current)),
 	)
 
-	if ctx.Value(goalContextKey{}) != nil {
-		goalState := r.GoalSnapshot()
-		if goalState.MaxTokens > 0 {
-			agentOptions = append(agentOptions, agent.WithMaxTokens(max(1, goalState.MaxTokens-goalState.Tokens)))
-		}
+	if hydrator := r.mediaHydrator(); hydrator != nil {
+		agentOptions = append(agentOptions, agent.WithTransformContext(hydrator.Hydrate))
 	}
+
 	harnessOptions := []harness.Option{
 		harness.WithTools(executableTools...),
 		harness.WithSystem(systemPrompt.SharedPrefix),
@@ -1019,6 +1163,7 @@ func (r *Runtime) openInteraction(
 	// that one-shot decision intact, but run the lifecycle post-tool hook when
 	// an uncontrolled pending call finally executes through pendingRunner.
 	pendingHooks := extension.ComposeHooks(
+		extension.Hooks{AfterTool: mediaGateAfterTool(snapshot.Model(r.model))},
 		extensionHooks,
 		extension.Hooks{AfterTool: r.hookAfterTool(nil)},
 	)
@@ -1154,7 +1299,24 @@ func (r *Runtime) driveHarness(
 
 	// The turn's runtime context leads the input, so it is committed to the
 	// transcript before the prompt and then rides with the conversation.
+	// A user turn that carries input is the unit the todo nudge counts.
+	if len(messages) > 0 && current.source == InteractionSourceUser {
+		current.planTurn = true
+	}
 	messages = r.turnMessages(current, messages)
+
+	// Inline user media becomes a session-relative reference before the prompt
+	// is committed, so the transcript never stores image bytes. Old inline
+	// transcripts and tool-result media are untouched.
+	store, storeErr := r.sessionMediaStore()
+	if storeErr != nil {
+		return "", storeErr
+	}
+
+	messages, err = persistUserMedia(ctx, store, messages)
+	if err != nil {
+		return "", err
+	}
 
 	var stop agent.StopReason
 	inputPending := cloneMessages(messages)
@@ -1174,6 +1336,11 @@ func (r *Runtime) driveHarness(
 			if committed, ok := event.Payload().(agent.MessageCommitted); ok {
 				if err := r.acknowledgeNotificationMessage(committed.Message); err != nil {
 					return "", err
+				}
+				// A committed, valid todo_write call is what resets the todo
+				// nudge; a malformed call is not a plan write.
+				if _, planWrite := tasklist.FromMessage(committed.Message); planWrite {
+					r.markPlanWritten()
 				}
 			}
 
@@ -1554,6 +1721,25 @@ func (r *Runtime) interactionPaused(current *interaction) bool {
 	return r.interaction == current && r.state.Phase == PhasePaused
 }
 
+// currentInteractionID returns the id of the interaction now running, or an
+// empty string when none is. The monitor handler resolves it at detach time,
+// because the approval controller's handler is built once per Runtime while the
+// interaction is per prompt.
+func (r *Runtime) currentInteractionID() string {
+	if r == nil {
+		return ""
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.interaction == nil {
+		return ""
+	}
+
+	return r.interaction.id
+}
+
 //nolint:gocyclo // Completion must collect every cleanup and terminal-event error before returning.
 func (r *Runtime) finishInteraction(
 	ctx context.Context,
@@ -1563,6 +1749,13 @@ func (r *Runtime) finishInteraction(
 ) error {
 	if current == nil {
 		return nil
+	}
+
+	// A cancelled interaction cancels the watches it started, and only those: an
+	// earlier interaction's watches keep running. No turn remains to report
+	// them, so their completions produce no queue record.
+	if outcome == InteractionCanceled && r.backgroundTasks != nil {
+		r.backgroundTasks.CancelOwned(current.id, background.KillPromptEnd)
 	}
 
 	errs := make([]error, 0, 4)
@@ -1634,6 +1827,12 @@ func (r *Runtime) finishInteraction(
 	if err := current.integration.release(ctx); err != nil {
 		errs = append(errs, err)
 	}
+	// The search document is derived and rebuildable, so refreshing it once per
+	// completed interaction keeps listing surfaces off the transcript.
+	r.artifacts.writeSearchDoc()
+	// One finished user turn is what the todo nudge counts; a plan write during
+	// it resets the count.
+	r.advancePlanTurn(current)
 
 	return errors.Join(errs...)
 }
@@ -1700,6 +1899,11 @@ func (r *Runtime) Steer(messages ...ai.Message) error {
 		return err
 	}
 
+	messages, err = r.queueUserMedia(messages)
+	if err != nil {
+		return err
+	}
+
 	return current.harness.Steer(cloneMessages(messages)...)
 }
 
@@ -1710,7 +1914,28 @@ func (r *Runtime) FollowUp(messages ...ai.Message) error {
 		return err
 	}
 
+	messages, err = r.queueUserMedia(messages)
+	if err != nil {
+		return err
+	}
+
 	return current.harness.FollowUp(cloneMessages(messages)...)
+}
+
+// Interject queues messages ahead of the current Agent invocation's pending
+// steering, so they are injected before any message already queued to steer.
+func (r *Runtime) Interject(messages ...ai.Message) error {
+	current, err := r.activeHarness("interject")
+	if err != nil {
+		return err
+	}
+
+	messages, err = r.queueUserMedia(messages)
+	if err != nil {
+		return err
+	}
+
+	return current.harness.Interject(cloneMessages(messages)...)
 }
 
 func (r *Runtime) activeHarness(operation string) (*interaction, error) {

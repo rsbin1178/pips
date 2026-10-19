@@ -19,6 +19,12 @@ const (
 	// leaves the character under the caret readable, which the default block
 	// cursor covers.
 	cursorShape = tea.CursorBar
+	// cursorBlink asks the terminal to blink that cursor. The composer and the
+	// search field build their styles from scratch (to keep the input on the
+	// canvas, since the component defaults fill the cursor line), and the flag's
+	// zero value is a steady cursor, which is not what a reader expects of a
+	// caret.
+	cursorBlink = true
 
 	themeIDAuto                = "auto"
 	themeIDDefaultDark         = "default-dark"
@@ -178,6 +184,7 @@ func composerStyles(theme colorTheme, noColor bool) textarea.Styles {
 	if noColor {
 		styles := textarea.Styles{}
 		styles.Cursor.Shape = cursorShape
+		styles.Cursor.Blink = cursorBlink
 
 		return styles
 	}
@@ -194,6 +201,7 @@ func composerStyles(theme colorTheme, noColor bool) textarea.Styles {
 	// The cursor is part of the theme. A bar that changes color with the palette
 	// leaves the character under the caret readable in every theme.
 	styles.Cursor.Shape = cursorShape
+	styles.Cursor.Blink = cursorBlink
 	styles.Cursor.Color = palette.session
 
 	prompt := lipgloss.NewStyle().Foreground(palette.composerPrompt)
@@ -210,10 +218,26 @@ func composerStyles(theme colorTheme, noColor bool) textarea.Styles {
 	return styles
 }
 
+// composerSelectionStyles draws a whole-draft selection on top of the theme's
+// editor styling. Reverse video is the terminal's own foreground/background swap
+// rather than a palette color, so the selection stays legible in every theme and
+// the composer keeps its no-background rule.
+func composerSelectionStyles(base textarea.Styles) textarea.Styles {
+	selected := base
+	selection := base.Focused.Text.Reverse(true)
+	selected.Focused.Text = selection
+	selected.Focused.CursorLine = selection
+	selected.Blurred.Text = selection
+	selected.Blurred.CursorLine = selection
+
+	return selected
+}
+
 func sessionSearchStyles(theme colorTheme, noColor bool) textinput.Styles {
 	if noColor {
 		styles := textinput.Styles{}
 		styles.Cursor.Shape = cursorShape
+		styles.Cursor.Blink = cursorBlink
 
 		return styles
 	}
@@ -227,6 +251,7 @@ func sessionSearchStyles(theme colorTheme, noColor bool) textinput.Styles {
 	// background: the search field draws on the terminal's own canvas too.
 	palette := paletteFor(theme)
 	styles.Cursor.Shape = cursorShape
+	styles.Cursor.Blink = cursorBlink
 	styles.Cursor.Color = palette.session
 
 	muted := lipgloss.NewStyle().Foreground(palette.muted)

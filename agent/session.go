@@ -96,6 +96,25 @@ func (s *Session) Steer(msgs ...ai.Message) {
 	s.steering = append(s.steering, msgs...)
 }
 
+// Interject queues messages ahead of every message already queued by Steer,
+// so they are injected first at the next turn boundary. It is for a message
+// that must not wait behind a pending redirect. Safe to call from any
+// goroutine, with or without an active run.
+func (s *Session) Interject(msgs ...ai.Message) {
+	if len(msgs) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Reallocate instead of prepending in place: a caller may still hold the
+	// drained slice's backing array.
+	queued := make(ai.Messages, 0, len(msgs)+len(s.steering))
+	queued = append(queued, msgs...)
+	s.steering = append(queued, s.steering...)
+}
+
 // FollowUp queues messages that run only after the agent would otherwise
 // stop cleanly: when a turn produces no tool calls and no steering is queued,
 // follow-ups are injected and the loop continues instead of finishing. Safe

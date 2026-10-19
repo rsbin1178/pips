@@ -13,19 +13,22 @@ Available Commands:
   exec             Run one non-interactive coding request
   help             Help about any command
   hooks            Review Coding lifecycle hooks
+  mcp              Inspect MCP servers
   plugin           Inspect portable Agent Plugins
   resume           Resume a durable coding session
   session          Inspect durable coding sessions
   ssh              Run Pips in a remote workspace
+  update           Update the pips binary from a GitHub release
   version          Print build version information
 
 Flags:
       --approval string           approval mode
       --config string             user configuration file
-      --dynamic-subagents         enable Alpha custom subagents
+      --dynamic-subagents         enable custom subagents (default true)
   -h, --help                      help for pips
       --mode string               operating mode (agent or plan)
       --model string              model in provider/model form
+      --no-subagents              disable subagents
       --reasoning string          model reasoning level
       --sandbox string            sandbox mode
       --tool-search               enable deferred tool search

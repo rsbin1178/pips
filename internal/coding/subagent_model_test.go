@@ -17,6 +17,46 @@ import (
 func TestChildModelResolverAllowsOnlyConfiguredModelReferences(t *testing.T) {
 	t.Parallel()
 
+	baseRef, resolver := newTestChildModelResolver(t)
+	secondRef := config.ModelRef{Provider: ai.ProviderOpenAI, Model: "specialist"}
+
+	inherited, err := resolver.planModel("inherit")
+	require.NoError(t, err)
+	assert.Equal(t, baseRef.String(), inherited)
+
+	_, err = resolver.planModel(secondRef.String())
+	require.ErrorIs(t, err, subagent.ErrInvalid)
+	assert.Contains(t, err.Error(), "credentials")
+
+	_, err = resolver.planModel("openai/not-configured")
+	require.ErrorIs(t, err, subagent.ErrInvalid)
+
+	store, err := credential.NewEnvironmentStore(func(string) (string, bool) { return "test-key", true })
+	require.NoError(t, err)
+	resolver.credentials = store
+	selected, err := resolver.planModel(secondRef.String())
+	require.NoError(t, err)
+	assert.Equal(t, secondRef.String(), selected)
+}
+
+func TestChildModelResolverFallsBackToParent(t *testing.T) {
+	t.Parallel()
+
+	baseRef, resolver := newTestChildModelResolver(t)
+
+	model, fellBack := resolver.planModelOrParent("openai/not-configured")
+	assert.True(t, fellBack)
+	assert.Equal(t, baseRef.String(), model)
+
+	// A resolvable selection never falls back, even when it is the parent.
+	model, fellBack = resolver.planModelOrParent("inherit")
+	assert.False(t, fellBack)
+	assert.Equal(t, baseRef.String(), model)
+}
+
+func newTestChildModelResolver(t *testing.T) (config.ModelRef, childModelResolver) {
+	t.Helper()
+
 	baseRef := config.ModelRef{Provider: ai.ProviderOpenAI, Model: "base"}
 	secondRef := config.ModelRef{Provider: ai.ProviderOpenAI, Model: "specialist"}
 	configured := config.Defaults()
@@ -45,21 +85,5 @@ func TestChildModelResolverAllowsOnlyConfiguredModelReferences(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	inherited, err := resolver.planModel("inherit")
-	require.NoError(t, err)
-	assert.Equal(t, baseRef.String(), inherited)
-
-	_, err = resolver.planModel(secondRef.String())
-	require.ErrorIs(t, err, subagent.ErrInvalid)
-	assert.Contains(t, err.Error(), "credentials")
-
-	_, err = resolver.planModel("openai/not-configured")
-	require.ErrorIs(t, err, subagent.ErrInvalid)
-
-	store, err := credential.NewEnvironmentStore(func(string) (string, bool) { return "test-key", true })
-	require.NoError(t, err)
-	resolver.credentials = store
-	selected, err := resolver.planModel(secondRef.String())
-	require.NoError(t, err)
-	assert.Equal(t, secondRef.String(), selected)
+	return baseRef, resolver
 }

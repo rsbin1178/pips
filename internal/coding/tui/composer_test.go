@@ -118,6 +118,91 @@ func TestComposerPasteLabelSkipsLiteralCollision(t *testing.T) {
 	assert.Equal(t, "[Pasted text #1 · 1001 chars · 1 lines]"+content, assembled)
 }
 
+// A chip stands in for text the operator already has on the clipboard, so pasting
+// that same text again is the one gesture that can only mean "I want the text".
+func TestComposerRePasteExpandsTheChipInPlace(t *testing.T) {
+	t.Parallel()
+
+	content := strings.Repeat("line\n", 40)
+	composer := newTestComposer()
+	collapsed, err := composer.InsertPaste(content)
+	require.NoError(t, err)
+	require.True(t, collapsed)
+	require.Len(t, composer.elements, 1)
+
+	collapsed, err = composer.InsertPaste(content)
+	require.NoError(t, err)
+
+	assert.False(t, collapsed, "expanded text is text, not another chip")
+	assert.Empty(t, composer.elements)
+	assert.Equal(t, content, composer.Value())
+
+	assembled, err := composer.Assemble()
+	require.NoError(t, err)
+	assert.Equal(t, content, assembled)
+}
+
+// The gesture is bound to the chip the cursor is on: different content is its own
+// paste, and the same content pasted elsewhere does not reach back into a chip the
+// operator is not pointing at.
+func TestComposerRePasteOnlyExpandsTheChipUnderTheCursor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "different content", content: strings.Repeat("other\n", 40)},
+		{name: "same content pasted elsewhere", content: strings.Repeat("line\n", 40)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			first := strings.Repeat("line\n", 40)
+			composer := newTestComposer()
+			collapsed, err := composer.InsertPaste(first)
+			require.NoError(t, err)
+			require.True(t, collapsed)
+			composer.InsertString(" tail")
+
+			collapsed, err = composer.InsertPaste(test.content)
+			require.NoError(t, err)
+
+			assert.True(t, collapsed, "an untouched chip stays a chip")
+			assert.Len(t, composer.elements, 2)
+
+			assembled, err := composer.Assemble()
+			require.NoError(t, err)
+			assert.Equal(t, first+" tail"+test.content, assembled)
+		})
+	}
+}
+
+// Expansion hands the editor its own buffer back, so it stops at the size the
+// editor can hold: a larger paste stays a chip rather than freezing the TUI, and it
+// is still sent in full.
+func TestComposerRePasteStopsExpandingAtTheEditorBound(t *testing.T) {
+	t.Parallel()
+
+	content := strings.Repeat("x", maximumExpandablePasteBytes+1)
+	composer := newTestComposer()
+	collapsed, err := composer.InsertPaste(content)
+	require.NoError(t, err)
+	require.True(t, collapsed)
+
+	collapsed, err = composer.InsertPaste(content)
+	require.NoError(t, err)
+
+	assert.True(t, collapsed)
+	assert.Len(t, composer.elements, 2)
+
+	assembled, err := composer.Assemble()
+	require.NoError(t, err)
+	assert.Equal(t, content+content, assembled)
+}
+
 func TestComposerInsertPasteRejectsMalformedAndOversizedInput(t *testing.T) {
 	t.Parallel()
 
@@ -417,6 +502,147 @@ func TestReadyTemporaryInputSurfacesRestoreProtectedSnapshot(t *testing.T) {
 	model.state.Question = questionState.Question
 	model.syncApprovalPrompt()
 	assert.Equal(t, original, model.composer.Snapshot())
+}
+
+// A whole-draft selection is an editing gesture: the next input replaces or clears
+// the draft instead of landing inside it, which is what selecting everything means
+// in every other text field.
+func TestComposerSelectionIsReplacedOrClearedByTheNextInput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		message tea.Msg
+		want    string
+	}{
+		{name: "typing replaces", message: tea.KeyPressMsg{Code: 'x', Text: "x"}, want: "x"},
+		{name: "backspace clears", message: tea.KeyPressMsg{Code: tea.KeyBackspace}, want: ""},
+		{name: "delete clears", message: tea.KeyPressMsg{Code: tea.KeyDelete}, want: ""},
+		{name: "paste replaces", message: tea.PasteMsg{Content: "pasted"}, want: "pasted"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			composer := newTestComposer()
+			composer.SetValue("draft to replace")
+			require.True(t, composer.ToggleSelectAll())
+			require.True(t, composer.SelectionActive())
+
+			composer, _ = composer.Update(test.message)
+
+			assert.Equal(t, test.want, composer.Value())
+			assert.False(t, composer.SelectionActive())
+			assert.Empty(t, composer.elements)
+		})
+	}
+}
+
+// A key that is not text ends the selection and does its own job, so Enter, the
+// arrows and the picker keys keep working over a selection. A wheel notch reads the
+// draft rather than editing it, so the selection survives looking at it.
+func TestComposerSelectionEndsOnKeysThatAreNotText(t *testing.T) {
+	t.Parallel()
+
+	composer := newTestComposer()
+	composer.SetValue("a whole draft")
+	require.True(t, composer.ToggleSelectAll())
+
+	composer, _ = composer.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	assert.True(t, composer.SelectionActive(), "scrolling the view is not an edit")
+	assert.Equal(t, "a whole draft", composer.Value())
+
+	composer, _ = composer.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	assert.False(t, composer.SelectionActive())
+	assert.Equal(t, "a whole draft", composer.Value(), "the draft the selection was made about stays")
+}
+
+// Selecting again is the way out, and an empty draft has nothing to select.
+func TestComposerSelectAllTogglesAndNeedsADraft(t *testing.T) {
+	t.Parallel()
+
+	composer := newTestComposer()
+	assert.False(t, composer.ToggleSelectAll(), "an empty draft selects nothing")
+
+	composer.SetValue("text")
+	require.True(t, composer.ToggleSelectAll())
+	assert.False(t, composer.ToggleSelectAll(), "the same gesture drops the selection")
+	assert.Equal(t, "text", composer.Value())
+}
+
+// Ctrl+A is the gesture the whole-draft selection is reached by, and the notice
+// says what the keys do to it, because the selection is invisible otherwise.
+func TestComposerSelectAllIsReachedFromCtrlA(t *testing.T) {
+	t.Parallel()
+
+	controller := newWorkspaceAttachmentController(readyState())
+	model := readyModelWithController(t, controller, true)
+	model.composer.SetValue("a whole draft")
+
+	_, command := model.Update(key("ctrl+a"))
+
+	require.True(t, model.composer.SelectionActive())
+	assert.NotNil(t, command, "the notice that explains the selection is armed")
+	assert.Contains(t, strings.Join(model.statusExtras(), "\n"), "all selected")
+}
+
+// Escape ends the gesture the reader just made, so it collapses the selection
+// instead of reaching the cancel/exit binding behind it.
+func TestComposerSelectionIsCollapsedByEscape(t *testing.T) {
+	t.Parallel()
+
+	model := readyModelWithController(t, newWorkspaceAttachmentController(readyState()), true)
+	model.composer.SetValue("a whole draft")
+	require.True(t, model.composer.ToggleSelectAll())
+
+	_, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	assert.False(t, model.composer.SelectionActive())
+	assert.Equal(t, "a whole draft", model.composer.Value())
+}
+
+// Enter is not text, so a selection does not swallow the send: the draft the
+// selection was made about is what goes out.
+func TestComposerSelectionStillSendsOnEnter(t *testing.T) {
+	t.Parallel()
+
+	controller := newWorkspaceAttachmentController(readyState())
+	model := readyModelWithController(t, controller, true)
+	model.composer.SetValue("send me")
+	require.True(t, model.composer.ToggleSelectAll())
+
+	_, submit := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	require.NotNil(t, submit)
+	driveModelCommands(t, model, submit)
+
+	require.Len(t, controller.prompts, 1)
+	message, ok := controller.prompts[0].(ai.UserMessage)
+	require.True(t, ok)
+	assert.Equal(t, "send me", textPart(t, message.Parts[0]))
+	assert.False(t, model.composer.SelectionActive())
+	assert.Empty(t, model.composer.Value())
+}
+
+// The selection has to be visible: the notice says what the keys do, and the draft
+// itself is drawn as one selection. Reverse video is the terminal's own attribute,
+// so it survives every theme and adds no palette background.
+func TestComposerSelectionIsDrawnAsASelection(t *testing.T) {
+	t.Parallel()
+
+	model := fullscreenModel(t, stubController{state: readyState()}, false)
+	model.composer.SetValue("draft")
+	model.setLayout()
+	_ = model.View()
+
+	plain := model.composer.View()
+	require.True(t, model.composer.ToggleSelectAll())
+	selected := model.composer.View()
+
+	assert.NotEqual(t, plain, selected)
+	assert.NotContains(t, plain, "\x1b[7;", "an unselected draft carries no reverse attribute")
+	assert.Contains(t, selected, "\x1b[7;", "the whole draft renders as a selection")
+	assert.Equal(t, "❯ draft", strings.TrimSpace(ansi.Strip(selected)))
 }
 
 type rejectingQueueController struct {

@@ -90,7 +90,7 @@ func TestCopyKeySendsTheLatestReplyToTheClipboardAndTheFallback(t *testing.T) {
 		ai.AssistantText("NEWEST-REPLY"),
 	)
 
-	_, command := model.Update(key("ctrl+x"))
+	_, command := model.Update(key("ctrl+y"))
 	require.NotNil(t, command)
 
 	messages := runCommandTree(t, command)
@@ -316,24 +316,25 @@ func TestCopyBindingIsAvailableWithoutConflicts(t *testing.T) {
 	require.NoError(t, validateActions(defaultActions))
 
 	for _, context := range []actionContext{contextIdle, contextRunning, contextPaused} {
-		action, ok := resolveAction(defaultActions, context, keyCtrlX)
-		require.True(t, ok, "Ctrl+X must resolve in %s", context)
+		action, ok := resolveAction(defaultActions, context, keyCtrlY)
+		require.True(t, ok, "Ctrl+Y must resolve in %s", context)
 		assert.Equal(t, actionCopy, action)
 	}
 
-	assert.Contains(t, renderActionHelp(defaultActions, contextIdle), keyCtrlX+" — copy reply",
-		"the binding is discoverable in the help listing")
-
-	// Both commands must be taught where a user looks for them.
-	model := fullscreenModel(t, stubController{state: readyState()}, true)
-	model.printHelp()
-
-	help := strings.Builder{}
-	for _, notice := range model.notices {
-		help.WriteString(notice.body)
-		help.WriteString("\n")
+	// Ctrl+X is the shortcuts list, so it must resolve to help and never to copy.
+	for _, context := range []actionContext{contextIdle, contextRunning, contextPaused} {
+		action, ok := resolveAction(defaultActions, context, keyCtrlX)
+		require.True(t, ok, "Ctrl+X must resolve in %s", context)
+		assert.Equal(t, actionHelp, action)
 	}
 
-	assert.Contains(t, help.String(), "/copy [n] [path]")
-	assert.Contains(t, help.String(), "/export [path]")
+	model := fullscreenModel(t, stubController{state: readyState()}, true)
+	listing := helpPageText(model, helpTabShortcuts)
+	assert.Contains(t, listing, keyCtrlY+": copy reply", "the binding is discoverable in the help panel")
+	assert.Contains(t, listing, keyCtrlX+" / ctrl+?: help")
+
+	// Both commands must be taught where a user looks for them.
+	commandsPage := helpPageText(model, helpTabCommands)
+	assert.Contains(t, commandsPage, "/copy")
+	assert.Contains(t, commandsPage, "/export")
 }

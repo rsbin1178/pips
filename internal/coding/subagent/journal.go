@@ -41,48 +41,69 @@ type record struct {
 	RootInteractionID   string        `json:"root_interaction_id,omitempty"`
 	Delivery            Delivery      `json:"delivery,omitempty"`
 	ChildRunID          string        `json:"child_run_id,omitempty"`
-	Model               string        `json:"model"`
-	Limits              recordLimits  `json:"limits"`
-	TaskPreview         string        `json:"task_preview,omitempty"`
-	Code                string        `json:"code,omitempty"`
-	Stop                string        `json:"stop,omitempty"`
-	Turns               int           `json:"turns,omitempty"`
-	ToolCalls           int           `json:"tool_calls,omitempty"`
-	Usage               ai.Usage      `json:"usage"`
-	DurationMillis      int64         `json:"duration_millis,omitempty"`
-	ResultBytes         int           `json:"result_bytes,omitempty"`
-	Time                time.Time     `json:"time"`
+	// Wake marks a continuation a message woke from a completed child. A wake
+	// reports its acceptance through the message envelope, so its own terminal
+	// result is not surfaced as a second completion. The marker is omitempty so
+	// every record written before it stays byte-identical.
+	Wake           bool         `json:"wake,omitempty"`
+	Model          string       `json:"model"`
+	Limits         recordLimits `json:"limits"`
+	TaskPreview    string       `json:"task_preview,omitempty"`
+	Code           string       `json:"code,omitempty"`
+	Stop           string       `json:"stop,omitempty"`
+	Turns          int          `json:"turns,omitempty"`
+	ToolCalls      int          `json:"tool_calls,omitempty"`
+	Usage          ai.Usage     `json:"usage"`
+	DurationMillis int64        `json:"duration_millis,omitempty"`
+	ResultBytes    int          `json:"result_bytes,omitempty"`
+	// Cwd is the child's effective working directory. It is recorded on the
+	// terminal record only, because it is resolved once the child binding
+	// opens, and an empty value means the parent workspace.
+	Cwd string `json:"cwd,omitempty"`
+	// WorktreePath is the preserved worktree the child ran in, recorded on the
+	// terminal record only.
+	WorktreePath string    `json:"worktree_path,omitempty"`
+	Time         time.Time `json:"time"`
 }
 
 type recordLimits struct {
-	MaxTurns              int   `json:"max_turns"`
-	FinalizationTurns     int   `json:"finalization_turns,omitempty"`
-	RepeatedToolCallLimit int   `json:"repeated_tool_call_limit,omitempty"`
-	MaxTokens             int   `json:"max_tokens"`
-	MaxToolCalls          int   `json:"max_tool_calls"`
-	MaxDurationNanos      int64 `json:"max_duration_nanos"`
-	MaxActivityTools      int   `json:"max_activity_tools,omitempty"`
-	MaxOutputTokens       int   `json:"max_output_tokens"`
-	MaxTaskBytes          int   `json:"max_task_bytes"`
-	MaxResultBytes        int   `json:"max_result_bytes"`
-	MaxResultItems        int   `json:"max_result_items"`
-	MaxFieldBytes         int   `json:"max_field_bytes"`
+	MaxTurns              int `json:"max_turns"`
+	FinalizationTurns     int `json:"finalization_turns,omitempty"`
+	RepeatedToolCallLimit int `json:"repeated_tool_call_limit,omitempty"`
+	// The three reference-aligned repeat thresholds are additive and omitempty:
+	// a record written before them still decodes, and normalizeLimits fills the
+	// inherited defaults for the missing values.
+	RepeatedProblematicToolCallLimit     int   `json:"repeated_problematic_tool_call_limit,omitempty"`
+	RepeatedToolCallStopLimit            int   `json:"repeated_tool_call_stop_limit,omitempty"`
+	RepeatedProblematicToolCallStopLimit int   `json:"repeated_problematic_tool_call_stop_limit,omitempty"`
+	MaxTokens                            int   `json:"max_tokens"`
+	MaxToolCalls                         int   `json:"max_tool_calls"`
+	MaxDurationNanos                     int64 `json:"max_duration_nanos"`
+	MaxActivityTools                     int   `json:"max_activity_tools,omitempty"`
+	MaxOutputTokens                      int   `json:"max_output_tokens"`
+	MaxTaskBytes                         int   `json:"max_task_bytes"`
+	MaxResultBytes                       int   `json:"max_result_bytes"`
+	MaxResultItems                       int   `json:"max_result_items"`
+	MaxFieldBytes                        int   `json:"max_field_bytes"`
 }
 
 func journalLimits(value Limits) recordLimits {
 	return recordLimits{
-		MaxTurns:              value.MaxTurns,
-		FinalizationTurns:     value.FinalizationTurns,
-		RepeatedToolCallLimit: value.RepeatedToolCallLimit,
-		MaxTokens:             value.MaxTokens,
-		MaxToolCalls:          value.MaxToolCalls,
-		MaxDurationNanos:      int64(value.MaxDuration),
-		MaxActivityTools:      value.MaxActivityTools,
-		MaxOutputTokens:       value.MaxOutputTokens,
-		MaxTaskBytes:          value.MaxTaskBytes,
-		MaxResultBytes:        value.MaxResultBytes,
-		MaxResultItems:        value.MaxResultItems,
-		MaxFieldBytes:         value.MaxFieldBytes,
+		MaxTurns:                             value.MaxTurns,
+		FinalizationTurns:                    value.FinalizationTurns,
+		RepeatedToolCallLimit:                value.RepeatedToolCallLimit,
+		RepeatedProblematicToolCallLimit:     value.RepeatedProblematicToolCallLimit,
+		RepeatedToolCallStopLimit:            value.RepeatedToolCallStopLimit,
+		RepeatedProblematicToolCallStopLimit: value.RepeatedProblematicToolCallStopLimit,
+		MaxTokens:                            value.MaxTokens,
+		MaxToolCalls:                         value.MaxToolCalls,
+		MaxDurationNanos:                     int64(value.MaxDuration),
+		MaxActivityTools:                     value.MaxActivityTools,
+		MaxOutputTokens:                      value.MaxOutputTokens,
+		MaxTaskBytes:                         value.MaxTaskBytes,
+		MaxResultBytes:                       value.MaxResultBytes,
+		MaxResultItems:                       value.MaxResultItems,
+		MaxFieldBytes:                        value.MaxFieldBytes,
 	}
 }
 
@@ -92,18 +113,21 @@ func (l recordLimits) validate() error {
 
 func (l recordLimits) limits() Limits {
 	return Limits{
-		MaxTurns:              l.MaxTurns,
-		FinalizationTurns:     l.FinalizationTurns,
-		RepeatedToolCallLimit: l.RepeatedToolCallLimit,
-		MaxTokens:             l.MaxTokens,
-		MaxToolCalls:          l.MaxToolCalls,
-		MaxDuration:           time.Duration(l.MaxDurationNanos),
-		MaxActivityTools:      l.MaxActivityTools,
-		MaxOutputTokens:       l.MaxOutputTokens,
-		MaxTaskBytes:          l.MaxTaskBytes,
-		MaxResultBytes:        l.MaxResultBytes,
-		MaxResultItems:        l.MaxResultItems,
-		MaxFieldBytes:         l.MaxFieldBytes,
+		MaxTurns:                             l.MaxTurns,
+		FinalizationTurns:                    l.FinalizationTurns,
+		RepeatedToolCallLimit:                l.RepeatedToolCallLimit,
+		RepeatedProblematicToolCallLimit:     l.RepeatedProblematicToolCallLimit,
+		RepeatedToolCallStopLimit:            l.RepeatedToolCallStopLimit,
+		RepeatedProblematicToolCallStopLimit: l.RepeatedProblematicToolCallStopLimit,
+		MaxTokens:                            l.MaxTokens,
+		MaxToolCalls:                         l.MaxToolCalls,
+		MaxDuration:                          time.Duration(l.MaxDurationNanos),
+		MaxActivityTools:                     l.MaxActivityTools,
+		MaxOutputTokens:                      l.MaxOutputTokens,
+		MaxTaskBytes:                         l.MaxTaskBytes,
+		MaxResultBytes:                       l.MaxResultBytes,
+		MaxResultItems:                       l.MaxResultItems,
+		MaxFieldBytes:                        l.MaxFieldBytes,
 	}
 }
 
@@ -163,11 +187,54 @@ func appendMirrored(child, parent *harness.Session, value record) error {
 	return nil
 }
 
-func (m *Manager) appendMirrored(child *harness.Session, value record) error {
+func (m *Manager) appendMirrored(child *session.Handle, value record) error {
 	m.journalMu.Lock()
 	defer m.journalMu.Unlock()
 
-	return appendMirrored(child, m.config.Parent.Session(), value)
+	if err := appendMirrored(child.Session(), m.config.Parent.Session(), value); err != nil {
+		return err
+	}
+
+	refreshChildIndexState(m.config.Repository, child, value)
+
+	return nil
+}
+
+// refreshChildIndexState refreshes one child's parent-side index entry after its
+// lifecycle was mirrored into the parent. The write is best-effort: the journal
+// is authoritative, so a store whose index cannot be written still spawns,
+// finishes, and lists children.
+func refreshChildIndexState(repository *session.Repository, child *session.Handle, value record) {
+	if repository == nil || child == nil {
+		return
+	}
+
+	state, ok := childIndexState(value.State)
+	if !ok {
+		return
+	}
+
+	_ = repository.UpdateChildIndexState(child.Metadata(), state, value.Time)
+}
+
+// childIndexState maps a journal lifecycle state onto the parent-side index
+// state. Creation and a live run are one value there: the index records that the
+// child owns its session, not which of the two opening edges it last passed.
+func childIndexState(state State) (session.ChildIndexState, bool) {
+	switch state {
+	case StateCreated, StateRunning:
+		return session.ChildIndexStateRunning, true
+	case StateSucceeded:
+		return session.ChildIndexStateSucceeded, true
+	case StateFailed:
+		return session.ChildIndexStateFailed, true
+	case StateCanceled:
+		return session.ChildIndexStateCanceled, true
+	case StateInterrupted:
+		return session.ChildIndexStateInterrupted, true
+	default:
+		return "", false
+	}
 }
 
 func records(entries []harness.Entry) ([]record, error) {
@@ -248,6 +315,9 @@ func normalizeRecord(value record, allowCurrentCompatibility bool) (record, erro
 		}
 		value.Plan = legacyExecutionPlan(value)
 	}
+	// A record written before a Limits field existed omits it from the plan as
+	// well as from the record limits; normalize the plan so the two still agree.
+	value.Plan.Limits = normalizeLimits(value.Plan.Limits)
 
 	return value, nil
 }
@@ -350,13 +420,20 @@ func validRecordOwnership(value record) bool {
 func validRecordCounters(value record) bool {
 	return len(value.TaskPreview) <= 1024 && value.DurationMillis >= 0 && value.Turns >= 0 &&
 		value.ToolCalls >= 0 && value.ResultBytes >= 0 && validUsage(value.Usage) &&
-		validJournalText(value.TaskPreview)
+		validJournalText(value.TaskPreview) &&
+		validRecordPath(value.Cwd) && validRecordPath(value.WorktreePath)
+}
+
+// validRecordPath bounds one terminal child directory.
+func validRecordPath(value string) bool {
+	return len(value) <= maxPlanCwdBytes && validJournalText(value)
 }
 
 func validateRecordState(value record) error {
 	switch value.State {
 	case StateCreated:
-		if value.ChildRunID != "" || value.Code != "" || value.DurationMillis != 0 {
+		if value.ChildRunID != "" || value.Code != "" || value.DurationMillis != 0 ||
+			value.Cwd != "" || value.WorktreePath != "" {
 			return fmt.Errorf("%w: invalid created record", ErrInvalid)
 		}
 	case StateRunning:
@@ -466,7 +543,7 @@ func sameExecution(left, right record) bool {
 		left.ParentRunID == right.ParentRunID &&
 		left.ParentToolCallID == right.ParentToolCallID &&
 		left.RootInteractionID == right.RootInteractionID &&
-		left.Delivery == right.Delivery && left.Model == right.Model &&
+		left.Delivery == right.Delivery && left.Wake == right.Wake && left.Model == right.Model &&
 		left.Limits == right.Limits && left.TaskPreview == right.TaskPreview &&
 		sameExecutionPlan(left.Plan, right.Plan)
 }
@@ -545,7 +622,7 @@ func reconcileDescendants(
 	visited[parentMeta.ID] = struct{}{}
 	defer delete(visited, parentMeta.ID)
 
-	children, err := repository.ListSubagents(ctx, parentMeta.WorkspaceID, parentMeta.ID)
+	children, err := repository.ListSubagents(ctx, parentMeta)
 	if err != nil {
 		return err
 	}
@@ -598,7 +675,7 @@ func reconcileDescendant(
 	}
 	parentMeta := parent.Metadata()
 	child, err := repository.Open(ctx, session.OpenOptions{
-		ID: childMeta.ID, WorkspaceID: parentMeta.WorkspaceID,
+		ID: childMeta.ID, WorkspaceID: parentMeta.WorkspaceID, WorkspacePath: parentMeta.WorkspacePath,
 	})
 	if err != nil {
 		return fmt.Errorf("coding subagent: open child for reconciliation: %w", err)
@@ -623,7 +700,7 @@ func reconcileDescendant(
 		return err
 	}
 
-	return reconcileChild(parent.Session(), child, parentRecords)
+	return reconcileChild(repository, parent.Session(), child, parentRecords)
 }
 
 func recordsByChild(entries []harness.Entry) (map[string][]record, error) {
@@ -645,6 +722,7 @@ func recordsByChild(entries []harness.Entry) (map[string][]record, error) {
 }
 
 func reconcileChild(
+	repository *session.Repository,
 	parent *harness.Session,
 	child *session.Handle,
 	parentRecords []record,
@@ -658,8 +736,16 @@ func reconcileChild(
 	if err != nil {
 		return err
 	}
+	if err := repairParentRecords(parent, parentRecords, childRecords); err != nil {
+		return err
+	}
 
-	return repairParentRecords(parent, parentRecords, childRecords)
+	// Reconciliation can write the child's terminal record itself, which never
+	// passes through the lifecycle mirror, so the parent-side entry is refreshed
+	// here as well.
+	refreshChildIndexState(repository, child, childRecords[len(childRecords)-1])
+
+	return nil
 }
 
 func authoritativeChildRecords(child *session.Handle) ([]record, error) {

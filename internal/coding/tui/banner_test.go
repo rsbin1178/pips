@@ -121,8 +121,35 @@ func TestFullscreenNewSessionReplacesThePreviousBanner(t *testing.T) {
 	_, command := model.Update(controlResultMsg{operation: operationResume})
 	driveModelCommands(t, model, command)
 
-	assert.Empty(t, model.notices, "resume prints no banner and drops the previous session's")
-	assert.NotContains(t, ansi.Strip(model.View().Content), "✻ Pips")
+	assert.Len(t, model.notices, 1, "resume replaces the previous banner with its own")
+	assert.Contains(t, ansi.Strip(model.View().Content), "✻ Pips",
+		"the resumed session's first record is the banner")
+}
+
+// TestFullscreenResumeBannerSitsAtTheTopOfHistory pins the requested reading
+// flow: a resumed session keeps the banner as its first managed record, so it
+// appears only after scrolling the historical transcript back to the top.
+func TestFullscreenResumeBannerSitsAtTheTopOfHistory(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	for index := range 40 {
+		state.Transcript = append(state.Transcript, ai.UserText("history "+strings.Repeat("x", index+1)))
+	}
+
+	model := fullscreenModel(t, stubController{state: state}, true)
+	model.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	model.rerenderTranscript(false)
+
+	_, command := model.Update(controlResultMsg{operation: operationResume})
+	driveModelCommands(t, model, command)
+	assert.NotContains(t, ansi.Strip(model.View().Content), "✻ Pips",
+		"the resumed view starts at the newest history row")
+
+	model.transcriptScroll.gotoTop()
+	model.rerenderTranscript(false)
+	assert.Contains(t, ansi.Strip(model.View().Content), "✻ Pips",
+		"scrolling to the top reveals the session banner")
 }
 
 // TestStartupBannerLogoMatchesTheHeaderLines pins the header's height: the block

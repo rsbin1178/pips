@@ -197,4 +197,53 @@ func TestMediaSourceKinds(t *testing.T) {
 	assert.True(t, ai.FileURL("x", "text/plain", "https://example.com/x").Source.IsURL())
 	assert.True(t, ai.FileID("x", "text/plain", "file_x").Source.IsID())
 	assert.False(t, ai.FileData("x", "text/plain", []byte("x")).Source.IsURL())
+	assert.True(t, ai.ImagePart{
+		Source: ai.MediaSource{Path: "assets/image-0123456789abcdef.png", Digest: "deadbeef"},
+	}.Source.IsPath())
+}
+
+func TestMessageJSONMediaReferenceRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	message := ai.User(ai.ImagePart{Source: ai.MediaSource{
+		Path:     "assets/image-0123456789abcdef.jpg",
+		Digest:   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		MIMEType: "image/jpeg",
+		Width:    1024,
+		Height:   768,
+	}})
+
+	encoded, err := json.Marshal(message)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"path":"assets/image-0123456789abcdef.jpg"`)
+	assert.NotContains(t, string(encoded), `"data"`)
+
+	var decoded ai.UserMessage
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+
+	image, ok := decoded.Parts[0].(ai.ImagePart)
+	require.True(t, ok)
+	assert.Equal(t, "assets/image-0123456789abcdef.jpg", image.Source.Path)
+	assert.Equal(t, 1024, image.Source.Width)
+	assert.Equal(t, 768, image.Source.Height)
+	assert.Empty(t, image.Source.Data)
+}
+
+// TestMessageJSONOldInlineMediaStillDecodes pins the no-migration contract: a
+// transcript written before session media persistence keeps decoding unchanged.
+func TestMessageJSONOldInlineMediaStillDecodes(t *testing.T) {
+	t.Parallel()
+
+	legacy := []byte(`{"role":"user","parts":[` +
+		`{"type":"text","text":"look"},` +
+		`{"type":"image","source":{"data":"AQID","mime_type":"image/png"}}]}`)
+
+	var decoded ai.UserMessage
+	require.NoError(t, json.Unmarshal(legacy, &decoded))
+	require.Len(t, decoded.Parts, 2)
+
+	image, ok := decoded.Parts[1].(ai.ImagePart)
+	require.True(t, ok)
+	assert.Equal(t, []byte{1, 2, 3}, image.Source.Data)
+	assert.Empty(t, image.Source.Path)
 }
