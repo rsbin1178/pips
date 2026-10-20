@@ -1,3 +1,4 @@
+//nolint:modernize // Test fixtures keep embedded literals explicit and aligned with the production types.
 package tui
 
 import (

@@ -427,6 +427,7 @@ func TestGateDenyBatchRejectsEveryCallWithoutExecution(t *testing.T) {
 
 	results := toolResults(t, sess, 2)
 	require.Len(t, results, 2)
+
 	for _, result := range results {
 		assert.True(t, result.IsError)
 		assert.Equal(t, "echo calls are not allowed together", resultText(t, result))

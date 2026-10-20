@@ -2,7 +2,6 @@
 package tui
 
 import (
-	"fmt"
 	"image/color"
 	"strings"
 	"testing"
@@ -259,11 +258,8 @@ func TestTimelineDistinguishesRejectedAndInvalidQuestions(t *testing.T) {
 func TestTimelineCollapsesMixedBatchQuestionRejections(t *testing.T) {
 	t.Parallel()
 
-	reason := fmt.Sprintf(
-		"%s (2 ask calls, 1 other tool).\nThis message was not executed. "+
-			"Send one ask_user call alone with 1-4 questions, or retry the other tools without ask_user.",
-		question.MixedBatchErrorPrefix,
-	)
+	reason := question.MixedBatchErrorPrefix + " (2 ask calls, 1 other tool).\nThis message was not executed. " +
+		"Send one ask_user call alone with 1-4 questions, or retry the other tools without ask_user."
 	state := coding.State{Transcript: []ai.Message{
 		ai.Assistant(
 			ai.ToolCallPart{
@@ -305,10 +301,7 @@ func TestTimelineCollapsesMixedBatchQuestionRejections(t *testing.T) {
 func TestTimelineCollapsesLiveMixedBatchQuestionRejections(t *testing.T) {
 	t.Parallel()
 
-	reason := fmt.Sprintf(
-		"%s (2 ask calls, 1 other tool).\nThis message was not executed.",
-		question.MixedBatchErrorPrefix,
-	)
+	reason := question.MixedBatchErrorPrefix + " (2 ask calls, 1 other tool).\nThis message was not executed."
 	ask := func(id, header string) ai.ToolCallPart {
 		return ai.ToolCallPart{
 			ID: id, Name: question.ToolName,
