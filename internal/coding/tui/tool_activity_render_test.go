@@ -22,25 +22,25 @@ import (
 func TestToolPreviewRenderingKeepsTheActivityReadOnly(t *testing.T) {
 	t.Parallel()
 
-	patch := "*** Begin Patch\n" +
-		"*** Update File: world_map/selfcheck_reference_points.py\n" +
-		"@@\n" +
-		"-    (13, 13), (31, 61),\n" +
-		"+    (15, 13), (31, 61),\n" +
-		"*** End Patch\n"
-	arguments, err := json.Marshal(map[string]string{"patch": patch})
+	arguments, err := json.Marshal(map[string]string{
+		"file_path":  "world_map/selfcheck_reference_points.py",
+		"old_string": "    (13, 13), (31, 61),\n",
+		"new_string": "    (15, 13), (31, 61),\n",
+	})
 	require.NoError(t, err)
 
 	state := coding.State{Tools: []coding.ToolState{{
 		Call: coding.ToolCall{
-			ID: "call-1", Name: "apply_patch", Arguments: ai.JSON(string(arguments)),
+			ID: "call-1", Name: "Edit", Arguments: ai.JSON(string(arguments)),
 		},
 		Status: coding.ToolStatusCompleted,
 		Result: ai.ToolResultText(
 			"call-1",
-			"apply_patch",
-			`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":1,"additions":1,"deletions":1}}`+
-				"\n\nworld_map/selfcheck_reference_points.py\n",
+			"Edit",
+			`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"Edit","counts":{"files":1},`+
+				`"edit":{"path":"world_map/selfcheck_reference_points.py","kind":"replace","lines":[3]}}`+
+				"\n\nM world_map/selfcheck_reference_points.py\n@@ line 3 @@\n"+
+				"-    (13, 13), (31, 61),\n+    (15, 13), (31, 61),\n",
 		),
 	}}}
 

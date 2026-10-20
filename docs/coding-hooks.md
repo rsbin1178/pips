@@ -45,7 +45,8 @@ Runtime or execute a handler.
 ## Configuration format
 
 Both files use `pips.coding.hooks/v1alpha1`, reject duplicate and unknown JSON
-fields, and support command handlers only:
+fields, and support command handlers only. `schema` is optional and defaults to
+that version; an explicit value must match it.
 
 ```json
 {
@@ -65,7 +66,7 @@ fields, and support command handlers only:
     ],
     "PreToolUse": [
       {
-        "matcher": "^(Bash|apply_patch)$",
+        "matcher": "^(Bash|Edit|Write)$",
         "hooks": [
           {
             "type": "command",
@@ -145,7 +146,8 @@ matcher for source fidelity but ignore it. Tool hooks match Pips's canonical
 tool name and these compatible aliases:
 
 - `shell` also matches `Bash`;
-- `apply_patch` also matches `Edit` and `Write`;
+- `Edit` matches only `Edit`;
+- `Write` matches only `Write`;
 - `spawn_subagent` also matches `Agent`.
 
 MCP and other local function tools match their exact Pips tool name. Matching

@@ -11,6 +11,7 @@ import (
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
@@ -29,7 +30,9 @@ func TestCatalogMetadataAndConcurrency(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Len(t, descriptors, 5)
-	assert.Equal(t, []string{"read", "ls", "glob", "grep", "apply_patch"}, []string{
+	assert.Equal(t, []string{
+		"read", "ls", "glob", "grep", "Edit",
+	}, []string{
 		descriptors[0].Name,
 		descriptors[1].Name,
 		descriptors[2].Name,
@@ -45,6 +48,7 @@ func TestCatalogMetadataAndConcurrency(t *testing.T) {
 	}
 
 	assert.Equal(t, catalog.RiskWrite, descriptors[4].Risk)
+	assert.Contains(t, descriptors[4].Tags, "mutation")
 
 	snapshot, err := fixture.catalog.Snapshot(t.Context(), catalog.AllowAll("test", catalog.RiskWrite))
 	require.NoError(t, err)
@@ -63,13 +67,34 @@ func TestCatalogMetadataAndConcurrency(t *testing.T) {
 	require.NotNil(t, grepDeclaration.InputSchema)
 	assert.Equal(
 		t,
-		[]string{"pattern", "fixed_strings", "path", "glob", "case_sensitive", "offset", "limit"},
+		[]string{
+			"pattern", "fixed_strings", "path", "glob", "case_sensitive",
+			"before_context", "after_context", "context", "type", "multiline",
+			"output_mode", "offset", "limit",
+		},
 		grepDeclaration.InputSchema.Required,
 	)
-	assert.Contains(t, grepDeclaration.InputSchema.Properties, "fixed_strings")
+	for _, property := range []string{
+		"fixed_strings", "before_context", "after_context", "context",
+		"type", "multiline", "output_mode",
+	} {
+		assert.Contains(t, grepDeclaration.InputSchema.Properties, property)
+	}
 	assert.True(t, grepDeclaration.InputSchema.Properties["fixed_strings"].Nullable)
 	assert.NotContains(t, grepDeclaration.InputSchema.Properties, "query")
 	assert.NotContains(t, grepDeclaration.InputSchema.Properties, "regex")
+
+	editDeclaration := fixture.tools["Edit"].Decl()
+	require.NotNil(t, editDeclaration.InputSchema)
+	assert.Equal(t,
+		[]string{"file_path", "old_string", "new_string"},
+		editDeclaration.InputSchema.Required,
+	)
+	for _, property := range []string{"file_path", "old_string", "new_string", "replace_all"} {
+		assert.Contains(t, editDeclaration.InputSchema.Properties, property)
+	}
+	_, hasWrite := fixture.tools["Write"]
+	assert.False(t, hasWrite, "replace strategy exposes only Edit")
 }
 
 func TestTaskCatalogIsBoundedApplicationState(t *testing.T) {
@@ -155,7 +180,7 @@ func TestLSIsStableTypedAndPaginated(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(fixture.root, "dir"), 0o700))
 	require.NoError(t, os.Symlink("a.txt", filepath.Join(fixture.root, "link")))
 
-	text, err := fixture.exec(t.Context(), "ls", `{}`)
+	text, err := fixture.exec(t.Context(), "ls", `{"offset":0,"limit":2}`)
 	require.NoError(t, err)
 	header, body, err := tools.ParseResult(text)
 	require.NoError(t, err)
@@ -170,6 +195,12 @@ func TestLSIsStableTypedAndPaginated(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, header.Truncated)
 	assert.Equal(t, "dir/\nlink@\n", body)
+
+	text, err = fixture.exec(t.Context(), "ls", `{}`)
+	require.NoError(t, err)
+	_, body, err = tools.ParseResult(text)
+	require.NoError(t, err)
+	assert.Equal(t, "- ./\n  - a.txt\n  - b.txt\n  - dir/\n  - link\n", body)
 }
 
 func TestGlobUsesRecursivePatternWithoutFollowingSymlinks(t *testing.T) {
@@ -225,14 +256,13 @@ func TestWorkspaceAbsolutePathsAreAccepted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, text, "alpha", "surrounding quotes are cleaned before resolution")
 
-	patchPath := filepath.Join(root, "patched.txt")
-	patch := "*** Begin Patch\n*** Add File: " + patchPath + "\n+patched\n*** End Patch"
-	_, err = fixture.exec(t.Context(), "apply_patch", `{"patch":`+strconv.Quote(patch)+`}`)
+	editPath := filepath.Join(root, "edited.txt")
+	_, err = fixture.exec(t.Context(), "Edit", `{"file_path":`+strconv.Quote(editPath)+`,"old_string":"","new_string":"edited\n"}`)
 	require.NoError(t, err)
 
-	data, readErr := os.ReadFile(patchPath)
+	data, readErr := os.ReadFile(editPath)
 	require.NoError(t, readErr)
-	assert.Equal(t, "patched\n", string(data))
+	assert.Equal(t, "edited\n", string(data))
 
 	outside := filepath.Join(t.TempDir(), "outside")
 	_, err = fixture.exec(t.Context(), "ls", `{"path":`+strconv.Quote(outside)+`}`)
@@ -241,9 +271,9 @@ func TestWorkspaceAbsolutePathsAreAccepted(t *testing.T) {
 	require.NoError(t, parseErr)
 	assert.Equal(t, "outside_workspace", header.Code)
 
-	outsidePatch := "*** Begin Patch\n*** Add File: " +
-		filepath.Join(t.TempDir(), "outside.txt") + "\n+nope\n*** End Patch"
-	_, err = fixture.exec(t.Context(), "apply_patch", `{"patch":`+strconv.Quote(outsidePatch)+`}`)
+	_, err = fixture.exec(t.Context(), "Edit", `{"file_path":`+strconv.Quote(
+		filepath.Join(t.TempDir(), "outside.txt"),
+	)+`,"old_string":"","new_string":"nope"}`)
 	require.Error(t, err)
 }
 
@@ -274,7 +304,8 @@ func TestGrepSupportsGlobCaseAndContinuation(t *testing.T) {
 	assert.Equal(t, 1, header.Counts.TruncatedLines)
 	require.NotNil(t, header.Next.Offset)
 	assert.Equal(t, 1, *header.Next.Offset)
-	assert.Contains(t, body, "a.go:1:7:first Needle lin")
+	assert.Contains(t, body, "Found at least 1 matching lines\na.go\n1:first Needle lin [... truncated (30 chars total)]\n")
+	assert.Contains(t, body, "continue with offset 1")
 
 	text, err = fixture.exec(
 		t.Context(),
@@ -284,7 +315,7 @@ func TestGrepSupportsGlobCaseAndContinuation(t *testing.T) {
 	require.NoError(t, err)
 	_, body, err = tools.ParseResult(text)
 	require.NoError(t, err)
-	assert.Equal(t, "nested/b.go:1:1:needle second\n", body)
+	assert.Equal(t, "Found at least 1 matching lines\nnested/b.go\n1:needle second\n... [output truncated after 1 matching lines; continue with offset 2] ...\n", body)
 
 	_, err = fixture.exec(t.Context(), "grep", `{"pattern":"["}`)
 	require.Error(t, err)
@@ -303,7 +334,7 @@ func TestGrepUsesRegexByDefaultAndSupportsFixedStrings(t *testing.T) {
 	require.NoError(t, err)
 	_, body, err := tools.ParseResult(text)
 	require.NoError(t, err)
-	assert.Equal(t, "values.txt:1:1:alpha[beta\nvalues.txt:2:1:alphaXbeta\n", body)
+	assert.Equal(t, "Found 2 matching lines\nvalues.txt\n1:alpha[beta\n2:alphaXbeta\n", body)
 
 	text, err = fixture.exec(
 		t.Context(),
@@ -313,29 +344,34 @@ func TestGrepUsesRegexByDefaultAndSupportsFixedStrings(t *testing.T) {
 	require.NoError(t, err)
 	_, body, err = tools.ParseResult(text)
 	require.NoError(t, err)
-	assert.Equal(t, "values.txt:1:1:alpha[beta\n", body)
+	assert.Equal(t, "Found 1 matching lines\nvalues.txt\n1:alpha[beta\n", body)
 }
 
-func TestApplyPatchAddsUpdatesDeletesAndPreservesMode(t *testing.T) {
+func TestWriteToolCreatesOverwritesAndPreservesMode(t *testing.T) {
 	t.Parallel()
 
-	fixture := newToolFixture(t, tools.DefaultLimits())
+	fixture := newToolFixtureWithStrategy(
+		t, tools.DefaultLimits(), config.EditStrategyWriteAndReplace,
+	)
 	fixture.write("update.txt", "old\n")
-	fixture.write("delete.txt", "gone\n")
 	//nolint:gosec // Executable permissions are intentional input to the mode-preservation test.
 	require.NoError(t, os.Chmod(filepath.Join(fixture.root, "update.txt"), 0o751))
 
-	text, err := fixture.exec(t.Context(), "apply_patch", `{"patch":"*** Begin Patch\n*** Add File: added.txt\n+added\n*** Update File: update.txt\n@@\n-old\n+new\n*** Delete File: delete.txt\n*** End Patch\n"}`)
+	text, err := fixture.exec(t.Context(), "Write", `{"file_path":"added.txt","content":"added\n"}`)
 	require.NoError(t, err)
 	header, body, err := tools.ParseResult(text)
 	require.NoError(t, err)
 	assert.True(t, header.OK)
-	assert.Equal(t, 3, header.Counts.Files)
-	assert.Equal(t, "A added.txt\nD delete.txt\nM update.txt\n", body)
+	assert.Equal(t, 1, header.Counts.Files)
+	assert.Equal(t, "A added.txt\n", body)
 	assert.Equal(t, "added\n", string(mustRead(t, filepath.Join(fixture.root, "added.txt"))))
+
+	text, err = fixture.exec(t.Context(), "Write", `{"file_path":"update.txt","content":"new\n"}`)
+	require.NoError(t, err)
+	header, body, err = tools.ParseResult(text)
+	require.NoError(t, err)
+	assert.Equal(t, "M update.txt\n", body)
 	assert.Equal(t, "new\n", string(mustRead(t, filepath.Join(fixture.root, "update.txt"))))
-	_, err = os.Stat(filepath.Join(fixture.root, "delete.txt"))
-	require.ErrorIs(t, err, os.ErrNotExist)
 
 	info, err := os.Stat(filepath.Join(fixture.root, "update.txt"))
 	require.NoError(t, err)
@@ -347,11 +383,16 @@ func TestApplyPatchAddsUpdatesDeletesAndPreservesMode(t *testing.T) {
 	assert.Empty(t, temporaryFiles(t, fixture.root))
 }
 
-func TestApplyPatchAddCreatesNestedParents(t *testing.T) {
+func TestWriteCreatesNestedParents(t *testing.T) {
 	t.Parallel()
 
-	fixture := newToolFixture(t, tools.DefaultLimits())
-	text, err := fixture.exec(t.Context(), "apply_patch", `{"patch":"*** Begin Patch\n*** Add File: prisma/schema/schema.prisma\n+datasource db {}\n*** End Patch\n"}`)
+	fixture := newToolFixtureWithStrategy(
+		t, tools.DefaultLimits(), config.EditStrategyWriteAndReplace,
+	)
+	text, err := fixture.exec(
+		t.Context(), "Write",
+		`{"file_path":"prisma/schema/schema.prisma","content":"datasource db {}\n"}`,
+	)
 	require.NoError(t, err)
 	header, body, err := tools.ParseResult(text)
 	require.NoError(t, err)
@@ -363,17 +404,17 @@ func TestApplyPatchAddCreatesNestedParents(t *testing.T) {
 	)
 }
 
-func TestApplyPatchConflictLeavesWorkspaceUnchanged(t *testing.T) {
+func TestEditNoMatchLeavesWorkspaceUnchanged(t *testing.T) {
 	t.Parallel()
 
 	fixture := newToolFixture(t, tools.DefaultLimits())
 	fixture.write("file.txt", "actual\n")
 
-	_, err := fixture.exec(t.Context(), "apply_patch", `{"patch":"*** Begin Patch\n*** Update File: file.txt\n@@\n-expected\n+changed\n*** End Patch\n"}`)
+	_, err := fixture.exec(t.Context(), "Edit", `{"file_path":"file.txt","old_string":"expected","new_string":"changed"}`)
 	require.Error(t, err)
 	header, _, parseErr := tools.ParseResult(err.Error())
 	require.NoError(t, parseErr)
-	assert.Equal(t, "conflict", header.Code)
+	assert.Equal(t, "no_match", header.Code)
 	assert.Equal(t, "actual\n", string(mustRead(t, filepath.Join(fixture.root, "file.txt"))))
 	assert.Empty(t, temporaryFiles(t, fixture.root))
 }
@@ -466,7 +507,7 @@ func TestToolPathAndOffsetRobustness(t *testing.T) {
 	header, body, err = tools.ParseResult(text)
 	require.NoError(t, err)
 	assert.True(t, header.OK)
-	assert.Contains(t, body, "file.txt:1:1:line1\n")
+	assert.Contains(t, body, "file.txt\n1:line1\n")
 }
 
 type toolFixture struct {
@@ -479,6 +520,16 @@ type toolFixture struct {
 func newToolFixture(t *testing.T, limits tools.Limits) *toolFixture {
 	t.Helper()
 
+	return newToolFixtureWithStrategy(t, limits, config.EditStrategyReplace)
+}
+
+func newToolFixtureWithStrategy(
+	t *testing.T,
+	limits tools.Limits,
+	strategy config.EditStrategy,
+) *toolFixture {
+	t.Helper()
+
 	root := t.TempDir()
 	opened, err := workspace.Open(root)
 	require.NoError(t, err)
@@ -486,7 +537,7 @@ func newToolFixture(t *testing.T, limits tools.Limits) *toolFixture {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, tree.Close()) })
 
-	toolCatalog, err := tools.NewCatalog(tree, limits)
+	toolCatalog, err := tools.NewCatalog(tree, limits, tools.WithEditStrategy(strategy))
 	require.NoError(t, err)
 	snapshot, err := toolCatalog.Snapshot(t.Context(), catalog.AllowAll("test", catalog.RiskWrite))
 	require.NoError(t, err)

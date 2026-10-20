@@ -102,10 +102,10 @@ func TestBuildCodingSystemPromptKeepsSharedPrefixStableAcrossModes(t *testing.T)
 	}
 	agentOptions := base
 	agentOptions.Mode = ModeAgent
-	agentOptions.ToolNames = []string{"read", "shell", "apply_patch"}
+	agentOptions.ToolNames = []string{"read", "shell", "Edit"}
 	planOptions := base
 	planOptions.Mode = ModePlan
-	planOptions.ToolNames = []string{"read", "apply_patch", "shell", "enter_plan_mode", "exit_plan_mode"}
+	planOptions.ToolNames = []string{"read", "Edit", "shell", "enter_plan_mode", "exit_plan_mode"}
 
 	agentParts, err := buildCodingSystemPromptParts(agentOptions)
 	require.NoError(t, err)
@@ -116,6 +116,8 @@ func TestBuildCodingSystemPromptKeepsSharedPrefixStableAcrossModes(t *testing.T)
 	assert.NotEqual(t, agentParts.Suffix, planParts.Suffix)
 	assert.NotContains(t, agentParts.SharedPrefix, "operating_mode")
 	assert.NotContains(t, agentParts.SharedPrefix, "visible_tools")
+	assert.Contains(t, agentParts.Suffix, "old_string must match exactly once")
+	assert.NotContains(t, agentParts.Suffix, "overwrite one complete file")
 
 	// Plan mode injects its own per-request reminder, so the static prompt only
 	// states the capability boundary inside the JSON mode context.
@@ -133,14 +135,14 @@ func TestBuildCodingSystemPromptModeContextCarriesOnlyCapabilityMetadata(t *test
 	parts, err := buildCodingSystemPromptParts(systemPromptOptions{
 		Model: "example/model", WorkingDirectory: "/workspace", Platform: "linux",
 		Date: "2026-07-25", Sandbox: "workspace-write", Approval: "on-request",
-		WorkspaceTrusted: true, Mode: ModePlan, ToolNames: []string{"read", "apply_patch"},
+		WorkspaceTrusted: true, Mode: ModePlan, ToolNames: []string{"read", "Edit"},
 	})
 	require.NoError(t, err)
 
 	context := modeContextDocument(t, parts.Suffix)
 	assert.Equal(t, []string{"operating_mode", "visible_tools"}, mapKeys(context))
 	assert.Equal(t, "plan", context["operating_mode"])
-	assert.Equal(t, []any{"apply_patch", "read"}, context["visible_tools"])
+	assert.Equal(t, []any{"Edit", "read"}, context["visible_tools"])
 }
 
 // modeContextDocument decodes the JSON mode context embedded in a prompt suffix.
@@ -244,7 +246,7 @@ func TestRuntimeInjectsMainSystemPromptAndProjectInstructions(t *testing.T) {
 	assert.Contains(t, system, `"sandbox": "workspace-write"`)
 	assert.Contains(t, system, `"approval": "on-request"`)
 	assert.Contains(t, system, `"workspace_trusted": false`)
-	assert.Contains(t, system, `"apply_patch"`)
+	assert.Contains(t, system, `"Edit"`)
 	assert.Contains(t, system, `"spawn_subagent"`)
 	assert.Contains(t, system, `"todo_write"`)
 }

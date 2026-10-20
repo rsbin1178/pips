@@ -176,6 +176,7 @@ type fileConfig struct {
 	DynamicSubagents      *bool                      `toml:"dynamic_subagents"`
 	ActiveAgentMessages   *bool                      `toml:"active_agent_messages"`
 	TodoGate              *bool                      `toml:"todo_gate"`
+	EditStrategy          *string                    `toml:"edit_strategy"`
 	Mode                  *string                    `toml:"mode"`
 	TUI                   *fileTUI                   `toml:"tui"`
 	Sandbox               *string                    `toml:"sandbox"`
@@ -804,6 +805,13 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 	layer.patch.DynamicSubagents = subagentsEnabled
 	layer.patch.ActiveAgentMessages = value.ActiveAgentMessages
 	layer.patch.TodoGate = value.TodoGate
+	if value.EditStrategy != nil {
+		strategy, parseErr := ParseEditStrategy(*value.EditStrategy)
+		if parseErr != nil {
+			return fileLayer{}, parseErr
+		}
+		layer.patch.EditStrategy = &strategy
+	}
 
 	if value.Mode != nil {
 		mode, err := ParseOperatingMode(*value.Mode)
@@ -1374,6 +1382,10 @@ func validatePatch(patch Patch) (Patch, error) {
 	result.DynamicSubagents = subagentsEnabled
 	result.ActiveAgentMessages = patch.ActiveAgentMessages
 	result.TodoGate = patch.TodoGate
+	result.EditStrategy = patch.EditStrategy
+	if patch.EditStrategy != nil && !patch.EditStrategy.Valid() {
+		return Patch{}, fmt.Errorf("%w: unsupported edit strategy %q", ErrInvalid, *patch.EditStrategy)
+	}
 	if patch.Mode != nil {
 		mode, err := ParseOperatingMode(string(*patch.Mode))
 		if err != nil {

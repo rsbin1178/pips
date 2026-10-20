@@ -400,7 +400,7 @@ type themeDefinition struct {
 }
 
 type themeFile struct {
-	Schema     string                  `toml:"schema"`
+	Schema     *string                 `toml:"schema"`
 	Name       *string                 `toml:"name"`
 	Inherits   *string                 `toml:"inherits"`
 	Background *string                 `toml:"background"`
@@ -415,7 +415,7 @@ func decodeThemeDefinition(id string, data []byte) (themeDefinition, error) {
 	if err := decoder.Decode(&decoded); err != nil {
 		return themeDefinition{}, err
 	}
-	if decoded.Schema != themeSchema {
+	if decoded.Schema != nil && *decoded.Schema != themeSchema {
 		return themeDefinition{}, errors.New("unsupported theme schema")
 	}
 

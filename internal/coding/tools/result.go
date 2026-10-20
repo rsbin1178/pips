@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/rsbin1178/pips/internal/coding/execution"
-	patchdoc "github.com/rsbin1178/pips/internal/coding/tools/patch"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
@@ -22,6 +21,12 @@ var (
 	errInvalidArgument = errors.New("coding tools: invalid argument")
 	errFileTooLarge    = errors.New("coding tools: file too large")
 	errBinaryFile      = errors.New("coding tools: binary file")
+	errIsAFile         = errors.New("coding tools: path is a file")
+	errNotDirectory    = errors.New("coding tools: path is not a directory")
+	errIsADirectory    = errors.New("coding tools: path is a directory")
+	errFilenameTooLong = errors.New("coding tools: file name too long")
+	errNoMatch         = errors.New("coding tools: no match")
+	errMultipleMatches = errors.New("coding tools: multiple matches")
 )
 
 // ResultCounts summarizes bounded work performed by a coding tool.
@@ -41,6 +46,19 @@ type ResultNext struct {
 	Offset *int `json:"offset,omitempty"`
 }
 
+// ResultEdit summarizes one whole-file or exact-string mutation. It is
+// additive: pre-existing consumers that only read Counts keep working.
+type ResultEdit struct {
+	Path         string `json:"path"`
+	Kind         string `json:"kind"`
+	Replacements int    `json:"replacements,omitempty"`
+	OldBytes     int    `json:"old_bytes,omitempty"`
+	NewBytes     int    `json:"new_bytes,omitempty"`
+	OldLines     int    `json:"old_lines,omitempty"`
+	NewLines     int    `json:"new_lines,omitempty"`
+	Lines        []int  `json:"lines,omitempty"`
+}
+
 type result struct {
 	OK          bool
 	Tool        string
@@ -50,6 +68,7 @@ type result struct {
 	Problem     *ResultProblem
 	Counts      ResultCounts
 	Next        ResultNext
+	Edit        *ResultEdit
 	Execution   *ResultExecution
 	Background  *ResultBackground
 	Kill        *ResultKill
@@ -138,6 +157,7 @@ type ResultHeader struct {
 	Problem     *ResultProblem               `json:"problem,omitempty"`
 	Counts      ResultCounts                 `json:"counts,omitzero"`
 	Next        ResultNext                   `json:"next,omitzero"`
+	Edit        *ResultEdit                  `json:"edit,omitempty"`
 	Execution   *ResultExecution             `json:"execution,omitempty"`
 	Background  *ResultBackground            `json:"background,omitempty"`
 	Kill        *ResultKill                  `json:"kill,omitempty"`
@@ -157,6 +177,7 @@ func (r result) render() string {
 		Problem:     r.Problem,
 		Counts:      r.Counts,
 		Next:        r.Next,
+		Edit:        r.Edit,
 		Execution:   r.Execution,
 		Background:  r.Background,
 		Kill:        r.Kill,
@@ -229,8 +250,20 @@ func errorCode(err error) string {
 		return "sandbox_unavailable"
 	case errors.Is(err, execution.ErrInvalidOperation):
 		return "invalid_argument"
-	case errors.Is(err, errInvalidArgument), errors.Is(err, workspace.ErrInvalidPath), errors.Is(err, patchdoc.ErrInvalid):
+	case errors.Is(err, errInvalidArgument), errors.Is(err, workspace.ErrInvalidPath):
 		return "invalid_argument"
+	case errors.Is(err, errIsAFile):
+		return "is_a_file"
+	case errors.Is(err, errNotDirectory):
+		return "not_a_directory"
+	case errors.Is(err, errIsADirectory):
+		return "is_a_directory"
+	case errors.Is(err, errFilenameTooLong):
+		return "filename_too_long"
+	case errors.Is(err, errNoMatch):
+		return "no_match"
+	case errors.Is(err, errMultipleMatches):
+		return "multiple_matches"
 	case errors.Is(err, errInvalidNotebook):
 		return "invalid_notebook"
 	case errors.Is(err, workspace.ErrOutsideRoot):
@@ -239,11 +272,11 @@ func errorCode(err error) string {
 		return "symlink_not_allowed"
 	case errors.Is(err, workspace.ErrUnsupportedType):
 		return "unsupported_file"
-	case errors.Is(err, workspace.ErrChanged), errors.Is(err, patchdoc.ErrConflict):
+	case errors.Is(err, workspace.ErrChanged):
 		return "conflict"
 	case errors.Is(err, errFileTooLarge):
 		return "too_large"
-	case errors.Is(err, errBinaryFile), errors.Is(err, patchdoc.ErrBinary):
+	case errors.Is(err, errBinaryFile):
 		return "binary_file"
 	case errors.Is(err, fs.ErrNotExist):
 		return "not_found"

@@ -7,7 +7,19 @@ import (
 
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/internal/coding/config"
 )
+
+// effectiveEditStrategy resolves the interaction's editing surface. Plan mode
+// always uses Edit for the exact plan file, even when the configured strategy
+// would also expose Write.
+func effectiveEditStrategy(mode OperatingMode, configured config.EditStrategy) config.EditStrategy {
+	if mode == ModePlan {
+		return config.EditStrategyReplace
+	}
+
+	return config.NormalizeEditStrategy(configured)
+}
 
 // catalogPolicyForMode leases the model-visible toolset. Plan mode keeps the
 // ordinary toolset on purpose: file edits are rejected by the plan edit gate

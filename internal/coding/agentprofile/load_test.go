@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/paths"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
@@ -487,4 +488,29 @@ func findDefinition(t *testing.T, definitions []Definition, id string) Definitio
 	t.Fatalf("definition %q not found", id)
 
 	return Definition{}
+}
+
+func TestParseEditStrategyField(t *testing.T) {
+	t.Parallel()
+
+	body := []byte("---\nschema: pips.agent/v1alpha1\nname: Editor\ndescription: Editor\n" +
+		"edit_strategy: write_and_replace\n---\ninstructions\n")
+	definition, err := ParseOneShot("editor", body, DefaultLimits())
+	require.NoError(t, err)
+	assert.Equal(t, config.EditStrategyWriteAndReplace, definition.EditStrategy)
+
+	invalid := []byte("---\nschema: pips.agent/v1alpha1\nname: Editor\ndescription: Editor\n" +
+		"edit_strategy: patch\n---\ninstructions\n")
+	_, err = ParseOneShot("editor", invalid, DefaultLimits())
+	require.ErrorIs(t, err, ErrInvalid)
+}
+
+func TestParseOmittedSchemaUsesCurrentVersion(t *testing.T) {
+	t.Parallel()
+
+	body := []byte("---\nname: Default schema\ndescription: Uses the current schema\n---\ninstructions\n")
+	definition, err := ParseOneShot("default-schema", body, DefaultLimits())
+	require.NoError(t, err)
+	assert.Equal(t, SchemaV1Alpha1, definition.Schema)
+	assert.Equal(t, "Default schema", definition.Name)
 }

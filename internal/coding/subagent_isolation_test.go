@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/teamworktree"
 	"github.com/stretchr/testify/assert"
@@ -50,8 +51,8 @@ func TestRuntimeRunsIsolatedChildInPreservedWorktree(t *testing.T) {
 	model := newRuntimeModel(
 		runtimeToolResponse("parent-delegate", subagent.ToolName,
 			`{"prompt":"Rewrite the tracked file.","description":"isolate","isolation":"worktree","run_in_background":false}`),
-		runtimeToolResponse("child-patch", "apply_patch",
-			`{"patch":"*** Begin Patch\n*** Update File: tracked.txt\n@@\n-base\n+child\n*** End Patch\n"}`),
+		runtimeToolResponse("child-patch", "Edit",
+			`{"file_path":"tracked.txt","old_string":"base","new_string":"child"}`),
 		runtimeTextResponse("child summary"),
 		runtimeTextResponse("delegation complete"),
 	)
@@ -77,6 +78,8 @@ func TestRuntimeRunsIsolatedChildInPreservedWorktree(t *testing.T) {
 	detail, err := runtime.InspectSubagent(t.Context(), summaries[0].ChildSessionID)
 	require.NoError(t, err)
 	assert.Equal(t, subagent.IsolationWorktree, detail.Plan.Isolation)
+	assert.Equal(t, config.EditStrategyReplace, detail.Plan.EditStrategy,
+		"a general-purpose child inherits the parent edit strategy")
 	assert.Equal(t, worktree, detail.Summary.WorktreePath)
 
 	// The completion result the parent model received names the Worktree.
@@ -163,8 +166,8 @@ func TestRuntimeRunsChildInCallerDirectory(t *testing.T) {
 		runtimeToolResponse("parent-delegate", subagent.ToolName, fmt.Sprintf(
 			`{"prompt":"Write the marker.","description":"cwd","cwd":%q,"run_in_background":false}`, elsewhere,
 		)),
-		runtimeToolResponse("child-patch", "apply_patch",
-			`{"patch":"*** Begin Patch\n*** Add File: marker.txt\n+child\n*** End Patch\n"}`),
+		runtimeToolResponse("child-patch", "Edit",
+			`{"file_path":"marker.txt","old_string":"","new_string":"child\n"}`),
 		runtimeTextResponse("child summary"),
 		runtimeTextResponse("delegation complete"),
 	)

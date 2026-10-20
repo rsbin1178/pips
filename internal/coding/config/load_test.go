@@ -1312,3 +1312,28 @@ func TestLoadMediaConfigDefaultsAndOverrides(t *testing.T) {
 	_, err = config.Load(config.LoadOptions{ConfigFile: invalid})
 	require.ErrorIs(t, err, config.ErrInvalid)
 }
+
+func TestLoadEditStrategyDefaultAndOverride(t *testing.T) {
+	t.Parallel()
+
+	result, err := config.Load(config.LoadOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, config.EditStrategyReplace, result.Config.EditStrategy)
+	source, ok := result.Config.Source(config.FieldEditStrategy)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "edit_strategy = \"write_and_replace\"\n")
+	result, err = config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, config.EditStrategyWriteAndReplace, result.Config.EditStrategy)
+	source, ok = result.Config.Source(config.FieldEditStrategy)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+
+	writeFile(t, path, "edit_strategy = \"patch\"\n")
+	_, err = config.Load(config.LoadOptions{ConfigFile: path})
+	require.ErrorIs(t, err, config.ErrInvalid)
+}

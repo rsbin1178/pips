@@ -855,7 +855,7 @@ schema: pips.agent/v1alpha1
 name: Writer
 description: Make one approved, bounded workspace change.
 tools:
-  allow: ["tool:apply_patch"]
+  allow: ["tool:Edit"]
 output:
   format: text
 ---
@@ -866,7 +866,7 @@ Make only the requested workspace edit and report completion.
 
 	model := newRuntimeModel(
 		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"prompt":"Update target.txt.","description":"delegate","subagent_type":"writer","run_in_background":false}`),
-		runtimeToolResponse("child-patch", "apply_patch", `{"patch":"*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch\n"}`),
+		runtimeToolResponse("child-patch", "Edit", `{"file_path":"target.txt","old_string":"before","new_string":"after"}`),
 		runtimeTextResponse("updated target"),
 		runtimeTextResponse("parent complete"),
 	)

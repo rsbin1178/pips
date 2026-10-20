@@ -17,17 +17,17 @@
 - 来源/测试锚点：[catalog.go](../../internal/coding/tools/catalog.go)、[tools_test.go](../../internal/coding/tools/tools_test.go)、[workspace](../../internal/coding/workspace)。
 - 结果：`未执行`。
 
-## MA-WORK-002：`apply_patch` 原子修改与失败回滚
+## MA-WORK-002：`Edit` 事务修改与失败回滚
 
 - 分类：实时 Provider、安全敏感。变更等级：临时工作区；会产生费用。
 - 前置条件：`workspace-write`；approval 设置符合安全分册；目标文件已提交。
 - 隔离夹具：`fixture.txt` 含三行固定文本，记录修改前 SHA-256。
-- 步骤：要求模型只用 `apply_patch` 精确替换第二行并新增 `created.txt`；复核 diff。再让模型尝试一个上下文不匹配或越界路径 patch。
-- 预期证据：成功 patch 只改变声明文件，换行和未触及内容保持；TUI/JSONL 不显示完整敏感 patch；失败 patch 不产生部分写入，外部路径被拒绝。
+- 步骤：要求模型只用 `Edit` 精确替换第二行；复核 diff。再让模型用空 `old_string` 新建 `created.txt`，最后尝试一个不匹配的 `old_string` 或越界路径。
+- 预期证据：成功时结果 body 为 `M <path>` 加行号/上下文，或 `A <path>`；换行和未触及内容保持；失败时为可恢复错误，工作区保持不变，没有 `.pips-stage-*`/`.pips-backup-*` 残留。
 - 通过条件：成功变更与预期 diff 完全一致；失败时两个文件摘要均保持失败前状态。
-- 失败条件：部分写入、非目标文件变化、目录逃逸、失败仍返回 success。
-- 清理/回滚：用新的反向 patch 或在夹具仓库提交/恢复预期状态；不得对真实仓库运行破坏性 Git 命令。
-- 来源/测试锚点：[apply_patch.go](../../internal/coding/tools/apply_patch.go)、[patch package](../../internal/coding/tools/patch)、[tools_test.go](../../internal/coding/tools/tools_test.go)、[workspace tree](../../internal/coding/workspace/tree.go)。
+- 失败条件：使用 patch 语法、暴露已移除的 patch 工具、部分写入、非目标文件变化、目录逃逸、失败仍返回 success。
+- 清理/回滚：用新的反向 `Edit` 或恢复夹具仓库的预期状态；不得对真实仓库运行破坏性 Git 命令。
+- 来源/测试锚点：[edit.go](../../internal/coding/tools/edit.go)、[mutation_tx.go](../../internal/coding/tools/mutation_tx.go)、[tools_test.go](../../internal/coding/tools/tools_test.go)、[workspace tree](../../internal/coding/workspace/tree.go)。
 - 结果：`未执行`。
 
 ## MA-WORK-003：Shell 的 cwd、环境、输出与审批边界

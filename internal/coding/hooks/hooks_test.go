@@ -393,7 +393,9 @@ func TestCodexAlignedEventsAndMatcherTargets(t *testing.T) {
 	edit.Matcher = "Edit|Write"
 	edit, err = compileDefinition(edit, DefaultLimits())
 	require.NoError(t, err)
-	assert.True(t, edit.Matches(EventPostToolUse, "apply_patch"))
+	assert.True(t, edit.Matches(EventPostToolUse, "Edit"))
+	assert.True(t, edit.Matches(EventPostToolUse, "Write"))
+	assert.False(t, edit.Matches(EventPostToolUse, "Read"))
 }
 
 func TestRunnerCodexAlignedControlResponses(t *testing.T) {
@@ -443,4 +445,15 @@ func TestRunnerCodexAlignedControlResponses(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, outcome.Diagnostics, 1)
 	assert.Equal(t, "invalid_response", outcome.Diagnostics[0].Code)
+}
+
+func TestDecodeFileDefaultsOmittedSchema(t *testing.T) {
+	t.Parallel()
+
+	values, err := decodeFile([]byte(`{
+  "hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"true"}]}]}
+}`), ScopeUser, "test", DefaultLimits())
+	require.NoError(t, err)
+	require.Len(t, values, 1)
+	assert.Equal(t, EventSessionStart, values[0].Event)
 }
