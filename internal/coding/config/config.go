@@ -46,7 +46,10 @@ const (
 	// content-only assistant message with pending or in-progress plan items, the
 	// runtime runs one more turn carrying the gate reminder. It defaults to
 	// false, matching the reference's opt-in gate.
-	FieldTodoGate              Field = "todo_gate"
+	FieldTodoGate Field = "todo_gate"
+	// FieldEditStrategy selects which file-editing tools the main agent and
+	// inheriting child agents receive. It defaults to replace.
+	FieldEditStrategy          Field = "edit_strategy"
 	FieldSubagentMaxDepth      Field = "subagents.max_depth"
 	FieldSubagentMaxConcurrent Field = "subagents.max_concurrent"
 	// FieldSubagentStructuredResults restores the typed JSON result contract
@@ -88,6 +91,7 @@ var fields = []Field{
 	FieldSubagentEnabled,
 	FieldActiveAgentMessages,
 	FieldTodoGate,
+	FieldEditStrategy,
 	FieldSubagentMaxDepth,
 	FieldSubagentMaxConcurrent,
 	FieldSubagentStructuredResults,
@@ -269,6 +273,40 @@ const (
 	ApprovalOnRequest ApprovalMode = "on-request"
 	ApprovalNever     ApprovalMode = "never"
 )
+
+// EditStrategy selects the file-editing tool surface. The values describe
+// behavior rather than a vendor preset.
+type EditStrategy string
+
+// Supported editing strategies.
+const (
+	// EditStrategyNone offers no file-editing tool.
+	EditStrategyNone EditStrategy = "none"
+	// EditStrategyReplace offers only Edit.
+	EditStrategyReplace EditStrategy = "replace"
+	// EditStrategyWriteAndReplace offers Edit and Write.
+	EditStrategyWriteAndReplace EditStrategy = "write_and_replace"
+)
+
+// Valid reports whether the value is a supported editing strategy.
+func (s EditStrategy) Valid() bool {
+	switch s {
+	case EditStrategyNone, EditStrategyReplace, EditStrategyWriteAndReplace:
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizeEditStrategy maps the programmatic zero value to the default
+// strategy. Explicit file or profile values are parsed before they reach here.
+func NormalizeEditStrategy(value EditStrategy) EditStrategy {
+	if value == "" {
+		return EditStrategyReplace
+	}
+
+	return value
+}
 
 // OperatingMode selects the Coding Agent capability policy.
 type OperatingMode string
@@ -742,7 +780,10 @@ type Config struct {
 	ActiveAgentMessages bool
 	// TodoGate enables the turn-end todo gate. It is off by default: the gate
 	// spends an extra inference turn, so it is opt-in, matching the reference.
-	TodoGate              bool
+	TodoGate bool
+	// EditStrategy selects the file-editing tools. Empty means the package
+	// default (replace) for programmatic Config literals.
+	EditStrategy          EditStrategy
 	Subagent              SubagentConfig
 	Mode                  OperatingMode
 	TUI                   TUIConfig
@@ -784,6 +825,8 @@ type Patch struct {
 	// TodoGate enables the turn-end todo gate. It is file-only; no CLI flag
 	// selects it.
 	TodoGate *bool
+	// EditStrategy is file-only; no CLI flag selects it.
+	EditStrategy *EditStrategy
 	// SubagentLimitBehavior overrides the concurrent-cap behavior. It is
 	// env-only; an invalid value falls back to queue.
 	SubagentLimitBehavior *string
@@ -810,6 +853,7 @@ func Defaults() Config {
 	return Config{
 		Providers:      map[ai.Provider]ProviderConfig{},
 		ToolSearchName: catalog.DefaultToolSearchName,
+		EditStrategy:   EditStrategyReplace,
 		Mode:           ModeAgent,
 		TUI: TUIConfig{
 			Theme:      DefaultThemeSelection,
@@ -967,6 +1011,9 @@ func (c Config) ValidateRuntime() error {
 		if err := validateOperatingMode(c.Mode); err != nil {
 			return err
 		}
+	}
+	if c.EditStrategy != "" && !c.EditStrategy.Valid() {
+		return fmt.Errorf("%w: unsupported edit strategy %q", ErrInvalid, c.EditStrategy)
 	}
 	if c.TUI.Theme != "" {
 		if _, err := ParseThemeSelection(c.TUI.Theme); err != nil {
@@ -1188,6 +1235,18 @@ func ParseApprovalMode(value string) (ApprovalMode, error) {
 	return mode, nil
 }
 
+// ParseEditStrategy parses a supported editing strategy.
+func ParseEditStrategy(value string) (EditStrategy, error) {
+	strategy := EditStrategy(strings.TrimSpace(value))
+	if !strategy.Valid() {
+		return "", fmt.Errorf(
+			"%w: edit_strategy must be none, replace, or write_and_replace", ErrInvalid,
+		)
+	}
+
+	return strategy, nil
+}
+
 // ParseOperatingMode parses a supported Coding Agent capability policy.
 func ParseOperatingMode(value string) (OperatingMode, error) {
 	mode := OperatingMode(strings.TrimSpace(value))
@@ -1351,6 +1410,10 @@ func apply(value Config, patch Patch, source Source) Config {
 	if patch.TodoGate != nil {
 		value.TodoGate = *patch.TodoGate
 		value.sources[FieldTodoGate] = source
+	}
+	if patch.EditStrategy != nil {
+		value.EditStrategy = *patch.EditStrategy
+		value.sources[FieldEditStrategy] = source
 	}
 	if patch.SubagentLimitBehavior != nil {
 		value.Subagent.LimitBehavior = *patch.SubagentLimitBehavior

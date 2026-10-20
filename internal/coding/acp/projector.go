@@ -548,7 +548,7 @@ func toolKind(name string) acpsdk.ToolKind {
 	switch {
 	case strings.Contains(lower, "read"), strings.Contains(lower, "list"), lower == "ls":
 		return acpsdk.ToolKindRead
-	case strings.Contains(lower, "write"), strings.Contains(lower, "edit"), strings.Contains(lower, "patch"):
+	case strings.Contains(lower, "write"), strings.Contains(lower, "edit"):
 		return acpsdk.ToolKindEdit
 	case strings.Contains(lower, "delete"):
 		return acpsdk.ToolKindDelete

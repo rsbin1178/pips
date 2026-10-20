@@ -203,7 +203,7 @@ func TestTeamConfirmationPersistsAggregateAndNarrowsLeadCatalog(t *testing.T) {
 		assert.Contains(t, names, expected)
 	}
 	for _, forbidden := range []string{
-		"apply_patch", "shell", "write_plan", subagent.ToolName,
+		"Edit", "shell", "write_plan", subagent.ToolName,
 		"team_claim_task", "team_release_task", "team_finish_task_attempt",
 	} {
 		assert.NotContains(t, names, forbidden)
@@ -769,17 +769,11 @@ func TestLeadGuardClosesAlreadyLeasedInteractionCapabilities(t *testing.T) {
 
 	guard := &teamCapabilityGuard{}
 	hook := guard.beforeTool(descriptors)
-	assert.Equal(t, agent.ToolDecisionAllow, hook(t.Context(), agent.ToolCallInfo{
-		ToolCall: agent.ToolCall{Name: "apply_patch"},
-	}).Action)
+	assert.Equal(t, agent.ToolDecisionAllow, hook(t.Context(), agent.ToolCallInfo{Name: "Edit"}).Action)
 	require.NoError(t, guard.propose())
 	require.NoError(t, guard.activate("team-1"))
-	assert.Equal(t, agent.ToolDecisionDeny, hook(t.Context(), agent.ToolCallInfo{
-		ToolCall: agent.ToolCall{Name: "apply_patch"},
-	}).Action)
-	assert.Equal(t, agent.ToolDecisionAllow, hook(t.Context(), agent.ToolCallInfo{
-		ToolCall: agent.ToolCall{Name: "read"},
-	}).Action)
+	assert.Equal(t, agent.ToolDecisionDeny, hook(t.Context(), agent.ToolCallInfo{Name: "Edit"}).Action)
+	assert.Equal(t, agent.ToolDecisionAllow, hook(t.Context(), agent.ToolCallInfo{Name: "read"}).Action)
 }
 
 func validTeamProposalRequest() TeamProposalRequest {
@@ -964,14 +958,14 @@ func (m *parallelTeamWriteModel) Generate(
 	call := m.calls[path]
 	m.mu.Unlock()
 	if call == 1 {
-		arguments, err := json.Marshal(struct {
-			Patch string `json:"patch"`
-		}{Patch: "*** Begin Patch\n*** Add File: " + path + "\n+captured by " + path + "\n*** End Patch"})
+		arguments, err := json.Marshal(map[string]string{
+			"file_path": path, "old_string": "", "new_string": "captured by " + path + "\n",
+		})
 		if err != nil {
 			return nil, err
 		}
 
-		return runtimeToolResponse("write-"+path, "apply_patch", string(arguments)), nil
+		return runtimeToolResponse("write-"+path, "Edit", string(arguments)), nil
 	}
 	if call == 2 {
 		return runtimeTextResponse("Worker result is ready for capture."), nil

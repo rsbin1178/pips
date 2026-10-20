@@ -7,7 +7,10 @@ import (
 
 // SubagentRole is a named defaults preset for one subagent type. A role narrows
 // the type's capability mode and supplies model, reasoning, prompt-file, and
-// isolation defaults; it never defines a toolset. It is selected by the agent
+// isolation defaults; it narrows but never defines a toolset. Editing tools
+// come from the profile's edit_strategy (or the parent's strategy when omitted)
+// and are then intersected with the capability mode and selectors. It is
+// selected by the agent
 // type name and it is not a spawn argument.
 type SubagentRole struct {
 	// Description is the required human-readable summary of the role.

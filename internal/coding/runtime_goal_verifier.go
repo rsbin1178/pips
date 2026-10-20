@@ -13,6 +13,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/agentprofile"
 	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes/git"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/goalflow"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
@@ -339,6 +340,7 @@ func (r *Runtime) goalVerifierDispatcher(ctx context.Context) (subagent.Dispatch
 		childModels,
 		factory,
 		r.config.ToolSearch,
+		config.EditStrategyNone,
 		r.config.Subagent.StructuredResults,
 		r.config.DynamicSubagents,
 		subagentPresets{
@@ -380,6 +382,7 @@ func (r *Runtime) goalVerifierAmbientCatalog(
 	local, err := tools.NewCatalog(
 		r.tree,
 		r.opts.ToolLimits,
+		tools.WithEditStrategy(config.EditStrategyNone),
 		tools.WithControlledShell(shell),
 		tools.WithControlledMonitor(monitor),
 		tools.WithKillBackground(func(ctx context.Context, taskID string) (background.Outcome, background.Subject, error) {

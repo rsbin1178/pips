@@ -634,7 +634,7 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 	for _, expected := range []string{"read", "ls", "glob", "grep"} {
 		assert.Contains(t, childTools, expected)
 	}
-	for _, forbidden := range []string{"apply_patch", "shell", subagent.ToolName} {
+	for _, forbidden := range []string{"Edit", "shell", subagent.ToolName} {
 		assert.NotContains(t, childTools, forbidden)
 	}
 	assert.Contains(t, toolNamesFromRequest(requests[2]), subagent.ToolName)
@@ -1378,8 +1378,8 @@ func TestRuntimeReadPatchControlledShellAndAnswer(t *testing.T) {
 		runtimeToolResponse("call-read", "read", `{"path":"main.txt"}`),
 		runtimeToolResponse(
 			"call-patch",
-			"apply_patch",
-			`{"patch":"*** Begin Patch\n*** Update File: main.txt\n@@\n-old\n+new\n*** End Patch\n"}`,
+			"Edit",
+			`{"file_path":"main.txt","old_string":"old","new_string":"new"}`,
 		),
 		runtimeToolResponse(
 			"call-shell",

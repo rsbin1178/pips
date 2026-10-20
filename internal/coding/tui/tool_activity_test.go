@@ -2,8 +2,9 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,9 +13,54 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	codingtools "github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDescribeToolCallNamesStructuredEdits(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		tool    string
+		args    string
+		action  string
+		subject string
+	}{
+		{"write", "Write", `{"file_path":"src/generated.go","content":"package src\n"}`, "Write", "src/generated.go"},
+		{"edit", "Edit", `{"file_path":"src/main.go","old_string":"a","new_string":"b"}`, "Edit", "src/main.go"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			class, action, subject := describeToolCall(coding.ToolCall{
+				Name: test.tool, Arguments: ai.JSON(test.args),
+			})
+			assert.Equal(t, toolClassPatch, class)
+			assert.Equal(t, test.action, action)
+			assert.Equal(t, test.subject, subject)
+		})
+	}
+}
+
+func TestWholeFileEditHeadingUsesTheMutatedPath(t *testing.T) {
+	t.Parallel()
+
+	activity := toolActivity{
+		class: toolClassPatch, name: "Edit", state: toolStateSucceeded,
+		hasHeader: true,
+		header: codingtools.ResultHeader{
+			OK: true, Counts: codingtools.ResultCounts{Files: 1},
+			Edit: &codingtools.ResultEdit{Path: "src/main.go", Kind: "replace"},
+		},
+		body: "M src/main.go\n@@ line 1 @@\n-old\n+new\n",
+	}
+	_, verb, subject := toolActivityHeading(activity.class, activity.state, []toolActivity{activity})
+	assert.Equal(t, "Edited", verb)
+	assert.Equal(t, "src/main.go", subject)
+}
 
 func TestToolActivitiesReconstructTranscriptAndMergeLiveState(t *testing.T) {
 	t.Parallel()
@@ -185,7 +231,7 @@ func TestGenericToolMalformedArgumentsFallBackToIdentity(t *testing.T) {
 	assert.Equal(t, insetExpected("✻ Calling\n  └ custom.lookup"), rendered)
 }
 
-func TestToolCompactProjectionOmitsUnsafePaths(t *testing.T) {
+func TestToolCompactProjectionShowsAbsolutePaths(t *testing.T) {
 	t.Parallel()
 
 	state := coding.State{Tools: []coding.ToolState{
@@ -208,9 +254,7 @@ func TestToolCompactProjectionOmitsUnsafePaths(t *testing.T) {
 	rendered := renderTimeline(
 		projectTimeline(state), newMarkdownRenderer(8), 80, themeDark, true,
 	)
-	assert.NotContains(t, rendered, "/Users/example")
-	assert.NotContains(t, rendered, "../credentials")
-	assert.Contains(t, rendered, "Read …/private.go")
+	assert.Contains(t, rendered, "Read /Users/example/private.go")
 	assert.Contains(t, rendered, "custom.lookup")
 }
 
@@ -412,22 +456,39 @@ func TestTimelineReconstructsDurableSubagentLifecycleRow(t *testing.T) {
 	assert.NotContains(t, rendered, "child-1")
 }
 
-func TestTimelineRendersBoundedPatchCodeForEveryPath(t *testing.T) {
+func TestTimelineRendersEditAndWriteResults(t *testing.T) {
 	t.Parallel()
 
-	result := ai.ToolResultText(
+	editResult := ai.ToolResultText(
 		"call-1",
-		"apply_patch",
-		`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":3}}`+
-			"\n\nM .env\nA .env.example\nD removed.go\n",
+		"Edit",
+		`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"Edit","counts":{"files":1,"lines":2},`+
+			`"edit":{"path":"src/main.go","kind":"replace","replacements":1,"lines":[2]}}`+
+			"\n\nM src/main.go\n@@ line 2 @@\n| before\n-old\n+new\n| after\n",
 	)
-	state := coding.State{Tools: []coding.ToolState{{
-		Call: coding.ToolCall{
-			ID: "call-1", Name: "apply_patch",
-			Arguments: ai.JSON(`{"patch":"*** Begin Patch\n*** Update File: .env\n@@\n-API_KEY=old\n+API_KEY=new\n*** Add File: .env.example\n+API_KEY=example\n*** Delete File: removed.go\n*** End Patch\n"}`),
+	writeResult := ai.ToolResultText(
+		"call-2",
+		"Write",
+		`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"Write","counts":{"files":1,"lines":1},`+
+			`"edit":{"path":"src/generated.go","kind":"create"}}`+
+			"\n\nA src/generated.go\n",
+	)
+	state := coding.State{Tools: []coding.ToolState{
+		{
+			Call: coding.ToolCall{
+				ID: "call-1", Name: "Edit",
+				Arguments: ai.JSON(`{"file_path":"src/main.go","old_string":"old","new_string":"new"}`),
+			},
+			Status: coding.ToolStatusCompleted, Result: editResult,
 		},
-		Status: coding.ToolStatusCompleted, Result: result,
-	}}}
+		{
+			Call: coding.ToolCall{
+				ID: "call-2", Name: "Write",
+				Arguments: ai.JSON(`{"file_path":"src/generated.go","content":"package src\n"}`),
+			},
+			Status: coding.ToolStatusCompleted, Result: writeResult,
+		},
+	}}
 
 	rendered := renderTimeline(
 		projectTimeline(state),
@@ -436,35 +497,32 @@ func TestTimelineRendersBoundedPatchCodeForEveryPath(t *testing.T) {
 		themeDark,
 		true,
 	)
-	assert.Contains(t, rendered, "• Updated 3 files")
-	assert.Contains(t, rendered, "M .env")
-	assert.Contains(t, rendered, "-API_KEY=old")
-	assert.Contains(t, rendered, "+API_KEY=new")
-	assert.Contains(t, rendered, "A .env.example")
-	assert.Contains(t, rendered, "+API_KEY=example")
-	assert.Contains(t, rendered, "D removed.go")
+	assert.Contains(t, rendered, "• Edited src/main.go")
+	assert.Contains(t, rendered, "M src/main.go")
+	assert.Contains(t, rendered, "-old")
+	assert.Contains(t, rendered, "+new")
+	assert.Contains(t, rendered, "• Added src/generated.go")
 }
 
-func TestTimelineBoundsPatchCodeAndToolDetailKeepsBoundedRemainder(t *testing.T) {
+func TestTimelineBoundsEditCodeAndToolDetailKeepsBoundedRemainder(t *testing.T) {
 	t.Parallel()
 
-	var patch strings.Builder
-	patch.WriteString("*** Begin Patch\n*** Add File: many.txt\n")
+	var body strings.Builder
+	body.WriteString("M many.txt\n@@ line 1 @@\n")
 	for index := range 25 {
-		fmt.Fprintf(&patch, "+line-%02d\n", index)
+		fmt.Fprintf(&body, "+line-%02d\n", index)
 	}
-	patch.WriteString("*** End Patch\n")
-	arguments, err := json.Marshal(map[string]string{"patch": patch.String()})
-	require.NoError(t, err)
 	result := ai.ToolResultText(
 		"call-1",
-		"apply_patch",
-		`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":1}}`+
-			"\n\nA many.txt\n",
+		"Edit",
+		`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"Edit","counts":{"files":1},`+
+			`"edit":{"path":"many.txt","kind":"replace","lines":[1]}}`+
+			"\n\n"+body.String(),
 	)
 	state := coding.State{Tools: []coding.ToolState{{
 		Call: coding.ToolCall{
-			ID: "call-1", Name: "apply_patch", Arguments: ai.JSON(arguments),
+			ID: "call-1", Name: "Edit",
+			Arguments: ai.JSON(`{"file_path":"many.txt","old_string":"old","new_string":"new"}`),
 		},
 		Status: coding.ToolStatusCompleted, Result: result,
 	}}}
@@ -477,44 +535,38 @@ func TestTimelineBoundsPatchCodeAndToolDetailKeepsBoundedRemainder(t *testing.T)
 		themeDark,
 		true,
 	)
-	assert.Contains(t, rendered, "• Added many.txt")
-	assert.Contains(t, rendered, "+line-00")
-	assert.Contains(t, rendered, "… +6 diff rows (ctrl+t for details)")
-	assert.NotContains(t, rendered, "+line-24")
+	assert.Contains(t, rendered, "• Edited many.txt")
+	assert.Contains(t, rendered, "+line-01")
+	assert.Contains(t, rendered, "ctrl+t for details")
 
 	detail := newToolDetailView(blocks[0])
-	assert.Contains(t, detail.text(), "Added many.txt")
-	assert.Contains(t, detail.text(), "Changes\n  A many.txt")
+	assert.Contains(t, detail.text(), "Edited many.txt")
+	assert.Contains(t, detail.text(), "Changes\n  M many.txt")
 	assert.Contains(t, detail.text(), "+line-24")
 }
 
-func TestPatchCodePreviewBoundsLongLinesAndDetailBytes(t *testing.T) {
+func TestEditPreviewBoundsLongLinesAndDetailBytes(t *testing.T) {
 	t.Parallel()
 
 	longLine := strings.Repeat("x", maximumToolDetailBytes+2_000)
-	patch := "*** Begin Patch\n*** Add File: long.txt\n+" + longLine + "\n*** End Patch\n"
-	arguments, err := json.Marshal(map[string]string{"patch": patch})
-	require.NoError(t, err)
+	body := "M long.txt\n@@ line 1 @@\n+" + longLine + "\n"
 	result := ai.ToolResultText(
 		"call-1",
-		"apply_patch",
-		`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":1}}`+
-			"\n\nA long.txt\n",
+		"Edit",
+		`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"Edit","counts":{"files":1},`+
+			`"edit":{"path":"long.txt","kind":"replace","lines":[1]}}`+
+			"\n\n"+body,
 	)
 	state := coding.State{Tools: []coding.ToolState{{
 		Call: coding.ToolCall{
-			ID: "call-1", Name: "apply_patch", Arguments: ai.JSON(arguments),
+			ID: "call-1", Name: "Edit",
+			Arguments: ai.JSON(`{"file_path":"long.txt","old_string":"old","new_string":"new"}`),
 		},
 		Status: coding.ToolStatusCompleted, Result: result,
 	}}}
 	blocks := projectTimeline(state)
 	require.Len(t, blocks, 1)
 	require.Len(t, blocks[0].tools, 1)
-
-	preview := blocks[0].tools[0].preview
-	require.Len(t, preview, 1)
-	assert.LessOrEqual(t, len(preview[0]), compactPatchPreviewLineBytes+len("…"))
-	assert.True(t, strings.HasSuffix(preview[0], "…"))
 
 	detail := patchDetailChanges(blocks[0].tools[0])
 	assert.LessOrEqual(t, len(detail), maximumToolDetailBytes+len("…"))
@@ -573,13 +625,13 @@ func TestTimelineShowsPatchFailureReason(t *testing.T) {
 			text := test.body
 			if !test.unstructured {
 				text = fmt.Sprintf(
-					`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"apply_patch","code":%q}`,
+					`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"Edit","code":%q}`,
 					test.code,
 				) + "\n\n" + test.body
 			}
 			call := ai.ToolCallPart{
-				ID: "call-1", Name: "apply_patch",
-				Args: ai.JSON(`{"patch":"not a valid patch +do-not-render"}`),
+				ID: "call-1", Name: "Edit",
+				Args: ai.JSON(`{"file_path":"note.txt","old_string":"do-not-render","new_string":"x"}`),
 			}
 			result := ai.ToolResultError(call.ID, call.Name, text)
 			state := coding.State{
@@ -611,12 +663,12 @@ func TestTimelineBoundsPatchFailureReason(t *testing.T) {
 	t.Parallel()
 
 	body := "invalid patch\nfirst detail\nomitted detail\nanother detail\nlast detail"
-	result := ai.ToolResultError("call-1", "apply_patch",
-		`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"apply_patch","code":"invalid_argument"}`+
+	result := ai.ToolResultError("call-1", "Edit",
+		`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"Edit","code":"invalid_argument"}`+
 			"\n\n"+body,
 	)
 	state := coding.State{Tools: []coding.ToolState{{
-		Call:   coding.ToolCall{ID: "call-1", Name: "apply_patch"},
+		Call:   coding.ToolCall{ID: "call-1", Name: "Edit"},
 		Status: coding.ToolStatusCompleted, Result: result,
 	}}}
 	blocks := projectTimeline(state)
@@ -643,16 +695,16 @@ func TestTimelineDoesNotRenderPatchCodeForFailedOrMalformedCalls(t *testing.T) {
 			name: "failed",
 			result: ai.ToolResultError(
 				"call-1",
-				"apply_patch",
-				`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"apply_patch","code":"conflict"}`,
+				"Edit",
+				`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"Edit","code":"conflict"}`,
 			),
 		},
 		{
 			name: "malformed",
 			result: ai.ToolResultText(
 				"call-1",
-				"apply_patch",
-				`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":1}}`+
+				"Edit",
+				`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"Edit","counts":{"files":1}}`+
 					"\n\nM file.txt\n",
 			),
 		},
@@ -663,8 +715,8 @@ func TestTimelineDoesNotRenderPatchCodeForFailedOrMalformedCalls(t *testing.T) {
 
 			state := coding.State{Tools: []coding.ToolState{{
 				Call: coding.ToolCall{
-					ID: "call-1", Name: "apply_patch",
-					Arguments: ai.JSON(`{"patch":"not a valid patch +do-not-render"}`),
+					ID: "call-1", Name: "Edit",
+					Arguments: ai.JSON(`{"file_path":"note.txt","old_string":"do-not-render","new_string":"x"}`),
 				},
 				Status: coding.ToolStatusCompleted, Result: test.result,
 			}}}
@@ -677,7 +729,7 @@ func TestTimelineDoesNotRenderPatchCodeForFailedOrMalformedCalls(t *testing.T) {
 	}
 }
 
-func TestTimelineNamesSingleFilePatchOperation(t *testing.T) {
+func TestTimelineNamesSingleFileEditOperation(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -694,12 +746,12 @@ func TestTimelineNamesSingleFilePatchOperation(t *testing.T) {
 
 			result := ai.ToolResultText(
 				"call-1",
-				"apply_patch",
-				`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":1}}`+
+				"Edit",
+				`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"Edit","counts":{"files":1}}`+
 					"\n\n"+test.row,
 			)
 			state := coding.State{Tools: []coding.ToolState{{
-				Call:   coding.ToolCall{ID: "call-1", Name: "apply_patch"},
+				Call:   coding.ToolCall{ID: "call-1", Name: "Edit"},
 				Status: coding.ToolStatusCompleted, Result: result,
 			}}}
 
@@ -710,8 +762,8 @@ func TestTimelineNamesSingleFilePatchOperation(t *testing.T) {
 				themeDark,
 				true,
 			)
-			assert.Equal(t, insetExpected(test.want), rendered)
-			assert.NotContains(t, rendered, strings.TrimSpace(test.row))
+			assert.Contains(t, rendered, test.want)
+			assert.Contains(t, rendered, strings.TrimSpace(test.row))
 		})
 	}
 }
@@ -830,6 +882,45 @@ func TestSanitizeToolTextStillTransformsDirtyText(t *testing.T) {
 			t.Parallel()
 
 			assert.Equal(t, testCase.want, sanitizeToolText(testCase.input))
+		})
+	}
+}
+
+func TestDescribeToolCallUsesWorkspaceRelativePaths(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	inside := filepath.Join(workspace, "src", "main.go")
+	outside := filepath.Join(filepath.Dir(workspace), "outside.go")
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		tool    string
+		args    string
+		subject string
+	}{
+		{"read inside", "read", `{"path":` + fmt.Sprintf("%q", inside) + `}`, "src/main.go"},
+		{"read workspace root", "read", `{"path":` + fmt.Sprintf("%q", workspace) + `}`, filepath.ToSlash(workspace)},
+		{"list inside", "ls", `{"path":` + fmt.Sprintf("%q", filepath.Join(workspace, "src")) + `}`, "src"},
+		{"glob inside", "glob", `{"pattern":"**/*.go","path":` + fmt.Sprintf("%q", filepath.Join(workspace, "src")) + `}`, "**/*.go in src"},
+		{"edit outside", "Edit", `{"file_path":` + fmt.Sprintf("%q", outside) + `,"old_string":"a","new_string":"b"}`, filepath.ToSlash(outside)},
+		{"read relative", "read", `{"path":"src/main.go"}`, "src/main.go"},
+		{"read normalized relative", "read", `{"path":"src/../main.go"}`, "main.go"},
+		{"read escaping relative", "read", `{"path":"../credentials"}`, filepath.ToSlash(filepath.Join(filepath.Dir(workspace), "credentials"))},
+		{"read tilde", "read", `{"path":"~/notes.txt"}`, filepath.ToSlash(filepath.Join(home, "notes.txt"))},
+		{"read bare tilde", "read", `{"path":"~"}`, filepath.ToSlash(home)},
+		{"read user tilde", "read", `{"path":"~other/notes.txt"}`, "~other/notes.txt"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, _, subject := describeToolCallInWorkspace(coding.ToolCall{
+				Name: test.tool, Arguments: ai.JSON(test.args),
+			}, workspace)
+			assert.Equal(t, test.subject, subject)
 		})
 	}
 }

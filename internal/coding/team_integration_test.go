@@ -658,15 +658,14 @@ func (m *conflictingDependencyModel) Generate(
 		if key == "right-change" {
 			content = "right\n"
 		}
-		arguments, err := json.Marshal(struct {
-			Patch string `json:"patch"`
-		}{Patch: "*** Begin Patch\n*** Add File: shared.txt\n+" +
-			strings.TrimSuffix(content, "\n") + "\n*** End Patch"})
+		arguments, err := json.Marshal(map[string]string{
+			"file_path": "shared.txt", "old_string": "", "new_string": content,
+		})
 		if err != nil {
 			return nil, err
 		}
 
-		return runtimeToolResponse("write-"+key, "apply_patch", string(arguments)), nil
+		return runtimeToolResponse("write-"+key, "Edit", string(arguments)), nil
 	}
 	if call == 2 {
 		return runtimeTextResponse("Conflicting prerequisite result is ready for capture."), nil

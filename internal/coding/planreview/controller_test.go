@@ -127,7 +127,7 @@ func TestBeforeToolPausesOnlyOnPendingPlanDecisions(t *testing.T) {
 		},
 		{
 			name: "unrelated tool passes through", state: planmode.StateActive,
-			tool: "apply_patch", args: `{"patch":"*** Begin Patch\n*** End Patch"}`,
+			tool: "Edit", args: `{"file_path":"note.md","old_string":"a","new_string":"b"}`,
 			want: agent.ToolDecisionAllow,
 		},
 	}

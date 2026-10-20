@@ -243,9 +243,14 @@ A minimal mode and model configuration is:
 
 ```toml
 mode = "agent"
+edit_strategy = "replace" # none | replace | write_and_replace
 
 [providers.anthropic.models."model-id"]
 ```
+
+`edit_strategy` is a file-level setting with no CLI flag or environment
+override. Its values are `none`, `replace` (default), and
+`write_and_replace`.
 
 ### Deferred tool search
 
@@ -303,6 +308,35 @@ workspace stay refused. A path argument is cleaned of surrounding whitespace and
 quotes, trailing literal `\n`/`\r`/`\t`, and a leading `~` is expanded before
 resolution. A workspace absolute path that lost its leading slash is recognized
 when it names the workspace root or a path below it.
+
+The built-in workspace tools are `read`, `ls`, `glob`, `grep`, and the edit
+tools selected by `edit_strategy`. The default `replace` strategy offers only
+`Edit`: one exact string replacement per call, requiring a unique match unless
+`replace_all` is true, with CRLF line endings preserved and an empty
+`old_string` creating a new file or replacing the whole existing file. The
+optional `write_and_replace` strategy adds `Write`, which creates or overwrites
+one complete file and creates missing parent directories transactionally. Both
+are single-file `RiskWrite` tools; a multi-file change is multiple sequential
+calls, and each call passes approval, Plan Mode, and change attribution.
+
+`edit_strategy` accepts `none`, `replace`, or `write_and_replace` and defaults
+to `replace`. `none` offers no file-editing tool. The tools outside the active
+strategy are never registered, so Tool Search, leases, and subagent capability
+compilation cannot discover them. Plan mode always uses `Edit` for the exact
+plan file even when the configured strategy is `write_and_replace`.
+
+`ls` defaults to a recursive breadth-first tree with a 10,000-character budget,
+hidden and ignored entries omitted, case-insensitive name ordering, and collapsed
+directory summaries by extension. Passing `offset` or `limit` selects the
+compatibility mode that paginates immediate children.
+
+`grep` is implemented in Go and never invokes ripgrep. It searches a file or
+directory, skips hidden files, `.git`, and ignored paths, and supports glob,
+type, case-insensitive, fixed-string, context, multiline, and
+content/files/count modes. Content output defaults to 200 matching entries
+(maximum 2,000); file/count output defaults to 500 (maximum 10,000). Single files
+are capped at 5 MiB, lines at 1,000 characters, and the body at 40 KB. The
+default timeout is 20 seconds, raised to 60 seconds under WSL.
 
 ```toml
 [mcp_read_only_tools]
@@ -362,15 +396,17 @@ inside the Session-private directory. That directory is `0700` and the file is
 a `0600` regular file; replacement is atomic, symlinks and special files are
 rejected, UTF-8 and size bounds are enforced, and the file carries no metadata
 header. The model is given the absolute path by the prompt and writes it with
-the ordinary `apply_patch` Tool.
+the ordinary `Edit` Tool. Plan mode always exposes `Edit`; `Write` stays
+invisible even when `edit_strategy = "write_and_replace"`.
 
-While the gate is armed, `apply_patch` may only target that exact file. Any
-other target is rejected before execution with `Rejected: file edits are not
-allowed in plan mode - the only editable file is the plan file (<plan path>).`
-Plan-file writes are auto-approved: they create no permission request, are not
-recorded as workspace changes, and never appear in `git status`. Shell is not
-inspected, and Subagents are exempt from the gate because each Subagent
-evaluates it from its own state.
+While the gate is armed, `Edit` may only target that exact file. Every other
+workspace path, and every `Write` call that reaches the gate, is rejected before
+execution with `Rejected: file edits are not allowed in plan mode - the only
+editable file is the plan file (<plan path>).` Plan-file writes
+are auto-approved: they create no permission request, are not recorded as
+workspace changes, and never appear in `git status`. Shell is not inspected, and
+Subagents are exempt from the gate because each Subagent evaluates it from its
+own state.
 
 While plan mode is armed, each turn leads with a runtime reminder committed as a
 synthetic `<system-reminder>` user message immediately before the user's prompt.
@@ -379,8 +415,8 @@ byte-identical from turn to turn and provider prompt caching still covers the
 conversation. The full variant starts with `Plan mode is active. Do not make any
 edits or writes to the system.`, then a `## Plan File:` section that states
 either "A plan file exists at <path>. You can read it and make edits using the
-apply_patch tool." or "No plan written yet. Write your plan to <path> using the
-apply_patch tool.", followed by the instruction that this is the only editable
+Edit tool." or "No plan written yet. Write your plan to <path> using the
+Edit tool.", followed by the instruction that this is the only editable
 file and that the turn should end with `ask_user` or `exit_plan_mode`, plus the
 plan-iteration-versus-execution guidance. Consecutive turns alternate it with the
 one-line `Plan mode is still active. Do not make any edits or writes to the
@@ -889,7 +925,8 @@ roots and files with safe regular-file and permission checks.
 
 Each definition uses strict YAML front matter followed by a non-empty Markdown
 instruction body. Unknown and duplicate fields are rejected rather than
-ignored:
+ignored. `schema` is optional and defaults to `pips.agent/v1alpha1`; an explicit
+value must be that supported version:
 
 ```markdown
 ---
@@ -898,6 +935,7 @@ name: Go checker
 description: Inspect one bounded Go target and report evidence.
 model: inherit
 capability_mode: read-only
+edit_strategy: none
 visibility:
   user: true
   model: false
@@ -940,9 +978,17 @@ weakening the profile. Skills select only already loaded, trusted Skills, and
 source's input aliases accepted. It narrows the tool kinds a child may use and
 applies only when `tools.allow` is empty: an explicit allowlist already names its
 tools. `read-only` keeps read, list, glob, grep, session history, question, and
-Skill tools; `read-write` adds file editing; `execute` adds shell; `all` keeps
+Skill tools; `read-write` adds `Edit` and `Write` when the parent's delegable
+catalog contains them; `execute` adds shell; `all` keeps
 every delegable tool. Tools without a local source identity (MCP and extension
 tools) survive every mode.
+
+`edit_strategy` accepts `none`, `replace`, or `write_and_replace`. Omitted means
+inherit the parent Runtime's strategy. The built-in general-purpose type inherits;
+explore, plan, and review pin `none`. A profile can narrow the edit surface (for
+example to `none`); it cannot introduce an edit tool that the parent's strategy
+did not register. The final tool set is the intersection of the profile
+selection, `capability_mode`, and the parent's delegable catalog.
 
 A child cannot delegate further: `[subagents].max_depth` defaults to `1`, and the
 delegation tool is never offered to a child. The retired `delegation` frontmatter
@@ -978,11 +1024,12 @@ Definitions describe a specialization; they never grant authority. At launch,
 Pips freezes the intersection of the profile's selections with the active
 Runtime's delegable catalog, operating mode, Workspace trust, Sandbox,
 approval policy, model catalog, Skill/MCP generation, and per-call checks.
-Consequently a profile may request `apply_patch`, `shell`, an eligible MCP Tool,
-Tool Search, `ask_user`, a `capability_mode`, or an exact configured
-private integration, but it receives the capability only when every Runtime
-and generation check permits it. It cannot define credentials, endpoints,
-environment variables, commands, Sandbox or permission overrides, or a new
+Consequently a profile may request `Edit`, `Write`,
+`shell`, an eligible MCP Tool, Tool Search, `ask_user`, a `capability_mode`, an
+`edit_strategy`, or an exact configured private integration, but it receives the
+capability only when every Runtime and generation check permits it. It cannot
+define credentials, endpoints, environment variables, commands, Sandbox or
+permission overrides, or a new
 MCP/Hook process inline.
 
 Every admitted child receives its own approval, question, change-audit, and
@@ -1016,7 +1063,7 @@ pips --dynamic-subagents agents generate go-checker \
 
 `--definition` never writes the supplied file into an Agent root and never
 publishes it to the parent model. `agents run` is non-interactive: if its child
-needs a Shell/patch approval, an unknown-outcome decision, or a structured
+needs a Shell/edit approval, an unknown-outcome decision, or a structured
 answer, it returns the matching classified error rather than auto-approving or
 waiting indefinitely.
 
@@ -1967,7 +2014,8 @@ User themes are independent files below `$PIPS_HOME/themes` (normally
 `~/.pips/themes`). Discovery does not create the directory. A theme file's
 basename is its ID, so `themes/ocean.toml` defines `ocean`; the file cannot
 replace a built-in ID. Files must be regular non-symlinks without group/world
-write bits and use this schema:
+write bits. `schema` is optional and defaults to `pips.tui.theme/v1alpha1`; an
+explicit value must be that supported version. The file uses this shape:
 
 ```toml
 schema = "pips.tui.theme/v1alpha1"
@@ -2091,8 +2139,10 @@ An invalid entry, an unsupported transport, or a second name that derives the
 same ID is skipped with one `integration.diagnostic`; the other servers still
 load. A file that is not valid JSON, has an unknown schema or top-level field,
 or lacks the `mcpServers` object stops startup with an error, as other Pips
-configuration files do. A copied `{"mcpServers": ...}` file only needs the
-`"schema": "pips.mcp/v1alpha2"` line.
+configuration files do. `schema` is optional and defaults to
+`pips.mcp/v1alpha2`; an explicit value chooses that version or the legacy
+`pips.mcp/v1alpha1` shape. A copied `{"mcpServers": ...}` file needs no schema
+line.
 
 The previous `pips.mcp/v1alpha1` format (`"servers": [{"id": ..., "type":
 "streamable_http" | "stdio", ...}]`, absolute commands, no headers or env)

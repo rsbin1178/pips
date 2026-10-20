@@ -11,14 +11,13 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/tools"
-	patchdoc "github.com/rsbin1178/pips/internal/coding/tools/patch"
 )
 
 // planEditGate rejects file edits outside the plan file while plan mode is
 // armed. Plan-file edits are admitted and never reach permission prompts.
 func (r *Runtime) planEditGate() func(context.Context, agent.ToolCallInfo) agent.ToolDecision {
 	return func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
-		if info.Name != tools.ApplyPatchName || !r.PlanState().GateArmed() {
+		if !r.PlanState().GateArmed() {
 			return agent.ToolDecision{}
 		}
 
@@ -27,28 +26,27 @@ func (r *Runtime) planEditGate() func(context.Context, agent.ToolCallInfo) agent
 			return agent.DenyTool("plan file is unavailable")
 		}
 
-		patchText, err := decodePlanPatchArguments(info.Args)
-		if err != nil {
-			// Let the patch tool report its own argument error.
-			return agent.ToolDecision{}
-		}
-
-		limits := tools.DefaultLimits()
-		document, err := patchdoc.Parse(patchText, patchdoc.Limits{
-			Bytes: limits.PatchBytes, Files: limits.PatchFiles, PlanPath: store.Path(),
-		})
-		if err != nil {
-			// Let the patch tool report its own grammar error.
-			return agent.ToolDecision{}
-		}
-
-		for _, change := range document.Changes {
-			if change.Path != store.Path() {
+		switch info.Name {
+		case tools.EditName:
+			var args struct {
+				FilePath string `json:"file_path"`
+			}
+			if len(info.Args) > 0 {
+				if err := json.Unmarshal(info.Args, &args); err != nil {
+					// Let the Edit tool report its own argument error.
+					return agent.ToolDecision{}
+				}
+			}
+			if strings.TrimSpace(args.FilePath) != store.Path() {
 				return agent.DenyTool(planmode.EditRejection(store.Path()))
 			}
-		}
 
-		return agent.ToolDecision{}
+			return agent.ToolDecision{}
+		case tools.WriteName:
+			return agent.DenyTool(planmode.EditRejection(store.Path()))
+		default:
+			return agent.ToolDecision{}
+		}
 	}
 }
 
@@ -69,7 +67,7 @@ func (r *Runtime) planReminderText(current *interaction) string {
 	}
 
 	names := planmode.ReminderNames{
-		Edit: tools.ApplyPatchName, Ask: question.ToolName, Exit: planmode.ExitToolName,
+		Edit: tools.EditName, Ask: question.ToolName, Exit: planmode.ExitToolName,
 	}
 
 	full := r.takeFullPlanReminder()
@@ -187,7 +185,7 @@ func (r *Runtime) planStoreSnapshot() *planmode.Store {
 	return r.planStore
 }
 
-// planFileBoundary exposes the plan-mode file to the workspace patch tool.
+// planFileBoundary exposes the plan-mode file to the workspace Edit tool.
 func (r *Runtime) planFileBoundary() *tools.PlanFile {
 	store := r.planStoreSnapshot()
 	if store == nil {
@@ -228,15 +226,4 @@ func (r *Runtime) takeReturningReminder() bool {
 	r.planReturning = false
 
 	return taken
-}
-
-func decodePlanPatchArguments(data []byte) (string, error) {
-	var args struct {
-		Patch string `json:"patch"`
-	}
-	if err := json.Unmarshal(data, &args); err != nil {
-		return "", err
-	}
-
-	return args.Patch, nil
 }

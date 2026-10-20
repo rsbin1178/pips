@@ -314,7 +314,7 @@ func TestGoalVerifierDispatcherCompilesTheGeneralPurposeInventory(t *testing.T) 
 	}
 
 	assert.ElementsMatch(t, []string{
-		"read", "ls", "glob", "grep", "apply_patch", "shell",
+		"read", "ls", "glob", "grep", "shell",
 		tools.MonitorName, tools.KillBackgroundName, tools.HistoryName,
 	}, names)
 
@@ -523,7 +523,7 @@ func TestRuntimeGoalSpawnedPanelAchieves(t *testing.T) {
 		assert.Contains(t, task, "CHANGED_FILES:")
 		assert.Contains(t, task, "FINAL_RESPONSE:\ncandidate complete")
 		assert.Contains(t, task, "PLAN_FILE: (unavailable)")
-		assert.Contains(t, task, "read, ls, glob, grep, apply_patch, shell and monitor")
+		assert.Contains(t, task, "read, ls, glob, grep, shell and monitor")
 	}
 
 	report := goalVerifierPanelReport(t, runtime, state.ID)

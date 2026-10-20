@@ -533,7 +533,10 @@ func (s *childControlScope) buildCatalog(
 	if !found {
 		return nil, nil, nil, fmt.Errorf("%w: child controlled shell is unavailable", subagent.ErrInvalid)
 	}
-	localOptions := []tools.CatalogOption{tools.WithControlledShell(shell)}
+	localOptions := []tools.CatalogOption{
+		tools.WithEditStrategy(config.NormalizeEditStrategy(s.plan.EditStrategy)),
+		tools.WithControlledShell(shell),
+	}
 	// A child keeps the watch surface exactly when its capability mode does, and
 	// every watch it starts registers on the session's own registry, so its
 	// events land in the one conversation this Runtime owns rather than opening

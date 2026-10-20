@@ -86,9 +86,9 @@ func repeatedToolCall(name string) agent.ToolCallInfo {
 // catalog, so the read/plan tier is exercised rather than assumed.
 func guardWithRisks() *childToolGuard {
 	return &childToolGuard{risks: map[string]catalog.Risk{
-		"read":        catalog.RiskRead,
-		"apply_patch": catalog.RiskWrite,
-		"shell":       catalog.RiskPrivileged,
+		"read":  catalog.RiskRead,
+		"Edit":  catalog.RiskWrite,
+		"shell": catalog.RiskPrivileged,
 	}}
 }
 
@@ -140,20 +140,20 @@ func TestChildToolGuardNudgesAndStopsOtherRunsAtTheLooserThresholds(t *testing.T
 	before := guard.before(limits)
 
 	for call := 1; call <= 7; call++ {
-		decision := before(t.Context(), repeatedToolCall("apply_patch"))
+		decision := before(t.Context(), repeatedToolCall("Edit"))
 		require.Equal(t, agent.ToolDecisionAllow, decision.Action, "call %d", call)
 		assert.False(t, guard.stopWhen(agent.RunInfo{}), "call %d", call)
 	}
 
-	assert.Equal(t, agent.ToolDecisionDeny, before(t.Context(), repeatedToolCall("apply_patch")).Action)
+	assert.Equal(t, agent.ToolDecisionDeny, before(t.Context(), repeatedToolCall("Edit")).Action)
 	assert.False(t, guard.stopWhen(agent.RunInfo{}), "the 8th call only nudges")
 
 	for call := 9; call <= 11; call++ {
-		assert.Equal(t, agent.ToolDecisionDeny, before(t.Context(), repeatedToolCall("apply_patch")).Action, "call %d", call)
+		assert.Equal(t, agent.ToolDecisionDeny, before(t.Context(), repeatedToolCall("Edit")).Action, "call %d", call)
 		assert.False(t, guard.stopWhen(agent.RunInfo{}), "call %d", call)
 	}
 
-	assert.Equal(t, agent.ToolDecisionDeny, before(t.Context(), repeatedToolCall("apply_patch")).Action)
+	assert.Equal(t, agent.ToolDecisionDeny, before(t.Context(), repeatedToolCall("Edit")).Action)
 	assert.True(t, guard.stopWhen(agent.RunInfo{}), "the 12th call stops the run")
 	assert.Equal(t, subagent.StopCauseNoProgress, guard.stopCause())
 }
@@ -172,7 +172,7 @@ func TestChildToolGuardKeepsAMixedRunInTheLooserTier(t *testing.T) {
 	for index := range 10 {
 		call := repeatedToolCall("read")
 		if index%2 == 0 {
-			call = repeatedToolCall("apply_patch")
+			call = repeatedToolCall("Edit")
 		}
 
 		decision := before(t.Context(), call)
@@ -190,7 +190,7 @@ func TestChildToolGuardKeepsAMixedRunInTheLooserTier(t *testing.T) {
 		require.Equal(t, agent.ToolDecisionAllow, before(t.Context(), repeatedToolCall("read")).Action)
 	}
 
-	assert.Equal(t, agent.ToolDecisionAllow, before(t.Context(), repeatedToolCall("apply_patch")).Action)
+	assert.Equal(t, agent.ToolDecisionAllow, before(t.Context(), repeatedToolCall("Edit")).Action)
 
 	for call := 1; call <= 3; call++ {
 		require.Equal(t, agent.ToolDecisionAllow, before(t.Context(), repeatedToolCall("read")).Action, "call %d", call)

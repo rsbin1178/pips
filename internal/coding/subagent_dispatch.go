@@ -47,6 +47,7 @@ type customSubagentDispatcher struct {
 	generation        *IntegrationGeneration
 	factory           childScopeFactory
 	toolSearch        bool
+	editStrategy      config.EditStrategy
 	includeCustom     bool
 	presets           subagentPresets
 }
@@ -77,6 +78,7 @@ func newCustomSubagentDispatcher(
 	models childModelResolver,
 	factory childScopeFactory,
 	toolSearch bool,
+	editStrategy config.EditStrategy,
 	structuredResults bool,
 	includeCustom bool,
 	presets subagentPresets,
@@ -122,6 +124,7 @@ func newCustomSubagentDispatcher(
 		generation:        integration,
 		factory:           factory.clone(),
 		toolSearch:        toolSearch,
+		editStrategy:      config.NormalizeEditStrategy(editStrategy),
 		includeCustom:     includeCustom,
 		presets:           cloneSubagentPresets(presets),
 	}, nil
@@ -346,6 +349,7 @@ func (d *customSubagentDispatcher) Compile(
 		Skills:             slices.Clone(definition.Skills.Allow),
 		PreloadedSkills:    slices.Clone(definition.Skills.Preload),
 		ToolSearch:         definition.Tools.ToolSearch,
+		EditStrategy:       resolveChildEditStrategy(definition, d.editStrategy),
 		PrivateMCP:         privateMCP,
 		PrivateHooks:       privateHooks,
 		Limits:             limits,
@@ -689,6 +693,21 @@ func capabilityModeFor(
 	return intersectCapabilityModes(definition.CapabilityMode, requested)
 }
 
+// resolveChildEditStrategy applies a profile's explicit editing strategy or
+// inherits the parent's strategy. The resulting child catalog is still
+// intersected with the parent's delegable capabilities, so a profile cannot
+// introduce an edit tool the parent never offered.
+func resolveChildEditStrategy(
+	definition agentprofile.Definition,
+	parent config.EditStrategy,
+) config.EditStrategy {
+	if definition.EditStrategy != "" {
+		return definition.EditStrategy
+	}
+
+	return config.NormalizeEditStrategy(parent)
+}
+
 // intersectCapabilityModes narrows two capability modes. The empty mode means
 // unconstrained, All is the identity, ReadOnly is the bottom, and the two
 // orthogonal modes (ReadWrite, Execute) intersect at ReadOnly.
@@ -757,7 +776,6 @@ func compileDelegableCapabilities(
 	return capabilities, nil
 }
 
-//nolint:goconst // The closed wire-name allowlist is intentionally visible at the authority boundary.
 func delegableDescriptor(descriptor catalog.Descriptor) bool {
 	if descriptor.Name == tools.HistoryName {
 		return childHistoryDescriptor(descriptor)
@@ -773,7 +791,7 @@ func delegableDescriptor(descriptor catalog.Descriptor) bool {
 		switch descriptor.Source.ID {
 		case "coding":
 			switch descriptor.Name {
-			case "read", "ls", "glob", "grep", "apply_patch", "shell",
+			case "read", "ls", "glob", "grep", tools.EditName, tools.WriteName, "shell",
 				tools.MonitorName, tools.KillBackgroundName:
 				return true
 			}
@@ -808,7 +826,7 @@ func capabilityModeAllows(mode agentprofile.CapabilityMode, descriptor catalog.D
 		switch descriptor.Name {
 		case "read", "ls", "glob", "grep":
 			return true
-		case "apply_patch":
+		case tools.EditName, tools.WriteName:
 			return mode == agentprofile.CapabilityReadWrite
 		case "shell", tools.MonitorName, tools.KillBackgroundName:
 			// A watch starts and stops processes, exactly as shell does, so it
