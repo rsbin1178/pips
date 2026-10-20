@@ -229,6 +229,13 @@ func (m *Model) toolDetailPositionLabel() string {
 }
 
 func newToolDetailView(block timelineBlock) toolDetailView {
+	return newToolDetailViewInWorkspace(block, "")
+}
+
+// newToolDetailViewInWorkspace renders the detail page with workspace-relative
+// path arguments. The empty-workspace wrapper keeps existing callers and tests
+// on the raw argument spelling.
+func newToolDetailViewInWorkspace(block timelineBlock, workspace string) toolDetailView {
 	view := toolDetailView{title: toolDetailTitle(block)}
 	rows := make([]toolDetailRow, 0, len(block.tools)*8)
 	budget := newDetailByteBudget(maximumToolDetailBytes)
@@ -250,7 +257,7 @@ func newToolDetailView(block timelineBlock) toolDetailView {
 		if index > 0 {
 			rows = append(rows, toolDetailRow{})
 		}
-		rows = append(rows, toolDetailCallRows(index+1, activity, budget)...)
+		rows = append(rows, toolDetailCallRows(index+1, activity, budget, workspace)...)
 	}
 	// The section budgets already reserve room for every part; the clamp is the
 	// document-wide backstop measured against the same byte limit.
@@ -325,7 +332,12 @@ func toolDetailTitle(block timelineBlock) string {
 
 // toolDetailCallRows renders one call: heading, facts, arguments/changes,
 // progress, and the result or error body.
-func toolDetailCallRows(index int, activity toolActivity, budget *detailByteBudget) []toolDetailRow {
+func toolDetailCallRows(
+	index int,
+	activity toolActivity,
+	budget *detailByteBudget,
+	workspace string,
+) []toolDetailRow {
 	rows := make([]toolDetailRow, 0, 12)
 	rows = append(rows, detailHeadingRowFor(index, activity))
 	budget.spend(len(activity.subject) + len(activity.update))
@@ -337,7 +349,7 @@ func toolDetailCallRows(index int, activity toolActivity, budget *detailByteBudg
 
 		return rows
 	}
-	rows = append(rows, toolDetailArgumentRows(activity, budget)...)
+	rows = append(rows, toolDetailArgumentRows(activity, budget, workspace)...)
 
 	if changes := patchDetailChanges(activity); changes != "" {
 		rows = append(rows, detailSection("Changes"))
@@ -464,12 +476,16 @@ func detailHeadingRowFor(index int, activity toolActivity) toolDetailRow {
 // the document budget, so the Result/Error body always has room of its own. A
 // dispatch call renders the target's own argument object, which is the argument
 // tree the call it made carries.
-func toolDetailArgumentRows(activity toolActivity, budget *detailByteBudget) []toolDetailRow {
+func toolDetailArgumentRows(
+	activity toolActivity,
+	budget *detailByteBudget,
+	workspace string,
+) []toolDetailRow {
 	if _, input, ok := detailDispatchArguments(activity); ok && len(input) > 0 {
 		activity.arguments = input
 	}
 
-	fields, ok := detailArgumentFields(activity)
+	fields, ok := detailArgumentFields(activity, workspace)
 	if !ok {
 		rows := []toolDetailRow{detailSection("Arguments")}
 		rows = append(rows, detailNoteRow("[invalid arguments omitted]"))
@@ -505,7 +521,7 @@ func toolDetailArgumentRows(activity toolActivity, budget *detailByteBudget) []t
 // detailArgumentFields decodes the call arguments into redacted, ordered
 // fields. A non-object or malformed payload reports false so callers degrade to
 // identity instead of failing.
-func detailArgumentFields(activity toolActivity) ([]jsonTreeField, bool) {
+func detailArgumentFields(activity toolActivity, workspace string) ([]jsonTreeField, bool) {
 	if len(activity.arguments) == 0 {
 		return nil, true
 	}
@@ -515,7 +531,44 @@ func detailArgumentFields(activity toolActivity) ([]jsonTreeField, bool) {
 		return nil, false
 	}
 
-	return detailRedactFields(value.fields), true
+	fields := detailRedactFields(value.fields)
+	if workspace != "" {
+		fields = detailWorkspaceFields(fields, workspace)
+	}
+
+	return fields, true
+}
+
+// detailWorkspaceFields rewrites display-only path arguments so a path inside
+// the workspace reads as a relative path and the root reads as ".".
+func detailWorkspaceFields(fields []jsonTreeField, workspace string) []jsonTreeField {
+	for index := range fields {
+		switch fields[index].key {
+		case "path", "file_path", "cwd":
+			fields[index].value = detailWorkspacePath(fields[index].value, workspace)
+		case "write_paths":
+			if fields[index].value.kind == jsonTreeList {
+				for item := range fields[index].value.list {
+					fields[index].value.list[item] = detailWorkspacePath(
+						fields[index].value.list[item],
+						workspace,
+					)
+				}
+			}
+		}
+	}
+
+	return fields
+}
+
+func detailWorkspacePath(value jsonTreeValue, workspace string) jsonTreeValue {
+	if value.kind != jsonTreeScalar || value.scalar == "" {
+		return value
+	}
+
+	value.scalar = safeWorkspaceToolPathIn(value.scalar, workspace)
+
+	return value
 }
 
 func detailRedactFields(fields []jsonTreeField) []jsonTreeField {
