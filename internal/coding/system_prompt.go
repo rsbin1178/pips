@@ -276,7 +276,8 @@ func writeModeGuidance(prompt *strings.Builder, options systemPromptOptions, too
 	}
 
 	if _, ok := available[question.ToolName]; ok {
-		prompt.WriteString("- Prefer ask_user when a decision would materially affect the work and can be expressed as bounded choices; use its structured options instead of presenting a selection menu in assistant text.\n")
+		prompt.WriteString("- Use ask_user when a decision would materially affect the work. Submit 1-4 questions in one call; each is a single- or multiple-select choice, or a free-text question with kind \"text\". Combine the turn's decisions into that call and keep ask_user out of tool batches.\n")
+		prompt.WriteString("- Prefer ask_user's structured options over presenting a selection menu in assistant text.\n")
 		prompt.WriteString("- Continue independently when the answer can be inferred safely or deferred without materially changing the result.\n")
 	}
 

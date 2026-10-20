@@ -445,6 +445,9 @@ func newChildControlScope(
 		// The capability gate runs first, so the refusal it writes is what every
 		// later hook observes and what reaches the provider.
 		extension.Hooks{AfterTool: mediaGateAfterTool(factory.model)},
+		// The question preflight classifies the whole response without pausing,
+		// so capability gates still decide each call's availability.
+		extension.Hooks{BeforeTool: scope.questions.BeforeBatch},
 		extension.Hooks{BeforeTool: scope.guard.before(scope.plan.Limits)},
 		extension.Hooks{BeforeTool: scope.hooks.beforeTool},
 		extension.Hooks{BeforeTool: leasedToolGuard(scope.factory.mode, descriptors, searchName, dispatchName, allTools)},

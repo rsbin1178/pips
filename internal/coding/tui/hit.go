@@ -33,6 +33,10 @@ type frameHitMap struct {
 	// showing rather than to the transcript behind it.
 	composerTop  int
 	composerRows int
+	// question is the painted question band's pointer map. It is empty unless the
+	// frame drew a structured question, and then every row was aligned with the
+	// rows that survived the band budget and the frame clamp.
+	question questionPromptHit
 }
 
 // frameRowOf reports the frame row the first line of the band at index was
@@ -119,6 +123,12 @@ func (m *Model) handleMouse(message tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 
+	// The question band is a control surface of its own. It owns its rows while it
+	// is open, including while the transcript behind it is not selectable.
+	if command, handled := m.questionPromptMouse(message); handled {
+		return command
+	}
+
 	// The tasks pane owns the pointer rows it painted: it is a control surface,
 	// not part of the transcript's selection gesture.
 	if command, handled := m.tasksPaneMouse(message); handled {
@@ -175,6 +185,10 @@ func (m *Model) activateEntry(row int) tea.Cmd {
 
 	if len(block.tools) > 0 && block.tools[0].childSessionID != "" {
 		return m.openSubagentRoute(block.tools[0].childSessionID)
+	}
+
+	if block.kind == blockQuestion {
+		return m.openToolDetailRoute(newQuestionDetailView(block))
 	}
 
 	return m.openToolDetailRoute(newToolDetailView(block))

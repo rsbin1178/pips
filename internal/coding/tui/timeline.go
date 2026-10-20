@@ -50,11 +50,20 @@ const (
 )
 
 const (
-	completionGlyph       = "▣"
-	errorAccentBar        = "▌"
-	questionAnsweredTitle = "Question answered"
-	questionFailedTitle   = "Question failed"
-	planApprovedTitle     = "Plan · Approved"
+	completionGlyph             = "▣"
+	errorAccentBar              = "▌"
+	questionAnsweredTitle       = "User answered the questions"
+	questionAnsweredSingleTitle = "User answered the question"
+	questionDiscussedTitle      = "User discussed the question"
+	questionCanceledTitle       = "Question canceled"
+	questionFailedTitle         = "Question failed"
+	questionNotSentSingleTitle  = "Question not sent"
+	questionNotSentTitle        = "Questions not sent"
+	questionAnswerBranch        = "  └ "
+	questionStatusAnswered      = "answered"
+	questionStatusCanceled      = "canceled"
+	questionStatusFailed        = "failed"
+	planApprovedTitle           = "Plan · Approved"
 	// subagentLabel leads every spawn's lifecycle row in the parent transcript.
 	subagentLabel = "Subagent "
 )
@@ -139,8 +148,13 @@ type timelineRenderOptions struct {
 // instead carries a pre-rendered row that is not a completion (today, the
 // plan-mode transition lines), and its outcome fields are unused.
 type completionMarker struct {
-	interactionID  string
-	afterMessages  int
+	interactionID string
+	afterMessages int
+	// afterDigest names the message the marker followed. A tool result can be
+	// inserted ahead of the last assistant message after the interaction ends,
+	// so a count alone would drift above the answer. The digest keeps the row
+	// anchored to that message across the insertion.
+	afterDigest    uint64
 	outcome        coding.InteractionOutcome
 	stop           agent.StopReason
 	durationMillis int64
@@ -406,18 +420,154 @@ func appendCommittedActivityBlock(
 			return blocks, 0
 		}
 
-		return append(blocks, block), block.position
+		return appendQuestionBatchBlock(blocks, block), block.position
 	}
 
 	if isSubagentToolName(activity.name) {
 		block = projectSubagentToolActivity(activity, state.Subagents)
 
-		return append(blocks, block), block.position
+		return appendQuestionBatchBlock(blocks, block), block.position
 	}
 
 	block = projectToolActivity(activity)
 
-	return append(blocks, block), block.position
+	return appendQuestionBatchBlock(blocks, block), block.position
+}
+
+// appendQuestionBatchBlock appends one card, collapsing the per-call failures
+// of a rejected ask batch into the previous card. Every rejected call still has
+// its own model-facing result; only the conversation view is deduplicated.
+//
+//nolint:gocyclo // Card identity, title, body, and tool ordering are one merge boundary.
+func appendQuestionBatchBlock(blocks []timelineBlock, block timelineBlock) []timelineBlock {
+	if !isQuestionFailureBlock(block) || len(blocks) == 0 {
+		return append(blocks, block)
+	}
+
+	last := &blocks[len(blocks)-1]
+	if !isQuestionFailureBlock(*last) || !sameBatchFailure(*last, block) ||
+		!mergeableQuestionFailures(*last, block) {
+		return append(blocks, block)
+	}
+
+	merged := appendQuestionFirst(append(slices.Clone(last.tools), block.tools...))
+	askCount := 0
+	askResult := ""
+	mixedBatch := false
+
+	for _, activity := range merged {
+		if activity.name == question.ToolName || activity.name == question.TextToolName {
+			askCount++
+			if askResult == "" {
+				askResult = activity.result
+			}
+		}
+	}
+	if askCount == 0 {
+		return append(blocks, block)
+	}
+	for _, activity := range merged {
+		if strings.HasPrefix(strings.TrimSpace(activity.result), question.MixedBatchErrorPrefix) {
+			mixedBatch = true
+
+			break
+		}
+	}
+
+	last.kind = blockQuestion
+	last.tools = merged
+	last.status = questionStatusFailed
+	switch {
+	case askCount > 1:
+		last.title = questionNotSentTitle
+	case mixedBatch:
+		last.title = questionNotSentSingleTitle
+	}
+	for _, activity := range merged {
+		if activity.name == question.ToolName || activity.name == question.TextToolName {
+			last.id = activity.id
+
+			break
+		}
+	}
+	if askResult != "" {
+		last.body = strings.TrimSpace(askResult)
+	}
+
+	return blocks
+}
+
+func appendQuestionFirst(tools []toolActivity) []toolActivity {
+	for index, activity := range tools {
+		if activity.name == question.ToolName || activity.name == question.TextToolName {
+			if index == 0 {
+				return tools
+			}
+
+			first := tools[index]
+			copy(tools[1:index+1], tools[:index])
+			tools[0] = first
+
+			return tools
+		}
+	}
+
+	return tools
+}
+
+func isQuestionFailureBlock(block timelineBlock) bool {
+	if block.kind != blockTool && block.kind != blockQuestion || len(block.tools) == 0 {
+		return false
+	}
+
+	activity := block.tools[0]
+
+	return activity.state == toolStateFailed || activity.state == toolStateInterrupted
+}
+
+func isQuestionOnlyFailure(block timelineBlock) bool {
+	if len(block.tools) == 0 {
+		return false
+	}
+
+	for _, activity := range block.tools {
+		if activity.name != question.ToolName && activity.name != question.TextToolName {
+			return false
+		}
+	}
+
+	return true
+}
+
+func isMixedBatchFailure(block timelineBlock) bool {
+	if len(block.tools) == 0 {
+		return false
+	}
+
+	return strings.HasPrefix(
+		strings.TrimSpace(block.tools[0].result),
+		question.MixedBatchErrorPrefix,
+	)
+}
+
+func mergeableQuestionFailures(left, right timelineBlock) bool {
+	if isQuestionOnlyFailure(left) && isQuestionOnlyFailure(right) {
+		return true
+	}
+
+	return isMixedBatchFailure(left) && isMixedBatchFailure(right)
+}
+
+func sameBatchFailure(left, right timelineBlock) bool {
+	if len(left.tools) == 0 || len(right.tools) == 0 {
+		return false
+	}
+
+	leftActivity, rightActivity := left.tools[0], right.tools[0]
+
+	return leftActivity.turn == rightActivity.turn &&
+		leftActivity.position == rightActivity.position &&
+		strings.TrimSpace(leftActivity.result) == strings.TrimSpace(rightActivity.result)
 }
 
 // projectVolatileBlocks projects everything that can change while the transcript
@@ -428,17 +578,20 @@ func projectVolatileBlocks(state coding.State, tail []toolActivity) []timelineBl
 	for _, activity := range tail {
 		if block, handled, visible := projectProtocolToolActivity(activity); handled {
 			if visible {
-				blocks = append(blocks, block)
+				blocks = appendQuestionBatchBlock(blocks, block)
 			}
 
 			continue
 		}
 		if isSubagentToolName(activity.name) {
-			blocks = append(blocks, projectSubagentToolActivity(activity, state.Subagents))
+			blocks = appendQuestionBatchBlock(
+				blocks,
+				projectSubagentToolActivity(activity, state.Subagents),
+			)
 
 			continue
 		}
-		blocks = append(blocks, projectToolActivity(activity))
+		blocks = appendQuestionBatchBlock(blocks, projectToolActivity(activity))
 	}
 
 	// A live turn can stream reasoning before its answer; the Thinking block
@@ -907,23 +1060,32 @@ func projectQuestionToolActivity(activity toolActivity) (timelineBlock, bool) {
 	if activity.state == toolStateRunning {
 		return timelineBlock{}, false
 	}
+	// The model's ask_user call is committed before the Runtime pauses, but its
+	// result exists only after the user answers. Without a result it is waiting,
+	// not failed; the prompt band already shows the question.
+	if activity.state == toolStateInterrupted && strings.TrimSpace(activity.result) == "" {
+		return timelineBlock{}, false
+	}
 
 	block := timelineBlock{
-		kind: blockQuestion, position: activity.position,
+		kind: blockQuestion, id: activity.id, position: activity.position,
+		tools: []toolActivity{activity},
 	}
 	if (activity.state == toolStateFailed || activity.state == toolStateInterrupted) &&
 		activity.result == question.RejectionToolResult {
-		block.title = "Question canceled"
+		block.title = questionCanceledTitle
 		block.body = "No answer was submitted."
+		block.status = questionStatusCanceled
 
 		return block, true
 	}
 	if activity.state == toolStateFailed || activity.state == toolStateInterrupted {
 		block.title = questionFailedTitle
-		block.body = oneLineToolText(activity.result)
+		block.body = strings.TrimSpace(activity.result)
 		if block.body == "" {
 			block.body = "The structured question could not be opened."
 		}
+		block.status = questionStatusFailed
 
 		return block, true
 	}
@@ -931,53 +1093,69 @@ func projectQuestionToolActivity(activity toolActivity) (timelineBlock, bool) {
 	return projectAnsweredQuestionActivity(block, activity), true
 }
 
+func freeformQuestionPrompt(activity toolActivity) string {
+	var arguments struct {
+		Question string `json:"question"`
+	}
+	if json.Unmarshal(activity.arguments, &arguments) != nil {
+		return ""
+	}
+
+	return oneLineToolText(arguments.Question)
+}
+
 func projectAnsweredQuestionActivity(
 	block timelineBlock,
 	activity toolActivity,
 ) timelineBlock {
-	if activity.name == question.TextToolName {
-		var result struct {
-			Chat string `json:"chat"`
-		}
-		if json.Unmarshal([]byte(activity.result), &result) == nil && result.Chat != "" {
-			block.title = "Answered question"
-			block.body = result.Chat
-
-			return block
-		}
-
-		block.title = questionAnsweredTitle
-		block.body = "Free-form response submitted."
-
-		return block
-	}
-	var spec question.Spec
-	if err := json.Unmarshal(activity.arguments, &spec); err != nil ||
-		question.ValidateSpec(spec) != nil {
-		block.title = questionAnsweredTitle
-		block.body = "Structured response submitted."
-
-		return block
-	}
+	block.status = questionStatusAnswered
+	block.title = questionAnsweredTitle
 
 	var result struct {
 		Answers []question.Answer `json:"answers"`
 		Chat    string            `json:"chat"`
 	}
-	if err := json.Unmarshal([]byte(activity.result), &result); err != nil {
-		block.title = questionAnsweredTitle
-		block.body = "Structured response submitted."
+	resultOK := json.Unmarshal([]byte(activity.result), &result) == nil
+	if resultOK && result.Chat != "" {
+		if isFreeformQuestionActivity(activity) {
+			block.title = questionAnsweredSingleTitle
+			if prompt := freeformQuestionPrompt(activity); prompt != "" {
+				block.body = prompt + " → " + oneLineToolText(result.Chat)
+			} else {
+				block.body = result.Chat
+			}
 
-		return block
-	}
-	if result.Chat != "" {
-		block.title = "Discussed question"
+			return block
+		}
+
+		block.title = questionDiscussedTitle
 		block.body = result.Chat
 
 		return block
 	}
+
+	var spec question.Spec
+	specOK := json.Unmarshal(activity.arguments, &spec) == nil &&
+		question.ValidateSpec(spec) == nil
+	if !specOK {
+		block.title = questionAnsweredSingleTitle
+		if isFreeformQuestionActivity(activity) {
+			block.body = "Free-form response submitted."
+		} else {
+			block.body = "Structured response submitted."
+		}
+
+		return block
+	}
+	if len(spec.Questions) == 1 {
+		block.title = questionAnsweredSingleTitle
+	}
+	if !resultOK {
+		block.body = "Structured response submitted."
+
+		return block
+	}
 	if len(result.Answers) != len(spec.Questions) {
-		block.title = questionAnsweredTitle
 		block.body = "Structured response submitted."
 
 		return block
@@ -992,9 +1170,8 @@ func projectAnsweredQuestionActivity(
 		if value == "" {
 			value = "Answered"
 		}
-		lines = append(lines, spec.Questions[index].Header+": "+value)
+		lines = append(lines, oneLineToolText(spec.Questions[index].Question)+" → "+oneLineToolText(value))
 	}
-	block.title = "Answered questions"
 	block.body = strings.Join(lines, "\n")
 
 	return block
@@ -1886,8 +2063,53 @@ func renderTimelineBlockWithOptions(
 	if block.kind == blockCompaction {
 		return renderCompactionDividerBlock(block, width, theme, noColor)
 	}
+	if block.kind == blockQuestion {
+		return renderQuestionBlock(block, width, theme, noColor)
+	}
 
 	return renderRegularTimelineBlock(block, markdown, width, theme, noColor)
+}
+
+// renderQuestionBlock draws one answered or canceled ask_user call the way a
+// Tool card reads: a state glyph and heading, then the question/answer rows
+// under a branch. The card is the conversation record of the call; the prompt
+// band is gone once it is answered.
+func renderQuestionBlock(block timelineBlock, width int, theme colorTheme, noColor bool) string {
+	width = max(1, width)
+
+	state := toolStateSucceeded
+	switch block.status {
+	case "canceled":
+		state = toolStateInterrupted
+	case "failed":
+		state = toolStateFailed
+	}
+
+	heading := renderToolHeading(
+		toolActivityGlyph(state), block.title, "", state, width, theme, noColor,
+	)
+	body := strings.TrimSpace(block.body)
+	if body == "" {
+		return heading
+	}
+
+	rows := strings.Split(wrapPlainText(body, max(1, width-4)), "\n")
+	for index := range rows {
+		prefix := "    "
+		if index == 0 {
+			prefix = questionAnswerBranch
+		}
+		rows[index] = prefix + ansi.Truncate(
+			rows[index], max(1, width-lipgloss.Width(prefix)), "…",
+		)
+	}
+	if noColor {
+		return heading + "\n" + strings.Join(rows, "\n")
+	}
+
+	muted := lipgloss.NewStyle().Foreground(paletteFor(theme).muted)
+
+	return heading + "\n" + muted.Render(strings.Join(rows, "\n"))
 }
 
 // renderIncompleteReplyBlock renders an abandoned provisional answer as plain

@@ -140,6 +140,165 @@ func TestRuntimeCloseParkedOnQuestionIsClean(t *testing.T) {
 	assert.Contains(t, eventTypes(events), EventQuestionRequired)
 }
 
+func TestRuntimeRegistersOnlyUnifiedAskUserTool(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(runtimeTextResponse("no question needed"))
+	runtime := openTestRuntime(t, model)
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("inspect")))
+
+	requests := model.Requests()
+	require.NotEmpty(t, requests)
+
+	names := make([]string, 0, len(requests[0].Tools))
+	for _, tool := range requests[0].Tools {
+		names = append(names, tool.Name)
+	}
+
+	assert.Contains(t, names, question.ToolName)
+	assert.NotContains(t, names, question.TextToolName)
+}
+
+func TestRuntimeQuestionBatchQueuesEachCall(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(
+		runtimeQuestionBatchResponse(t, "call-1", "call-2", "call-3"),
+		runtimeTextResponse("all three answered"),
+	)
+	runtime := openTestRuntime(t, model)
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("ask three")))
+	assert.Contains(t, eventTypes(events), EventQuestionRequired)
+
+	first := runtime.Snapshot().Question.Required
+	require.NotNil(t, first)
+	assert.Equal(t, 1, first.QueueIndex)
+	assert.Equal(t, 3, first.QueueSize)
+
+	events = collectRuntimeEvents(t, runtime.ResolveQuestion(t.Context(), question.Resolution{
+		RequestID: first.ID, SchemaDigest: first.SchemaDigest,
+		Answers: []question.Answer{{Selections: []string{"React"}}},
+	}))
+	assert.Contains(t, eventTypes(events), EventQuestionResolved)
+	assert.Contains(t, eventTypes(events), EventQuestionRequired)
+
+	second := runtime.Snapshot().Question.Required
+	require.NotNil(t, second)
+	assert.Equal(t, 2, second.QueueIndex)
+	assert.Equal(t, 3, second.QueueSize)
+
+	events = collectRuntimeEvents(
+		t,
+		runtime.RejectQuestion(t.Context(), second.ID, second.SchemaDigest),
+	)
+	assert.Contains(t, eventTypes(events), EventQuestionRejected)
+	assert.Contains(t, eventTypes(events), EventQuestionRequired)
+
+	third := runtime.Snapshot().Question.Required
+	require.NotNil(t, third)
+	assert.Equal(t, 3, third.QueueIndex)
+	assert.Equal(t, 3, third.QueueSize)
+
+	events = collectRuntimeEvents(t, runtime.ResolveQuestion(t.Context(), question.Resolution{
+		RequestID: third.ID, SchemaDigest: third.SchemaDigest,
+		Answers: []question.Answer{{Selections: []string{"Vue"}}},
+	}))
+	assert.Contains(t, eventTypes(events), EventQuestionResolved)
+	assert.Equal(t, PhaseIdle, runtime.Snapshot().Phase)
+	assert.Nil(t, runtime.Snapshot().Question.Required)
+
+	requests := model.Requests()
+	require.Len(t, requests, 2)
+	results := runtimeToolResultsByID(requests[1])
+	require.Len(t, results, 3)
+	assert.Contains(t, toolResultText(requests[1], "call-1"), "React")
+	assert.True(t, results["call-2"].IsError)
+	assert.Contains(t, toolResultText(requests[1], "call-2"), "canceled")
+	assert.Contains(t, toolResultText(requests[1], "call-3"), "Vue")
+}
+
+func TestRuntimeMixedAskBatchIsDeniedAsOneUnit(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(
+		&ai.Response{
+			Provider: ai.ProviderOpenAI,
+			Model:    "runtime-test",
+			Message: ai.Assistant(
+				runtimeQuestionCall(t, "ask-1"),
+				ai.ToolCallPart{ID: "read-1", Name: "read", Args: ai.JSON(`{"path":"missing.txt"}`)},
+				runtimeQuestionCall(t, "ask-2"),
+			),
+			FinishReason: ai.FinishToolCalls,
+		},
+		runtimeTextResponse("retry separately"),
+	)
+	runtime := openTestRuntime(t, model)
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("ask and read")))
+	assert.NotContains(t, eventTypes(events), EventQuestionRequired)
+	assert.Equal(t, PhaseIdle, runtime.Snapshot().Phase)
+
+	requests := model.Requests()
+	require.Len(t, requests, 2)
+	results := runtimeToolResultsByID(requests[1])
+	require.Len(t, results, 3)
+
+	for _, id := range []string{"ask-1", "read-1", "ask-2"} {
+		assert.True(t, results[id].IsError)
+		assert.Contains(t, toolResultText(requests[1], id), question.MixedBatchErrorPrefix)
+	}
+}
+
+func runtimeQuestionBatchResponse(t *testing.T, ids ...string) *ai.Response {
+	t.Helper()
+
+	parts := make([]ai.AssistantPart, 0, len(ids))
+	for _, id := range ids {
+		parts = append(parts, runtimeQuestionCall(t, id))
+	}
+
+	return &ai.Response{
+		Provider: ai.ProviderOpenAI, Model: "runtime-test",
+		Message: ai.Assistant(parts...), FinishReason: ai.FinishToolCalls,
+	}
+}
+
+func runtimeQuestionCall(t *testing.T, id string) ai.ToolCallPart {
+	t.Helper()
+
+	args, err := json.Marshal(question.Spec{Questions: []question.Question{{
+		Header: "Framework", Question: "Which framework should be used?",
+		Options: []question.Option{
+			{Label: "React", Description: "Established ecosystem"},
+			{Label: "Vue", Description: "Progressive framework"},
+		},
+	}}})
+	require.NoError(t, err)
+
+	return ai.ToolCallPart{ID: id, Name: question.ToolName, Args: args}
+}
+
+func runtimeToolResultsByID(request ai.Request) map[string]ai.ToolResultPart {
+	results := make(map[string]ai.ToolResultPart)
+
+	for _, message := range request.Messages {
+		parts, err := ai.MessageParts(message)
+		if err != nil {
+			continue
+		}
+
+		for _, part := range parts {
+			if result, ok := part.(ai.ToolResultPart); ok {
+				results[result.ToolCallID] = result
+			}
+		}
+	}
+
+	return results
+}
+
 func runtimeQuestionResponse(t *testing.T, callID string) *ai.Response {
 	t.Helper()
 
