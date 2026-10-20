@@ -77,9 +77,7 @@ func TestLeasedToolGuardDeniesCallsOutsideSnapshot(t *testing.T) {
 		ToolCall: agent.ToolCall{Name: catalog.DefaultToolSearchName},
 	}).Action)
 	assert.Equal(t, agent.ToolDecisionAllow, guard(t.Context(), agent.ToolCallInfo{Name: tools.UseToolName}).Action)
-	denied := guard(t.Context(), agent.ToolCallInfo{
-		ToolCall: agent.ToolCall{Name: "Edit"},
-	})
+	denied := guard(t.Context(), agent.ToolCallInfo{Name: "Edit"})
 	assert.Equal(t, agent.ToolDecisionDeny, denied.Action)
 	assert.Contains(t, denied.Reason, "plan mode")
 

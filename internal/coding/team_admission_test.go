@@ -769,17 +769,11 @@ func TestLeadGuardClosesAlreadyLeasedInteractionCapabilities(t *testing.T) {
 
 	guard := &teamCapabilityGuard{}
 	hook := guard.beforeTool(descriptors)
-	assert.Equal(t, agent.ToolDecisionAllow, hook(t.Context(), agent.ToolCallInfo{
-		ToolCall: agent.ToolCall{Name: "Edit"},
-	}).Action)
+	assert.Equal(t, agent.ToolDecisionAllow, hook(t.Context(), agent.ToolCallInfo{Name: "Edit"}).Action)
 	require.NoError(t, guard.propose())
 	require.NoError(t, guard.activate("team-1"))
-	assert.Equal(t, agent.ToolDecisionDeny, hook(t.Context(), agent.ToolCallInfo{
-		ToolCall: agent.ToolCall{Name: "Edit"},
-	}).Action)
-	assert.Equal(t, agent.ToolDecisionAllow, hook(t.Context(), agent.ToolCallInfo{
-		ToolCall: agent.ToolCall{Name: "read"},
-	}).Action)
+	assert.Equal(t, agent.ToolDecisionDeny, hook(t.Context(), agent.ToolCallInfo{Name: "Edit"}).Action)
+	assert.Equal(t, agent.ToolDecisionAllow, hook(t.Context(), agent.ToolCallInfo{Name: "read"}).Action)
 }
 
 func validTeamProposalRequest() TeamProposalRequest {

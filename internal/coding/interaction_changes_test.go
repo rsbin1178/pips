@@ -108,7 +108,7 @@ func TestInteractionChangeTrackerClassifiesFailuresWithoutDetails(t *testing.T) 
 				Name: "Edit", Risk: catalog.RiskWrite,
 			}})
 
-			tracker.beforeTool(t.Context(), agent.ToolCallInfo{ToolCall: agent.ToolCall{Name: "Edit"}})
+			tracker.beforeTool(t.Context(), agent.ToolCallInfo{Name: "Edit"})
 
 			if tt.capture == nil {
 				_, _ = tracker.finish(t.Context())

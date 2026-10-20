@@ -74,6 +74,7 @@ func TestCatalogMetadataAndConcurrency(t *testing.T) {
 		},
 		grepDeclaration.InputSchema.Required,
 	)
+
 	for _, property := range []string{
 		"fixed_strings", "before_context", "after_context", "context",
 		"type", "multiline", "output_mode",
@@ -90,9 +91,11 @@ func TestCatalogMetadataAndConcurrency(t *testing.T) {
 		[]string{"file_path", "old_string", "new_string"},
 		editDeclaration.InputSchema.Required,
 	)
+
 	for _, property := range []string{"file_path", "old_string", "new_string", "replace_all"} {
 		assert.Contains(t, editDeclaration.InputSchema.Properties, property)
 	}
+
 	_, hasWrite := fixture.tools["Write"]
 	assert.False(t, hasWrite, "replace strategy exposes only Edit")
 }
