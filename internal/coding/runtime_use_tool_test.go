@@ -146,7 +146,7 @@ func TestRuntimeUseToolRefusesADirectlyVisibleToolWithoutRunningIt(t *testing.T)
 	server := newEchoMCPServer(t, "lookup")
 	model := newRuntimeModel(
 		runtimeToolResponse("call-1", "use_tool",
-			`{"tool_name":"apply_patch","tool_input":{"patch":"*** Begin Patch\n*** Add File: use-tool-proof.txt\n+proof\n*** End Patch\n"}}`),
+			`{"tool_name":"Edit","tool_input":{"file_path":"use-tool-proof.txt","old_string":"","new_string":"proof\n"}}`),
 		runtimeTextResponse("done"),
 	)
 	runtime, workspacePath := openUseToolRuntime(t, model, server)
@@ -157,7 +157,7 @@ func TestRuntimeUseToolRefusesADirectlyVisibleToolWithoutRunningIt(t *testing.T)
 	require.Contains(t, results, "call-1")
 	assert.True(t, results["call-1"].IsError)
 	assert.Equal(t,
-		`tool "apply_patch" is directly visible in this session; `+
+		`tool "Edit" is directly visible in this session; `+
 			"call it as its own tool call instead of routing it through use_tool",
 		toolResultTextOf(t, results["call-1"]))
 	// The controlled tool never ran: its own write would have landed.

@@ -228,3 +228,12 @@ func TestContentBlockFromMediaReplaysPersistedReference(t *testing.T) {
 	assert.NotEmpty(t, inline.Image.Data)
 	assert.Nil(t, inline.Image.Uri)
 }
+
+func TestToolKindMapsStructuredEdits(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, acpsdk.ToolKindEdit, toolKind("Edit"))
+	assert.Equal(t, acpsdk.ToolKindEdit, toolKind("Write"))
+	assert.Equal(t, acpsdk.ToolKindRead, toolKind("read"))
+	assert.NotEqual(t, acpsdk.ToolKindSearch, toolKind("Edit"))
+}

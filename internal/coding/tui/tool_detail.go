@@ -486,10 +486,10 @@ func toolDetailArgumentRows(activity toolActivity, budget *detailByteBudget) []t
 		}
 	}
 	if activity.class == toolClassPatch {
-		// A parsed diff already carries the patch text, so the raw field would
-		// only add an escaped duplicate. An unparsed patch stays visible.
-		if _, parsed := parsePatchDisplayChanges(activity); parsed {
-			_, fields, _ = detailTakeField(fields, "patch")
+		// The Changes section already renders the exact edit, so the duplicated
+		// content arguments would only add escaped noise.
+		for _, key := range []string{"old_string", "new_string", "content"} {
+			_, fields, _ = detailTakeField(fields, key)
 		}
 	}
 	if len(fields) == 0 {
@@ -609,25 +609,14 @@ func detailFieldRows(fields []jsonTreeField, budget *detailByteBudget) []toolDet
 	return rows
 }
 
-// detailResultRepeatsChanges reports whether a parsed patch result is only the
-// file list the Changes section already renders.
-func detailResultRepeatsChanges(activity toolActivity, body string) bool {
+// detailResultRepeatsChanges reports whether the result body is the edit
+// detail the Changes section already renders.
+func detailResultRepeatsChanges(activity toolActivity, _ string) bool {
 	if activity.class != toolClassPatch {
 		return false
 	}
-	if _, parsed := parsePatchDisplayChanges(activity); !parsed {
-		return false
-	}
 
-	for line := range strings.SplitSeq(strings.TrimSpace(body), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if len(trimmed) < 2 || (trimmed[0] != 'A' && trimmed[0] != 'M' && trimmed[0] != 'D') ||
-			trimmed[1] != ' ' {
-			return false
-		}
-	}
-
-	return true
+	return patchDetailChanges(activity) != ""
 }
 
 func toolDetailBodyLabel(activity toolActivity) (body, label string) {

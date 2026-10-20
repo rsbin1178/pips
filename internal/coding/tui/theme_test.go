@@ -407,9 +407,11 @@ func TestThemeFileBoundsAndStrictSchema(t *testing.T) {
 	writeThemeFile(t, directory, "missing-schema", "[palette]\nerror = \"#fff\"\n")
 
 	registry := loadThemeRegistry(directory)
-	assert.Len(t, registry.Entries(), builtinThemeCount()+2)
+	assert.Len(t, registry.Entries(), builtinThemeCount()+3)
 	assert.Contains(t, diagnosticCategories(registry), "size")
-	assert.Contains(t, diagnosticCategories(registry), "invalid")
+	assert.NotContains(t, diagnosticCategories(registry), "invalid")
+	_, found := registry.Resolve("missing-schema")
+	assert.True(t, found)
 }
 
 func TestThemeColorNormalization(t *testing.T) {

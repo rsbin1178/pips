@@ -15,6 +15,7 @@ import (
 	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 )
 
@@ -452,7 +453,11 @@ func (r *Runtime) teamProposalAgentTools(
 	ctx context.Context,
 	collector *teamProposalCollector,
 ) ([]agent.Tool, error) {
-	local, err := tools.NewCatalog(r.tree, r.opts.ToolLimits)
+	local, err := tools.NewCatalog(
+		r.tree,
+		r.opts.ToolLimits,
+		tools.WithEditStrategy(config.EditStrategyNone),
+	)
 	if err != nil {
 		return nil, err
 	}

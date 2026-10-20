@@ -243,3 +243,24 @@ func (f *fakeProjectGit) excludedPaths() []string {
 
 	return append([]string(nil), f.excluded...)
 }
+
+func TestPermissionsDefaultsOmittedSchema(t *testing.T) {
+	t.Parallel()
+
+	fixture := newPermissionFixture(t, true)
+	definitions := fixture.loadDefinitions(t, nil)
+	projectRoot := filepath.Join(fixture.workspace.Root(), filepath.FromSlash(paths.ProjectRoot()))
+	require.NoError(t, os.MkdirAll(projectRoot, 0o700))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectRoot, "permissions.toml"),
+		[]byte(""),
+		0o600,
+	))
+
+	err := fixture.permissions.Decide(
+		t.Context(),
+		definitions.List()[0],
+		workspace.PermissionAllow,
+	)
+	require.NoError(t, err)
+}

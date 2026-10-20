@@ -2136,6 +2136,7 @@ func (m *Model) composerBoxCursorOffset() (int, int) {
 func (m *Model) activityStatus() (activityStatus, bool) {
 	return resolveActivity(activityContext{
 		state:                      m.state,
+		workspace:                  m.options.Workspace,
 		isStarting:                 m.starting,
 		hasBridge:                  m.bridge != nil,
 		isCanceling:                m.canceling,

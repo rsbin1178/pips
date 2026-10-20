@@ -16,9 +16,9 @@ Dynamic Subagent 是 Coding Agent 应用层能力：定义发现/编译、child 
 - 前置条件：有效 Provider；custom gate 保持默认开启。
 - 隔离夹具：Workspace 含一个小型 Go package 与已知 diff。
 - 步骤：让 parent 调用 `spawn_subagent`（`run_in_background: false`）分别运行 builtin `explore` 查找证据、`plan` 给出实施步骤、`review` 审阅已知 diff；再省略 `subagent_type` 验证默认解析为 `general-purpose`。
-- 预期证据：每次调用创建独立 child Session，默认把最终 assistant 文本作为结果返回（`result` 是字符串）；设置 `[subagents].structured_results = true` 后恢复严格结构结果，explore evidence、plan steps/files、review findings/residual risks 本地校验；`general-purpose` 得到完整可委托目录，`explore`/`plan`/`review` 只得到只读工具（无 `apply_patch`、无 `shell`）；builtin 不受 `dynamic_subagents = false` 影响；child 无 parent transcript/写权限扩张；child 通过流式路径驱动模型。
+- 预期证据：每次调用创建独立 child Session，默认把最终 assistant 文本作为结果返回（`result` 是字符串）；设置 `[subagents].structured_results = true` 后恢复严格结构结果，explore evidence、plan steps/files、review findings/residual risks 本地校验；`general-purpose` 得到完整可委托目录，`explore`/`plan`/`review` 只得到只读工具（无 `Edit`、无 `Write`、无 `shell`）；builtin 不受 `dynamic_subagents = false` 影响；child 无 parent transcript/写权限扩张；child 通过流式路径驱动模型。
 - 通过条件：三角色成功、结果契约与配置一致、上限正确；parent 只得到有界结果，不得到 hidden reasoning。
-- 失败条件：关闭 custom 后 builtin 消失、只读类型拿到 `apply_patch`/`shell`、child 越权写入、或失败结果被当成功。
+- 失败条件：关闭 custom 后 builtin 消失、只读类型拿到 `Edit`/`Write`/`shell`、child 越权写入、或失败结果被当成功。
 - 清理/回滚：等待/取消所有 child 后退出；child Session 随隔离 home 清理。
 - 来源/测试锚点：[role.go](../../internal/coding/subagent/role.go)、[builtins.go](../../internal/coding/agentprofile/builtins.go)、[subagents_dispatch.go](../../internal/coding/subagent_dispatch.go)、[role_test.go](../../internal/coding/subagent/role_test.go)。
 - 结果：`未执行`。

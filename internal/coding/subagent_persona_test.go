@@ -135,7 +135,7 @@ func TestRuntimeAppliesRoleAndPersonaToBuiltinChild(t *testing.T) {
 	}
 
 	assert.Contains(t, capabilities, "read")
-	assert.NotContains(t, capabilities, "apply_patch")
+	assert.NotContains(t, capabilities, "Edit")
 	assert.NotContains(t, capabilities, "shell")
 
 	// The persona reminder is a persisted synthetic user item before the task,

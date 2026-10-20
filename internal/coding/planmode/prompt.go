@@ -30,7 +30,7 @@ type ReminderNames struct {
 // PlanReminder renders the plan-mode reminder injected with each request while
 // plan mode is active.
 func PlanReminder(planPath string, hasContent bool, names ReminderNames) string {
-	edit := orDefault(names.Edit, "edit")
+	edit := orDefault(names.Edit, "Edit")
 	ask := orDefault(names.Ask, "ask_user")
 	exit := orDefault(names.Exit, ExitToolName)
 

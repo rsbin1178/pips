@@ -21,7 +21,7 @@ func TestInteractionChangeTrackerCapturesOnlyBeforeMutation(t *testing.T) {
 	inspector := newChangeTrackerInspector(t)
 	tracker := newInteractionChangeTracker(inspector, []catalog.Descriptor{
 		{Name: "read", Risk: catalog.RiskRead},
-		{Name: "apply_patch", Risk: catalog.RiskWrite},
+		{Name: "Edit", Risk: catalog.RiskWrite},
 		{Name: "shell", Risk: catalog.RiskPrivileged},
 	})
 
@@ -31,7 +31,7 @@ func TestInteractionChangeTrackerCapturesOnlyBeforeMutation(t *testing.T) {
 	).Action)
 	assert.Equal(t, 0, inspector.captureCalls)
 
-	for _, name := range []string{"apply_patch", "shell"} {
+	for _, name := range []string{"Edit", "shell"} {
 		assert.Equal(t, agent.ToolDecisionAllow, tracker.beforeTool(
 			t.Context(),
 			agent.ToolCallInfo{ToolCall: agent.ToolCall{Name: name}},
@@ -105,10 +105,10 @@ func TestInteractionChangeTrackerClassifiesFailuresWithoutDetails(t *testing.T) 
 			inspector.captureErr = tt.capture
 			inspector.changeErr = tt.report
 			tracker := newInteractionChangeTracker(inspector, []catalog.Descriptor{{
-				Name: "apply_patch", Risk: catalog.RiskWrite,
+				Name: "Edit", Risk: catalog.RiskWrite,
 			}})
 
-			tracker.beforeTool(t.Context(), agent.ToolCallInfo{ToolCall: agent.ToolCall{Name: "apply_patch"}})
+			tracker.beforeTool(t.Context(), agent.ToolCallInfo{ToolCall: agent.ToolCall{Name: "Edit"}})
 
 			if tt.capture == nil {
 				_, _ = tracker.finish(t.Context())

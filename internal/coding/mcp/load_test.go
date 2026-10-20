@@ -409,12 +409,11 @@ func TestLoadDefinitionsV1Alpha2FileLevelViolationsFailClosed(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]string{
-		"standard file without schema": `{"mcpServers":{"exa":{"type":"http","url":"https://mcp.exa.ai/mcp"}}}`,
-		"unknown top-level field":      `{"schema":"pips.mcp/v1alpha2","mcpServers":{},"servers":[]}`,
-		"missing mcpServers":           `{"schema":"pips.mcp/v1alpha2"}`,
-		"non-object mcpServers":        `{"schema":"pips.mcp/v1alpha2","mcpServers":[]}`,
-		"duplicate nested key":         `{"schema":"pips.mcp/v1alpha2","mcpServers":{"a":{"command":"x","command":"y"}}}`,
-		"invalid JSON":                 `{"schema":"pips.mcp/v1alpha2",`,
+		"unknown top-level field": `{"schema":"pips.mcp/v1alpha2","mcpServers":{},"servers":[]}`,
+		"missing mcpServers":      `{"schema":"pips.mcp/v1alpha2"}`,
+		"non-object mcpServers":   `{"schema":"pips.mcp/v1alpha2","mcpServers":[]}`,
+		"duplicate nested key":    `{"schema":"pips.mcp/v1alpha2","mcpServers":{"a":{"command":"x","command":"y"}}}`,
+		"invalid JSON":            `{"schema":"pips.mcp/v1alpha2",`,
 	}
 
 	for name, content := range tests {
@@ -431,13 +430,19 @@ func TestLoadDefinitionsV1Alpha2FileLevelViolationsFailClosed(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestLoadDefinitionsDefaultsOmittedSchema(t *testing.T) {
+	t.Parallel()
 
 	layout, err := paths.New(t.TempDir())
 	require.NoError(t, err)
-	writeFile(t, layout.MCPFile(), tests["standard file without schema"])
-	_, _, err = codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
+	writeFile(t, layout.MCPFile(), `{"mcpServers":{"exa":{"type":"http","url":"https://mcp.exa.ai/mcp"}}}`)
+
+	definitions, _, err := codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
 		Paths: layout, Limits: codingmcp.DefaultLimits(),
 	})
-	require.ErrorIs(t, err, codingmcp.ErrInvalid)
-	assert.Contains(t, err.Error(), codingmcp.DefinitionSchema, "the error names the schema to add")
+	require.NoError(t, err)
+	require.Len(t, definitions.List(), 1)
+	assert.Equal(t, "exa", definitions.List()[0].ID)
 }

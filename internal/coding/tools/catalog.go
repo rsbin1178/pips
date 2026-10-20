@@ -6,6 +6,7 @@ import (
 
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
@@ -16,15 +17,15 @@ const (
 )
 
 type service struct {
-	tree         *workspace.Tree
-	limits       Limits
-	patchFault   patchFault
-	plan         *PlanFile
-	taskLog      *TaskLogRead
-	sessionMedia *SessionMediaRead
+	tree          *workspace.Tree
+	limits        Limits
+	mutationFault mutationFault
+	plan          *PlanFile
+	taskLog       *TaskLogRead
+	sessionMedia  *SessionMediaRead
 }
 
-// PlanFile is the injected plan-mode file boundary. The patch tool applies
+// PlanFile is the injected plan-mode file boundary. The Edit tool applies
 // changes to this exact file when plan mode admits it.
 type PlanFile struct {
 	Path     func() string
@@ -62,6 +63,7 @@ type SessionMediaRead struct {
 }
 
 type catalogConfig struct {
+	editStrategy   config.EditStrategy
 	shell          agent.Tool
 	monitor        agent.Tool
 	kill           KillBackground
@@ -72,7 +74,23 @@ type catalogConfig struct {
 	plan           *PlanFile
 }
 
-// WithPlanFile admits the plan-mode file as an additional patch target while
+// WithEditStrategy selects which file-editing tools are registered. Tools
+// outside the strategy are never added to the catalog, so discovery, leases,
+// and subagent capability compilation cannot see them.
+func WithEditStrategy(strategy config.EditStrategy) CatalogOption {
+	return func(cfg *catalogConfig) error {
+		normalized := config.NormalizeEditStrategy(strategy)
+		if !normalized.Valid() {
+			return errors.New("coding tools: unsupported edit strategy")
+		}
+
+		cfg.editStrategy = normalized
+
+		return nil
+	}
+}
+
+// WithPlanFile admits the plan-mode file as a structured edit target while
 // plan mode is active.
 func WithPlanFile(file PlanFile) CatalogOption {
 	return func(cfg *catalogConfig) error {
@@ -239,6 +257,8 @@ func WithSessionMediaRead(read SessionMediaRead) CatalogOption {
 }
 
 // NewCatalog returns the application-owned coding tool catalog.
+//
+//nolint:funlen // One declaration pass keeps the strategy-visible surface auditable.
 func NewCatalog(
 	tree *workspace.Tree,
 	limits Limits,
@@ -252,21 +272,21 @@ func NewCatalog(
 		return nil, err
 	}
 
-	config := catalogConfig{}
+	settings := catalogConfig{editStrategy: config.EditStrategyReplace}
 
 	for _, option := range options {
 		if option == nil {
 			return nil, errors.New("coding tools: nil catalog option")
 		}
 
-		if err := option(&config); err != nil {
+		if err := option(&settings); err != nil {
 			return nil, err
 		}
 	}
 
 	service := &service{
-		tree: tree, limits: limits, plan: config.plan,
-		taskLog: config.taskLog, sessionMedia: config.sessionMedia,
+		tree: tree, limits: limits, plan: settings.plan,
+		taskLog: settings.taskLog, sessionMedia: settings.sessionMedia,
 	}
 	readTool := agent.Parallel(agent.NewToolParts(
 		readName,
@@ -275,7 +295,7 @@ func NewCatalog(
 	))
 	lsTool := agent.Parallel(agent.NewTool(
 		lsName,
-		"List one workspace directory in stable name order without recursive traversal.",
+		"List a workspace directory. By default returns a recursive, budgeted tree with hidden and ignored files omitted, collapsed directories summarized by extension, and a 10,000-character budget. Pass offset or limit to paginate one level of immediate children instead.",
 		service.ls,
 	))
 	globTool := agent.Parallel(agent.NewTool(
@@ -285,43 +305,73 @@ func NewCatalog(
 	))
 	grepTool := agent.Parallel(agent.NewTool(
 		grepName,
-		"Search bounded workspace text files using a Go RE2 regular expression. Set fixed_strings for literal matching.",
+		"Search workspace text with a Go RE2 regular expression (or fixed_strings). Supports file or directory paths, glob and type filters, context lines, multiline matching, and content/files_with_matches/count output. Hidden, .git, and gitignored files are skipped by default. A truncated result carries next.offset for continuation.",
 		service.grep,
 	))
-	patch := agent.NewTool(
-		applyPatchName,
-		"Apply a strict Add, Update, or Delete patch to workspace files after complete validation.",
-		service.applyPatch,
-	)
 
 	entries := []catalog.Entry{
 		localEntry(readTool, catalog.RiskRead, "filesystem", "media", "document"),
 		localEntry(lsTool, catalog.RiskRead, "filesystem"),
 		localEntry(globTool, catalog.RiskRead, "filesystem", "search"),
 		localEntry(grepTool, catalog.RiskRead, "filesystem", "search"),
-		localEntry(patch, catalog.RiskWrite, "filesystem", "mutation"),
 	}
-	if config.shell != nil {
+
+	switch settings.editStrategy {
+	case config.EditStrategyNone:
+	case config.EditStrategyReplace:
 		entries = append(entries, localEntry(
-			config.shell,
+			newEditTool(
+				service,
+				"Edit one workspace file by exact string replacement. old_string must match exactly one place unless replace_all is true. An empty old_string creates a new file or replaces the entire existing file. Read an existing file first. The read tool prefixes each line with \"N: \"; do not include that prefix in old_string.",
+			),
+			catalog.RiskWrite,
+			"filesystem",
+			"mutation",
+		))
+	case config.EditStrategyWriteAndReplace:
+		entries = append(entries,
+			localEntry(
+				newEditTool(
+					service,
+					"Edit one workspace file by exact string replacement. old_string must match exactly one place unless replace_all is true. An empty old_string creates a new file or replaces the entire existing file. Read an existing file first. The read tool prefixes each line with \"N: \"; do not include that prefix in old_string.",
+				),
+				catalog.RiskWrite,
+				"filesystem",
+				"mutation",
+			),
+			localEntry(
+				newWriteTool(
+					service,
+					"Create or overwrite one complete workspace file. The tool creates missing parent directories. Read an existing file first when its content matters; the read tool's \"N: \" line prefixes are not part of the file and must not be included in content.",
+				),
+				catalog.RiskWrite,
+				"filesystem",
+				"mutation",
+			),
+		)
+	}
+
+	if settings.shell != nil {
+		entries = append(entries, localEntry(
+			settings.shell,
 			catalog.RiskPrivileged,
 			"process",
 			"shell",
 		))
 	}
 
-	if config.monitor != nil {
+	if settings.monitor != nil {
 		entries = append(entries, localEntry(
-			config.monitor,
+			settings.monitor,
 			catalog.RiskPrivileged,
 			"process",
 			"monitor",
 		))
 	}
 
-	if config.kill != nil {
+	if settings.kill != nil {
 		entries = append(entries, localEntry(
-			NewKillBackgroundTool(config.kill, config.knownIDs),
+			NewKillBackgroundTool(settings.kill, settings.knownIDs),
 			catalog.RiskPrivileged,
 			"process",
 			"monitor",
@@ -331,16 +381,16 @@ func NewCatalog(
 	// The read Tools are registered where the stop Tool is, and only where a
 	// registry backs them. They are unmarked so a wait runs as a batch barrier:
 	// a blocking read must not overlap the tools of its own batch.
-	if config.readBackground != nil {
+	if settings.readBackground != nil {
 		entries = append(entries,
 			localEntry(
-				NewTaskOutputTool(config.readBackground, config.knownIDs),
+				NewTaskOutputTool(settings.readBackground, settings.knownIDs),
 				catalog.RiskRead,
 				"process",
 				"monitor",
 			),
 			localEntry(
-				NewWaitTasksTool(config.readBackground, config.knownIDs),
+				NewWaitTasksTool(settings.readBackground, settings.knownIDs),
 				catalog.RiskRead,
 				"process",
 				"monitor",

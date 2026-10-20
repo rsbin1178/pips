@@ -21,7 +21,7 @@ func TestCatalogPolicyForModeUsesTheCompletePrivilegedToolset(t *testing.T) {
 	t.Parallel()
 
 	read := testCatalogTool("read")
-	applyPatch := testCatalogTool(tools.ApplyPatchName)
+	applyPatch := testCatalogTool(tools.EditName)
 	shell := testCatalogTool("shell")
 	extensionRead := testCatalogTool("extension_read")
 	catalogValue, err := catalog.New(
@@ -45,7 +45,7 @@ func TestCatalogPolicyForModeUsesTheCompletePrivilegedToolset(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	want := []string{"read", tools.ApplyPatchName, "shell", "extension_read"}
+	want := []string{"read", tools.EditName, "shell", "extension_read"}
 	for _, mode := range []OperatingMode{ModeAgent, ModePlan} {
 		policy, err := catalogPolicyForMode(mode, "workspace")
 		require.NoError(t, err)
@@ -64,7 +64,7 @@ func TestLeasedToolGuardDeniesCallsOutsideSnapshot(t *testing.T) {
 
 	known := []agent.Tool{
 		agent.NewTool("read", "", func(context.Context, struct{}) (string, error) { return "", nil }),
-		agent.NewTool("apply_patch", "", func(context.Context, struct{}) (string, error) { return "", nil }),
+		agent.NewTool("Edit", "", func(context.Context, struct{}) (string, error) { return "", nil }),
 		agent.NewTool(tools.UseToolName, "", func(context.Context, struct{}) (string, error) { return "", nil }),
 	}
 	guard := leasedToolGuard(
@@ -78,7 +78,7 @@ func TestLeasedToolGuardDeniesCallsOutsideSnapshot(t *testing.T) {
 	}).Action)
 	assert.Equal(t, agent.ToolDecisionAllow, guard(t.Context(), agent.ToolCallInfo{Name: tools.UseToolName}).Action)
 	denied := guard(t.Context(), agent.ToolCallInfo{
-		ToolCall: agent.ToolCall{Name: "apply_patch"},
+		ToolCall: agent.ToolCall{Name: "Edit"},
 	})
 	assert.Equal(t, agent.ToolDecisionDeny, denied.Action)
 	assert.Contains(t, denied.Reason, "plan mode")
@@ -118,7 +118,7 @@ func TestSuggestToolNames(t *testing.T) {
 	t.Parallel()
 
 	known := []string{
-		"apply_patch", "read", "grep", "glob", "ls", "shell", "ask_user",
+		"Edit", "read", "grep", "glob", "ls", "shell", "ask_user",
 		"pips_tool_search", subagent.ToolName, tasklist.ToolName,
 	}
 
@@ -131,7 +131,7 @@ func TestSuggestToolNames(t *testing.T) {
 		{name: "toolSearch", want: []string{"pips_tool_search"}},
 		{name: "raed", want: []string{"read"}},
 		{name: "gerp", want: []string{"grep"}},
-		{name: "patch_apply", want: []string{"apply_patch"}},
+		{name: "edti", want: []string{"Edit"}},
 		// One shared token out of three is below the overlap threshold and
 		// the edit distance is too large, so no guess is offered.
 		{name: "spawn_subagent", want: nil},
@@ -175,7 +175,7 @@ func TestRuntimePlanModeInteractionLeasesTheFullToolCatalog(t *testing.T) {
 	require.Len(t, requests, 1)
 	toolNames := toolNamesFromRequest(requests[0])
 	for _, name := range []string{
-		tools.ApplyPatchName, "shell", planmode.EnterToolName, planmode.ExitToolName,
+		tools.EditName, "shell", planmode.EnterToolName, planmode.ExitToolName,
 	} {
 		assert.Contains(t, toolNames, name)
 	}
@@ -195,7 +195,7 @@ func TestRuntimeAgentModeLeasesTheSameToolCatalog(t *testing.T) {
 	require.Len(t, requests, 1)
 	toolNames := toolNamesFromRequest(requests[0])
 	for _, name := range []string{
-		tools.ApplyPatchName, "shell", planmode.EnterToolName, planmode.ExitToolName,
+		tools.EditName, "shell", planmode.EnterToolName, planmode.ExitToolName,
 		tasklist.ToolName,
 	} {
 		assert.Contains(t, toolNames, name)

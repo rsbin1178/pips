@@ -2,9 +2,9 @@
 
 [返回验收索引](index.md) · [证据记录模板](environment-evidence-record.md)
 
-Plan Mode 是「状态机 + Session 私有计划文件」的模型，不是受限工具集。常规 Tool catalog、Shell、MCP、Subagent 与 `ask_user` 全部保留；唯一的限制是编辑门控：`apply_patch` 的目标只要不全是 `plan.md` 就会在执行前被拒绝。Plan Mode 是能力边界，不是 secret 隔离；Pips 进程可读的文件仍然可读。
+Plan Mode 是「状态机 + Session 私有计划文件」的模型，不是受限工具集。常规 Tool catalog、Shell、MCP、Subagent 与 `ask_user` 全部保留；计划模式固定只暴露 `Edit`（即使全局策略是 `write_and_replace` 也不暴露 `Write`），唯一的限制是编辑门控：`Edit` 的 `file_path` 必须等于 `plan.md` 的精确路径，否则在执行前被拒绝。Plan Mode 是能力边界，不是 secret 隔离；Pips 进程可读的文件仍然可读。
 
-计划文件位于 `$PIPS_HOME/sessions/<session-id>/plan.md`，目录权限 0700、文件权限 0600、无元数据头；模型按提示词中给出的绝对路径用 `apply_patch` 写入，plan 状态另存于同目录的 `plan-mode.json`。
+计划文件位于 `$PIPS_HOME/sessions/<session-id>/plan.md`，目录权限 0700、文件权限 0600、无元数据头；模型按提示词中给出的绝对路径用 `Edit` 写入，plan 状态另存于同目录的 `plan-mode.json`。
 
 ## MA-PLAN-001：进入/退出与状态机
 
@@ -29,7 +29,7 @@ Plan Mode 是「状态机 + Session 私有计划文件」的模型，不是受�
 - 通过条件：门控只拒绝编辑而不隐藏工具，拒绝发生在 hooks/审批/归因/执行之前。
 - 失败条件：普通文件被写入、拒绝发生在执行之后、拒绝文本与约定不一致、或计划文件写入出现在 `git status`/变更跟踪里。
 - 清理/回滚：恢复 Workspace 到基线；确认计划文件随隔离 `PIPS_HOME` 清理。
-- 来源/测试锚点：[runtime_plan_gate.go](../../internal/coding/runtime_plan_gate.go)、[apply_patch.go](../../internal/coding/tools/apply_patch.go)、[plan_file_test.go](../../internal/coding/tools/plan_file_test.go)。
+- 来源/测试锚点：[runtime_plan_gate.go](../../internal/coding/runtime_plan_gate.go)、[edit.go](../../internal/coding/tools/edit.go)、[plan_file_test.go](../../internal/coding/tools/plan_file_test.go)。
 - 结果：`未执行`。
 
 ## MA-PLAN-003：计划文件写入与审批视图

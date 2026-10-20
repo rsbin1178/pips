@@ -222,3 +222,16 @@ func (f *fakeProjectGit) ExcludeLocal(_ context.Context, filePath string) error 
 
 	return f.excludeErr
 }
+
+func TestManagerDefaultsOmittedSchema(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t, true, nil)
+	ref := Ref{Source: "user:agents/review/SKILL.md", Name: "review"}
+	writeSettingsFixture(t, fixture.root, 0o600,
+		"[[disabled]]\nsource = \"user:agents/review/SKILL.md\"\nname = \"review\"\n")
+
+	loaded, err := fixture.manager.Load(t.Context())
+	require.NoError(t, err)
+	assert.True(t, loaded.IsDisabled(ref))
+}

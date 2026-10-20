@@ -3,5 +3,8 @@ package tools
 // PlanCatalogID is the exact local provenance of the plan-mode tool pair.
 const PlanCatalogID = "coding.plan"
 
-// ApplyPatchName is the model-facing workspace edit tool.
-const ApplyPatchName = "apply_patch"
+// EditName is the model-facing exact-replacement edit tool.
+const EditName = "Edit"
+
+// WriteName is the model-facing whole-file write tool.
+const WriteName = "Write"

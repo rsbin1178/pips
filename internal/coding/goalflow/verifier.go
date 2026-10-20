@@ -14,6 +14,7 @@ import (
 	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/agent/goal"
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
@@ -48,7 +49,7 @@ const (
 	changedFilesMax    = 300
 	// verifierToolset names the child's own tool inventory, which the prompt
 	// renders so a skeptic reaches for the tools it actually holds.
-	verifierToolset = "read, ls, glob, grep, apply_patch, shell and monitor"
+	verifierToolset = "read, ls, glob, grep, shell and monitor"
 )
 
 // verifierSystem is the body every skeptic's system prompt carries: the
@@ -1096,7 +1097,11 @@ func skepticFailure(problem string) SkepticVerdict {
 // readCatalog builds one skeptic's read-only catalog. Every skeptic gets a fresh
 // one, so no tool instance is shared between concurrent audits.
 func (v *Verifier) readCatalog(ctx context.Context) ([]ai.Tool, map[string]agent.Tool, error) {
-	local, err := tools.NewCatalog(v.tree, tools.DefaultLimits())
+	local, err := tools.NewCatalog(
+		v.tree,
+		tools.DefaultLimits(),
+		tools.WithEditStrategy(config.EditStrategyNone),
+	)
 	if err != nil {
 		return nil, nil, err
 	}

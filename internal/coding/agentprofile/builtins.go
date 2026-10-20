@@ -3,6 +3,8 @@ package agentprofile
 import (
 	"crypto/sha256"
 	"encoding/hex"
+
+	"github.com/rsbin1178/pips/internal/coding/config"
 )
 
 // BuiltinDefinitions returns the program-owned compatibility identities. Their
@@ -19,31 +21,39 @@ func BuiltinDefinitions() []Definition {
 			"General purpose",
 			"General purpose agent for multi-step tasks.",
 			CapabilityAll,
+			"",
 		),
 		builtinDefinition(
 			"explore",
 			"Explore",
 			"Fast, read-only agent specialized for codebase exploration.",
 			CapabilityReadOnly,
+			config.EditStrategyNone,
 		),
 		builtinDefinition(
 			"plan",
 			"Plan",
 			"Software architect for planning implementation strategies.",
 			CapabilityReadOnly,
+			config.EditStrategyNone,
 		),
 		builtinDefinition(
 			"review",
 			"Review",
 			"Report evidence-backed defects and risks.",
 			CapabilityReadOnly,
+			config.EditStrategyNone,
 		),
 	}
 
 	return definitions
 }
 
-func builtinDefinition(id, name, description string, mode CapabilityMode) Definition {
+func builtinDefinition(
+	id, name, description string,
+	mode CapabilityMode,
+	editStrategy config.EditStrategy,
+) Definition {
 	digest := sha256.Sum256([]byte("pips builtin agent/v1\n" + id))
 
 	return Definition{
@@ -57,6 +67,7 @@ func builtinDefinition(id, name, description string, mode CapabilityMode) Defini
 		Description:    description,
 		Model:          modelInherit,
 		CapabilityMode: mode,
+		EditStrategy:   editStrategy,
 		Visibility:     Visibility{User: true, Model: true},
 		Delivery:       []Delivery{DeliveryForeground, DeliveryBackground},
 		Output:         OutputContract{Format: OutputText},

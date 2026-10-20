@@ -228,11 +228,11 @@ func TestStoreRequiresValidSessionIdentity(t *testing.T) {
 func TestPromptTextsAreStable(t *testing.T) {
 	t.Parallel()
 
-	names := planmode.ReminderNames{Edit: "apply_patch", Ask: "ask_user", Exit: planmode.ExitToolName}
+	names := planmode.ReminderNames{Edit: "Edit", Ask: "ask_user", Exit: planmode.ExitToolName}
 
 	reminder := planmode.PlanReminder("/sessions/s1/plan.md", false, names)
 	assert.Contains(t, reminder, "Plan mode is active. Do not make any edits or writes to the system.")
-	assert.Contains(t, reminder, "No plan written yet. Write your plan to /sessions/s1/plan.md using the apply_patch tool.")
+	assert.Contains(t, reminder, "No plan written yet. Write your plan to /sessions/s1/plan.md using the Edit tool.")
 	assert.Contains(t, reminder, "Note that this is the only file you are allowed to edit.")
 	assert.Contains(t, reminder, "Your turn should only end with either ask_user to clarify requirements or exit_plan_mode to present your plan to the user.")
 
