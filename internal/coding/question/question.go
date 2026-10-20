@@ -37,12 +37,30 @@ type Option struct {
 	Preview     string `json:"preview,omitempty"`
 }
 
-// Question is one single- or multiple-select user question.
+// Kind selects a structured choice question or a free-text question inside the
+// same ask_user call.
+type Kind string
+
+const (
+	// KindChoice is the default kind: the question requires 2-4 options.
+	KindChoice Kind = "choice"
+	// KindText asks for one free-form answer and carries no options.
+	KindText Kind = "text"
+)
+
+// Question is one single- or multiple-select user question, or one free-text
+// question when Kind is KindText.
 type Question struct {
 	Header   string   `json:"header"`
 	Question string   `json:"question"`
-	Options  []Option `json:"options"`
+	Kind     Kind     `json:"kind,omitempty"`
+	Options  []Option `json:"options,omitempty"`
 	Multiple bool     `json:"multiple,omitempty"`
+}
+
+// IsText reports whether the question asks for a free-form answer.
+func (item Question) IsText() bool {
+	return item.Kind == KindText
 }
 
 // Spec is the exact model-supplied ask_user argument shape.
@@ -69,6 +87,10 @@ type Request struct {
 	Kind         RequestKind `json:"kind,omitempty"`
 	Prompt       string      `json:"prompt,omitempty"`
 	Questions    []Question  `json:"questions"`
+	// QueueIndex and QueueSize place this request in a same-response ask_user
+	// batch. Both are zero for a single call, so older records stay valid.
+	QueueIndex int `json:"queue_index,omitempty"`
+	QueueSize  int `json:"queue_size,omitempty"`
 }
 
 // Answer resolves one question in its original request order.
@@ -103,15 +125,31 @@ func ValidateSpec(spec Spec) error {
 			return fmt.Errorf("%w: question %d requires prompt text", ErrInvalid, index+1)
 		}
 
-		if len(item.Options) < minOptionCount || len(item.Options) > maxOptionCount {
-			return fmt.Errorf("%w: question %d must have two to four options", ErrInvalid, index+1)
-		}
-
 		if _, exists := headers[item.Header]; exists {
 			return fmt.Errorf("%w: duplicate question header", ErrInvalid)
 		}
 
 		headers[item.Header] = struct{}{}
+
+		if !validQuestionKind(item.Kind) {
+			return fmt.Errorf("%w: question %d has an unknown kind", ErrInvalid, index+1)
+		}
+
+		if item.IsText() {
+			if len(item.Options) != 0 || item.Multiple {
+				return fmt.Errorf(
+					"%w: question %d is free text and cannot carry options or multiple",
+					ErrInvalid,
+					index+1,
+				)
+			}
+
+			continue
+		}
+
+		if len(item.Options) < minOptionCount || len(item.Options) > maxOptionCount {
+			return fmt.Errorf("%w: question %d must have two to four options", ErrInvalid, index+1)
+		}
 
 		labels := make(map[string]struct{}, len(item.Options))
 		for optionIndex, option := range item.Options {
@@ -207,6 +245,10 @@ func ValidateRequest(request Request) error {
 	if !validIdentity(request.ID) || !validIdentity(request.ToolCallID) ||
 		len(request.SchemaDigest) != sha256.Size*2 {
 		return fmt.Errorf("%w: invalid request identity", ErrInvalid)
+	}
+
+	if err := validateQueuePosition(request.QueueIndex, request.QueueSize); err != nil {
+		return err
 	}
 
 	if request.Kind == RequestFreeform {
@@ -348,7 +390,39 @@ func RequestCount(request Request) int {
 	return len(request.Questions)
 }
 
+func validQuestionKind(kind Kind) bool {
+	return kind == "" || kind == KindChoice || kind == KindText
+}
+
+func validateQueuePosition(index, size int) error {
+	if index < 0 || size < 0 {
+		return fmt.Errorf("%w: invalid queue position", ErrInvalid)
+	}
+
+	if size == 0 {
+		if index != 0 {
+			return fmt.Errorf("%w: invalid queue position", ErrInvalid)
+		}
+
+		return nil
+	}
+
+	if index < 1 || index > size {
+		return fmt.Errorf("%w: invalid queue position", ErrInvalid)
+	}
+
+	return nil
+}
+
 func validateAnswer(item Question, answer Answer) error {
+	if item.IsText() {
+		if !validText(answer.Custom, maxCustomBytes) || len(answer.Selections) != 0 {
+			return errors.New("free-text answer is malformed")
+		}
+
+		return nil
+	}
+
 	if answer.Custom != "" {
 		if !validText(answer.Custom, maxCustomBytes) || len(answer.Selections) != 0 {
 			return errors.New("custom answer is malformed")

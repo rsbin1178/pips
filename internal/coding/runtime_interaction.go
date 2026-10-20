@@ -1104,6 +1104,11 @@ func (r *Runtime) openInteraction(
 		// The capability gate runs first, so the refusal it writes is what every
 		// later hook observes and what reaches the provider.
 		extension.Hooks{AfterTool: mediaGateAfterTool(snapshot.Model(r.model))},
+		// The question preflight only classifies the whole response, so a batch
+		// mixing ask_user with any other tool is rejected before another gate can
+		// pause or deny one call and hide the rest. It never pauses itself, which
+		// keeps the capability gates authoritative for each call's availability.
+		extension.Hooks{BeforeTool: r.questions.BeforeBatch},
 		extension.Hooks{BeforeTool: r.hookBeforeTool(emitter)},
 		extension.Hooks{BeforeTool: r.teamGuard.beforeTool(descriptors)},
 		extension.Hooks{AfterTool: leadCoordinatorAfterTool(leadCoordinator)},

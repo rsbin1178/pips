@@ -256,13 +256,17 @@ type Model struct {
 	prompt               promptState
 	promptSeq            uint64
 	completionMarkers    []completionMarker
-	planNoticeSeq        uint64
-	worktreeLoading      bool
-	worktreeGeneration   uint64
-	worktreeCancel       context.CancelFunc
-	worktreeSummary      string
-	activity             activityIndicator
-	statusLineItems      []statusline.Item
+	// questionPreviews holds the cards the user just answered or canceled while
+	// the Runtime is still publishing the durable Tool result.
+	questionPreviews   map[string]questionPreview
+	questionPreviewSeq uint64
+	planNoticeSeq      uint64
+	worktreeLoading    bool
+	worktreeGeneration uint64
+	worktreeCancel     context.CancelFunc
+	worktreeSummary    string
+	activity           activityIndicator
+	statusLineItems    []statusline.Item
 }
 
 func newModel(ctx context.Context, options Options) *Model {
@@ -459,6 +463,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.dropPending()
 		m.state = message.observation.State
 		m.observedSequence = m.state.Sequence
+		m.rebaseCompletionMarkers()
 		if previousSessionID != m.state.SessionID {
 			m.stopTeamWorkerRouteSubscription()
 			m.resetTeamProjection(m.state.SessionID)
@@ -559,6 +564,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamErr = errors.Join(m.streamErr, message.err)
 			if !m.subscriptionMode {
 				m.state = m.controller.Snapshot()
+				m.rebaseCompletionMarkers()
 			}
 			m.syncApprovalPrompt()
 			m.clearCompletedDirectAgent()
@@ -575,6 +581,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.flushPending()
 		if !m.subscriptionMode {
 			m.state = m.controller.Snapshot()
+			m.rebaseCompletionMarkers()
 		}
 		m.syncApprovalPrompt()
 		m.clearCompletedDirectAgent()
@@ -842,9 +849,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.stopSubscription()
 			m.dropPending()
 			m.state = m.controller.Snapshot()
+			m.rebaseCompletionMarkers()
 		} else if !m.subscriptionMode {
 			m.dropPending()
 			m.state = m.controller.Snapshot()
+			m.rebaseCompletionMarkers()
 		}
 		if message.err != nil {
 			switch {
@@ -1471,7 +1480,7 @@ func (m *Model) cancelOrExit(context actionContext) (tea.Model, tea.Cmd) {
 	})
 }
 
-//nolint:gocyclo // Footer composition follows the explicit route/prompt/picker state machine.
+//nolint:gocyclo,funlen // Footer composition follows the explicit route/prompt/picker state machine.
 func (m *Model) readyView() tea.View {
 	if m.transcriptMode.active {
 		return m.transcriptModeView()
@@ -1490,15 +1499,23 @@ func (m *Model) readyView() tea.View {
 		}
 		footer = append(footer, activity)
 	}
-	if prompt := m.promptView(); prompt != "" && !m.goalCommandPickerActive() {
+	promptHit := questionPromptHit{top: -1}
+	if prompt, hit := m.promptView(); prompt != "" && !m.goalCommandPickerActive() {
 		// The band shares the Composer's text column, so its accent gutter lines
 		// up with the transcript's accented blocks instead of the frame edge.
 		prompt = insetRows(prompt, timelineInset(m.width))
 		if caps.promptRows > 0 {
+			if len(hit.rows) > caps.promptRows {
+				hit.cropTop(len(hit.rows) - caps.promptRows)
+			}
 			prompt = truncateTailHeight(prompt, caps.promptRows)
+		} else {
+			prompt = ""
+			hit = questionPromptHit{top: -1}
 		}
 		promptFooterIndex = len(footer)
 		promptContent = prompt
+		promptHit = hit
 		footer = append(footer, prompt)
 	}
 	if inline := m.inlineTeamRouteView(); inline != "" {
@@ -1599,12 +1616,15 @@ func (m *Model) readyView() tea.View {
 	indicator := transcriptVisible > 0 && m.turnIndicatorShown()
 	content = m.drawTurnIndicator(clampFrameTail(content, m.height), indicator)
 	view := m.presentationView(content)
+	promptTop := frameRowOf(parts, promptIndex, dropped)
+	promptHit.place(promptTop, timelineInset(m.width))
 	m.frameHit = frameHitMap{
 		painted:       m.sizeReady,
 		transcript:    transcriptVisible,
 		topDropped:    min(dropped, transcriptRows),
 		band:          m.bandRowOf(parts, bandIndex, dropped, bandHint != ""),
 		turnIndicator: indicator,
+		question:      promptHit,
 		composerTop:   frameRowOf(parts, composerIndex, dropped),
 		composerRows:  lipgloss.Height(footer[composerFooterIndex]),
 	}
@@ -1620,22 +1640,23 @@ func (m *Model) readyView() tea.View {
 		(m.teamRouteIsInline() && (m.route.loading || !teamRouteInputStage(m.route.team.stage))) {
 		view.Cursor = nil
 	}
-	if m.prompt.kind == promptQuestion &&
-		m.prompt.question.editing != questionEditNone && promptIndex >= 0 {
-		if cursorX, cursorY, ok := m.questionEditorOffset(promptContent); ok {
-			view.Cursor = m.prompt.question.editor.Cursor()
-			if view.Cursor != nil {
-				promptOffset := lipgloss.Height(lipgloss.JoinVertical(
-					lipgloss.Left,
-					parts[:promptIndex]...,
-				))
-				view.Cursor.X += cursorX
-				view.Cursor.Y += promptOffset + cursorY
-			}
+	// The prompt bands sit above the Composer, so their caret is already measured
+	// against the frame. Applying the Composer's box offset to it would drag it
+	// down onto the Composer's row, which is where the caret wrongly landed while
+	// a question editor was open.
+	cursorPlaced := false
+	if m.prompt.kind == promptQuestion && promptHit.cursor && promptHit.top >= 0 {
+		if cursor := m.prompt.question.editor.Cursor(); cursor != nil {
+			cursor.X = promptHit.cursorX
+			cursor.Y = promptHit.cursorY
+			view.Cursor = cursor
+			cursorPlaced = true
 		}
 	}
-	m.placePlanReviewCursor(&view, parts, promptContent, promptIndex)
-	if view.Cursor != nil {
+	if !cursorPlaced {
+		cursorPlaced = m.placePlanReviewCursor(&view, promptTop, promptContent)
+	}
+	if view.Cursor != nil && !cursorPlaced {
 		cursorX, cursorY := m.composerBoxCursorOffset()
 		view.Cursor.X += cursorX
 		view.Cursor.Y += composerOffset + cursorY - clampFrameTailOffset(content, m.height)
@@ -1651,10 +1672,6 @@ func (m *Model) pickerHidesComposerCursor() bool {
 	default:
 		return false
 	}
-}
-
-func (m *Model) questionEditorOffset(prompt string) (int, int, bool) {
-	return editorOffset(prompt, m.prompt.question.editor.View())
 }
 
 func editorOffset(prompt, editor string) (int, int, bool) {
@@ -2472,6 +2489,7 @@ func (m *Model) managedTimelineNeedsLeadingGap(blocks []timelineBlock) bool {
 
 func (m *Model) timelineBlocks() []timelineBlock {
 	blocks := insertCompletionMarkers(m.projectTimeline(m.state, nil), m.completionMarkers)
+	blocks = insertQuestionPreviews(blocks, m.optimisticQuestionBlocks())
 	if m.streamErr != nil {
 		blocks = append(blocks, timelineBlock{
 			kind: blockError, title: "Operation", body: safeError(m.streamErr),
@@ -2491,10 +2509,18 @@ func (m *Model) refreshToolDetailRoute() {
 	}
 
 	for _, block := range projectTimeline(m.state) {
-		if block.kind != blockTool || len(block.tools) == 0 {
+		if len(block.tools) == 0 {
 			continue
 		}
-		detail := newToolDetailView(block)
+		var detail toolDetailView
+		switch block.kind {
+		case blockTool:
+			detail = newToolDetailView(block)
+		case blockQuestion:
+			detail = newQuestionDetailView(block)
+		default:
+			continue
+		}
 		if !slices.Equal(detail.callIDs, m.route.toolDetail.callIDs) {
 			continue
 		}
@@ -2529,7 +2555,11 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 			detail := newToolDetailView(block)
 
 			return m.openToolDetailRoute(detail)
-		case blockUser, blockAssistant, blockDraft, blockPlan, blockQuestion, blockDiagnostic,
+		case blockQuestion:
+			if len(block.tools) > 0 {
+				return m.openToolDetailRoute(newQuestionDetailView(block))
+			}
+		case blockUser, blockAssistant, blockDraft, blockPlan, blockDiagnostic,
 			blockChange, blockError, blockCompletion, blockTeam, blockCompaction:
 		}
 	}
@@ -2934,9 +2964,13 @@ func (m *Model) reduceStreamBatch(items []streamItem) {
 	valid, streamErr := streamItemsBeforeError(items)
 
 	previousSessionID := m.state.SessionID
+	previousMessages := len(m.state.Transcript)
 
 	if !m.advanceParentState(valid) {
 		return
+	}
+	if len(m.state.Transcript) != previousMessages {
+		m.rebaseCompletionMarkers()
 	}
 
 	if previousSessionID != m.state.SessionID {
@@ -3153,6 +3187,7 @@ func (m *Model) recordCompletion(event coding.Event) {
 	switch event.Type {
 	case coding.EventSessionNavigated, coding.EventCompactionCompleted:
 		m.completionMarkers = nil
+		m.questionPreviews = nil
 
 		return
 	case coding.EventInteractionCompleted:
@@ -3170,9 +3205,17 @@ func (m *Model) recordCompletion(event coding.Event) {
 		}
 	}
 
+	afterDigest := uint64(0)
+	if len(m.state.Transcript) > 0 {
+		afterDigest = projectionMessageDigest(
+			projectionHashSeed, m.state.Transcript[len(m.state.Transcript)-1],
+		)
+	}
+
 	m.completionMarkers = appendMarker(m.completionMarkers, completionMarker{
 		interactionID:  event.InteractionID,
 		afterMessages:  len(m.state.Transcript),
+		afterDigest:    afterDigest,
 		outcome:        completed.Outcome,
 		stop:           completed.Stop,
 		durationMillis: completed.DurationMillis,
@@ -3181,6 +3224,31 @@ func (m *Model) recordCompletion(event coding.Event) {
 	if len(m.completionMarkers) > maxCompletionMarkers {
 		first := len(m.completionMarkers) - maxCompletionMarkers
 		m.completionMarkers = append([]completionMarker(nil), m.completionMarkers[first:]...)
+	}
+}
+
+// rebaseCompletionMarkers re-resolves each marker's anchor after the transcript
+// changed. A question result can be inserted ahead of the final assistant
+// message after the interaction completed, which shifts every later message and
+// would otherwise place the completion row above the answer it follows.
+func (m *Model) rebaseCompletionMarkers() {
+	if len(m.completionMarkers) == 0 {
+		return
+	}
+
+	positions := make(map[uint64]int, len(m.state.Transcript))
+	for index, message := range m.state.Transcript {
+		positions[projectionMessageDigest(projectionHashSeed, message)] = index + 1
+	}
+
+	for index := range m.completionMarkers {
+		digest := m.completionMarkers[index].afterDigest
+		if digest == 0 {
+			continue
+		}
+		if position, ok := positions[digest]; ok {
+			m.completionMarkers[index].afterMessages = position
+		}
 	}
 }
 
