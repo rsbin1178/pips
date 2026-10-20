@@ -228,6 +228,7 @@ func TestManagerDefaultsOmittedSchema(t *testing.T) {
 
 	fixture := newManagerFixture(t, true, nil)
 	ref := Ref{Source: "user:agents/review/SKILL.md", Name: "review"}
+
 	writeSettingsFixture(t, fixture.root, 0o600,
 		"[[disabled]]\nsource = \"user:agents/review/SKILL.md\"\nname = \"review\"\n")
 

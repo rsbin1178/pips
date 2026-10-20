@@ -116,6 +116,7 @@ func decodeFile(data []byte, scope Scope, source string, limits Limits) ([]Defin
 	if err := jsonx.Decode(data, &file); err != nil {
 		return nil, err
 	}
+
 	if file.Schema != nil && *file.Schema != Schema {
 		return nil, fmt.Errorf("%w: unsupported schema %q", ErrInvalid, *file.Schema)
 	}
