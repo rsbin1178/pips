@@ -902,7 +902,8 @@ func TestDescribeToolCallUsesWorkspaceRelativePaths(t *testing.T) {
 		subject string
 	}{
 		{"read inside", "read", `{"path":` + fmt.Sprintf("%q", inside) + `}`, "src/main.go"},
-		{"read workspace root", "read", `{"path":` + fmt.Sprintf("%q", workspace) + `}`, filepath.ToSlash(workspace)},
+		{"read workspace root", "read", `{"path":` + fmt.Sprintf("%q", workspace) + `}`, "."},
+		{"list workspace root", "ls", `{"path":` + fmt.Sprintf("%q", workspace) + `}`, "."},
 		{"list inside", "ls", `{"path":` + fmt.Sprintf("%q", filepath.Join(workspace, "src")) + `}`, "src"},
 		{"glob inside", "glob", `{"pattern":"**/*.go","path":` + fmt.Sprintf("%q", filepath.Join(workspace, "src")) + `}`, "**/*.go in src"},
 		{"edit outside", "Edit", `{"file_path":` + fmt.Sprintf("%q", outside) + `,"old_string":"a","new_string":"b"}`, filepath.ToSlash(outside)},
