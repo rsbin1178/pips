@@ -890,6 +890,7 @@ func (m *Model) volatileTimelineBlocks(activities []toolActivity, markerSplit in
 	blocks := projectVolatileBlocks(m.state, activities)
 	blocks = insertCompletionMarkers(blocks, m.completionMarkers[markerSplit:])
 	blocks = insertQuestionPreviews(blocks, m.optimisticQuestionBlocks())
+
 	if !m.showThinkingBlocks() {
 		blocks = withoutThinkingBlocks(blocks)
 	}

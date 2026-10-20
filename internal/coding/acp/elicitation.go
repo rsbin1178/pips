@@ -168,7 +168,6 @@ func populateStructuredResolution(
 		key := questionKey(index)
 		if item.IsText() {
 			value, _, err := optionalString(content, key)
-
 			if err != nil {
 				return err
 			}
