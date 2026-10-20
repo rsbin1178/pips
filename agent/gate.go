@@ -22,13 +22,17 @@ const (
 	// later call in the same turn become [RunResult.Pending]; resolve them
 	// with [Session.ResolvePending] and run again to continue.
 	ToolDecisionPause
+	// ToolDecisionDenyBatch rejects every call in the model response with
+	// [ToolDecision.Reason]. No call in the batch executes, and every call
+	// still receives its own error result so the model can retry correctly.
+	ToolDecisionDenyBatch
 )
 
 // ToolDecision is a gate's verdict on one tool call.
 type ToolDecision struct {
 	Action ToolDecisionAction
-	// Reason is sent to the model when Action is [ToolDecisionDeny]. Empty
-	// falls back to a generic denial message.
+	// Reason is sent to the model when Action is [ToolDecisionDeny] or
+	// [ToolDecisionDenyBatch]. Empty falls back to a generic denial message.
 	Reason string
 	// UpdatedInput replaces the JSON arguments for an allowed call before the
 	// next gate and before execution. Callers must validate it for their tool
@@ -52,6 +56,10 @@ type ToolCallInfo struct {
 	// use it to reject interaction-owning calls before a leading Pause hides
 	// the remaining suffix.
 	BatchSize int
+	// BatchCalls lists every call in the model response, in order, so a gate
+	// can classify the whole batch before deciding one call. The slice and each
+	// call's Args are read-only; changing them does not change execution.
+	BatchCalls []ToolCall
 }
 
 // gate is the [WithBeforeTool] callback type.

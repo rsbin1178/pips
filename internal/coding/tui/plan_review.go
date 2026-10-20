@@ -125,28 +125,28 @@ func (m *Model) planReviewActiveEditor() *textarea.Model {
 // editor when the review prompt is the visible footer.
 func (m *Model) placePlanReviewCursor(
 	view *tea.View,
-	parts []string,
+	promptTop int,
 	promptContent string,
-	promptIndex int,
-) {
-	if promptIndex < 0 || m.prompt.kind != promptPlanReview {
-		return
+) bool {
+	if promptTop < 0 || m.prompt.kind != promptPlanReview {
+		return false
 	}
 	editor := m.planReviewActiveEditor()
 	if editor == nil || editor.View() == "" {
-		return
+		return false
 	}
 	cursorX, cursorY, ok := editorOffset(promptContent, editor.View())
 	if !ok {
-		return
+		return false
 	}
 	view.Cursor = editor.Cursor()
 	if view.Cursor == nil {
-		return
+		return false
 	}
-	promptOffset := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, parts[:promptIndex]...))
 	view.Cursor.X += cursorX
-	view.Cursor.Y += promptOffset + cursorY
+	view.Cursor.Y += promptTop + cursorY
+
+	return true
 }
 
 func (m *Model) updatePlanReviewPromptKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {

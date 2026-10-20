@@ -1,6 +1,7 @@
 package question_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/rsbin1178/pips/internal/coding/question"
@@ -85,6 +86,64 @@ func TestResolutionRejectsStaleOrAmbiguousAnswers(t *testing.T) {
 	for _, resolution := range tests {
 		require.ErrorIs(t, question.ValidateResolution(request, resolution), question.ErrInvalid)
 	}
+}
+
+func TestMixedChoiceAndTextQuestions(t *testing.T) {
+	t.Parallel()
+
+	spec := question.Spec{Questions: []question.Question{
+		{
+			Header: "Framework", Question: "Which framework?",
+			Kind: question.KindChoice,
+			Options: []question.Option{
+				{Label: "React", Description: "Established ecosystem"},
+				{Label: "Vue", Description: "Progressive framework"},
+			},
+		},
+		{
+			Header: "Risk", Question: "What risk should be verified first?",
+			Kind: question.KindText,
+		},
+	}}
+	require.NoError(t, question.ValidateSpec(spec))
+
+	request, err := question.NewRequest("request-mixed", "call-mixed", spec)
+	require.NoError(t, err)
+	require.NoError(t, question.ValidateRequest(request))
+
+	require.NoError(t, question.ValidateResolution(request, question.Resolution{
+		RequestID: request.ID, SchemaDigest: request.SchemaDigest,
+		Answers: []question.Answer{
+			{Selections: []string{"React"}},
+			{Custom: "Payment retries"},
+		},
+	}))
+
+	require.ErrorIs(t, question.ValidateResolution(request, question.Resolution{
+		RequestID: request.ID, SchemaDigest: request.SchemaDigest,
+		Answers: []question.Answer{
+			{Selections: []string{"React"}},
+			{},
+		},
+	}), question.ErrInvalid)
+
+	withOptions := spec
+	withOptions.Questions = slices.Clone(spec.Questions)
+	withOptions.Questions[1].Options = []question.Option{
+		{Label: "A", Description: "A"},
+		{Label: "B", Description: "B"},
+	}
+	require.ErrorIs(t, question.ValidateSpec(withOptions), question.ErrInvalid)
+
+	withMultiple := spec
+	withMultiple.Questions = slices.Clone(spec.Questions)
+	withMultiple.Questions[1].Multiple = true
+	require.ErrorIs(t, question.ValidateSpec(withMultiple), question.ErrInvalid)
+
+	unknownKind := spec
+	unknownKind.Questions = slices.Clone(spec.Questions)
+	unknownKind.Questions[1].Kind = "unknown"
+	require.ErrorIs(t, question.ValidateSpec(unknownKind), question.ErrInvalid)
 }
 
 func TestValidateSpecRejectsMalformedSchemas(t *testing.T) {

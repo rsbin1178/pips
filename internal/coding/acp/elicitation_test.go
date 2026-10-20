@@ -47,6 +47,55 @@ func TestQuestionElicitationRoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"Tests", "Lint"}, resolution.Answers[1].Selections)
 }
 
+func TestQuestionElicitationMixedTextQuestion(t *testing.T) {
+	t.Parallel()
+
+	request, err := question.NewRequest("request-mixed", "call-mixed", question.Spec{Questions: []question.Question{
+		{
+			Header: "Scope", Question: "Which scope?", Kind: question.KindChoice,
+			Options: []question.Option{
+				{Label: "Package", Description: "Only this package"},
+				{Label: "Repo", Description: "The whole repository"},
+			},
+		},
+		{
+			Header: "Risk", Question: "Which risk matters first?", Kind: question.KindText,
+		},
+	}})
+	require.NoError(t, err)
+
+	wire, err := elicitationForQuestion("session-1", request)
+	require.NoError(t, err)
+
+	textProperty := wire.RequestedSchema.Properties["question_2"]
+	assert.Equal(t, "string", textProperty.Type)
+	assert.Empty(t, textProperty.Enum)
+	assert.Equal(t, "Which risk matters first?", textProperty.Description)
+	assert.Contains(t, wire.RequestedSchema.Required, "question_2")
+	assert.NotContains(t, wire.RequestedSchema.Properties, "question_2_custom")
+
+	resolution, accepted, err := resolutionFromElicitation(request, createElicitationResponse{
+		Action: "accept",
+		Content: map[string]json.RawMessage{
+			"question_1": json.RawMessage(`"Package"`),
+			"question_2": json.RawMessage(`"Payment retries"`),
+		},
+	})
+	require.NoError(t, err)
+	assert.True(t, accepted)
+	assert.Equal(t, []string{"Package"}, resolution.Answers[0].Selections)
+	assert.Equal(t, "Payment retries", resolution.Answers[1].Custom)
+
+	_, _, err = resolutionFromElicitation(request, createElicitationResponse{
+		Action: "accept",
+		Content: map[string]json.RawMessage{
+			"question_1": json.RawMessage(`"Package"`),
+			"question_2": json.RawMessage(`""`),
+		},
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+}
+
 func TestQuestionElicitationRejectsSchemaMismatch(t *testing.T) {
 	t.Parallel()
 

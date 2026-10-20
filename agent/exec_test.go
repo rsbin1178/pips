@@ -370,4 +370,66 @@ func TestGateReceivesCompleteBatchPositionBeforePause(t *testing.T) {
 	assert.Equal(t, 3, observed[0].BatchSize)
 	assert.Equal(t, 1, observed[1].BatchIndex)
 	assert.Equal(t, 3, observed[1].BatchSize)
+	assert.Equal(t, []string{"add", "add", "add"}, []string{
+		observed[0].BatchCalls[0].Name,
+		observed[0].BatchCalls[1].Name,
+		observed[0].BatchCalls[2].Name,
+	})
+	assert.Equal(t, []string{"c1", "c2", "c3"}, []string{
+		observed[0].BatchCalls[0].ID,
+		observed[0].BatchCalls[1].ID,
+		observed[0].BatchCalls[2].ID,
+	})
+}
+
+func TestGateDenyBatchRejectsEveryCallWithoutExecution(t *testing.T) {
+	t.Parallel()
+
+	model := newScriptedModel(
+		respond(callResponse(
+			call("c1", "echo", `{"value":"first"}`),
+			call("c2", "echo", `{"value":"second"}`),
+		)),
+		respond(textResponse("retry planned")),
+	)
+
+	var executions atomic.Int32
+
+	echo := agent.NewTool("echo", "Echoes its value.", func(
+		_ context.Context,
+		args struct {
+			Value string `json:"value"`
+		},
+	) (string, error) {
+		executions.Add(1)
+
+		return args.Value, nil
+	})
+	a, err := agent.New(model,
+		agent.WithTools(echo),
+		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
+			assert.Len(t, info.BatchCalls, 2)
+
+			return agent.ToolDecision{
+				Action: agent.ToolDecisionDenyBatch,
+				Reason: "echo calls are not allowed together",
+			}
+		}),
+	)
+	require.NoError(t, err)
+
+	sess := agent.NewSession()
+
+	result, err := a.Run(t.Context(), sess, ai.UserText("run both"))
+	require.NoError(t, err)
+	assert.Equal(t, agent.StopEndTurn, result.Stop)
+	assert.Zero(t, executions.Load(), "a denied batch must not execute any call")
+
+	results := toolResults(t, sess, 2)
+	require.Len(t, results, 2)
+
+	for _, result := range results {
+		assert.True(t, result.IsError)
+		assert.Equal(t, "echo calls are not allowed together", resultText(t, result))
+	}
 }

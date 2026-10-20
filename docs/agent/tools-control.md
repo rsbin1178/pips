@@ -94,8 +94,9 @@ a, err := agent.New(model,
 - `ToolDecisionAllow`：执行调用。
 - `ToolDecisionDeny`：不执行，把 `Reason` 作为错误工具结果送回模型。可用 `agent.DenyTool(reason)` 简写。
 - `ToolDecisionPause`：当前调用及同批后续调用进入 pending，Run 以 `StopPaused` 返回。
+- `ToolDecisionDenyBatch`：整批拒绝，所有调用都收到同一条错误结果且都不执行。用于一个批次只有在整体上才非法的协议（例如提问与普通工具混排）。
 
-`ToolCallInfo` 还包含从 1 开始的 `Turn`、从 0 开始的 `BatchIndex` 和 `BatchSize`，便于识别一个模型响应中的组合调用。`UpdatedInput` 可以替换 JSON 参数；每个后续 gate 和执行器看到替换后的值，应用必须重新验证。
+`ToolCallInfo` 还包含从 1 开始的 `Turn`、从 0 开始的 `BatchIndex`、`BatchSize`，以及按模型顺序列出全部调用的只读 `BatchCalls`，便于识别一个模型响应中的组合调用。`UpdatedInput` 可以替换 JSON 参数；每个后续 gate 和执行器看到替换后的值，应用必须重新验证。
 
 ## 持久审批与恢复
 
