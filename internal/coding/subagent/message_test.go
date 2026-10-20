@@ -503,7 +503,7 @@ func TestMessageSendParksUntilSpawningChildBecomesLive(t *testing.T) {
 	t.Parallel()
 
 	fixture := newMessageFixture(t)
-	runner := &sinkRunner{stubRunner: &stubRunner{}}
+	runner := &sinkRunner{stubRunner: &stubRunner{block: true}}
 	dispatcher := blockingOpenDispatcher{
 		limits: fixture.manager.limits, release: make(chan struct{}), runner: runner,
 	}
