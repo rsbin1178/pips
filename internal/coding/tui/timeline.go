@@ -647,7 +647,7 @@ const (
 // nonRepositoryDiagnostic reports the runtime diagnostic that says the workspace
 // has no Git repository. It is a property of the workspace rather than a problem
 // with the turn, and there is nothing for the reader to act on: direct
-// apply_patch edits stay visible in Tool activity either way.
+// Edit and Write results stay visible in Tool activity either way.
 func nonRepositoryDiagnostic(diagnostic coding.IntegrationDiagnostic) bool {
 	return diagnostic.Component == diagnosticComponentChanges &&
 		diagnostic.Code == diagnosticCodeNotRepository

@@ -60,8 +60,8 @@ type Manager struct {
 }
 
 type settingsFile struct {
-	Schema   string `toml:"schema"`
-	Disabled []Ref  `toml:"disabled"`
+	Schema   *string `toml:"schema"`
+	Disabled []Ref   `toml:"disabled"`
 }
 
 // New constructs one project Skill settings manager.
@@ -146,8 +146,8 @@ func (m *Manager) load(ctx context.Context) (Snapshot, error) {
 	if err := decoder.Decode(&file); err != nil {
 		return Snapshot{}, fmt.Errorf("%w: decode project settings: %w", ErrInvalid, err)
 	}
-	if file.Schema != Schema {
-		return Snapshot{}, fmt.Errorf("%w: unsupported schema %q", ErrInvalid, file.Schema)
+	if file.Schema != nil && *file.Schema != Schema {
+		return Snapshot{}, fmt.Errorf("%w: unsupported schema %q", ErrInvalid, *file.Schema)
 	}
 
 	return snapshotFromRefs(file.Disabled, m.limits.MaxDisabled)
@@ -190,8 +190,9 @@ func (m *Manager) read() ([]byte, bool, error) {
 
 func (m *Manager) encode(snapshot Snapshot) ([]byte, error) {
 	var encoded bytes.Buffer
+	schema := Schema
 	if err := toml.NewEncoder(&encoded).Encode(settingsFile{
-		Schema: Schema, Disabled: snapshot.refs(),
+		Schema: &schema, Disabled: snapshot.refs(),
 	}); err != nil {
 		return nil, fmt.Errorf("coding skill settings: encode project settings: %w", err)
 	}

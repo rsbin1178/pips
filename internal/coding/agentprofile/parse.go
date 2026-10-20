@@ -222,6 +222,19 @@ func decodeDefinitionFrontmatter(front string, limits Limits) (Definition, error
 				)
 			}
 			definition.CapabilityMode = mode
+		case "edit_strategy":
+			decoded, err := yamlString(value, key)
+			if err != nil {
+				return Definition{}, err
+			}
+			strategy, parseErr := config.ParseEditStrategy(decoded)
+			if parseErr != nil {
+				return Definition{}, profileErrorf(
+					"invalid_edit_strategy",
+					"edit_strategy must be none, replace, or write_and_replace",
+				)
+			}
+			definition.EditStrategy = strategy
 		case "visibility":
 			decoded, err := decodeVisibility(value, definition.Visibility)
 			if err != nil {
@@ -279,7 +292,12 @@ func decodeDefinitionFrontmatter(front string, limits Limits) (Definition, error
 		}
 	}
 
-	if !seen["schema"] || definition.Schema != SchemaV1Alpha1 {
+	if !seen["schema"] {
+		// The current schema is the default for an omitted frontmatter field.
+		// An explicit value still wins and must be supported.
+		definition.Schema = SchemaV1Alpha1
+	}
+	if definition.Schema != SchemaV1Alpha1 {
 		return Definition{}, profileErrorf("invalid_schema_version", "schema must equal %q", SchemaV1Alpha1)
 	}
 	if !seen["name"] || !seen["description"] {

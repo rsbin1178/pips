@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Transaction phases keep each filesystem step beside its recovery branch.
 package tools
 
 import (
@@ -13,23 +14,53 @@ import (
 	"os"
 	"path"
 	"slices"
+	"strings"
 
-	patchdoc "github.com/rsbin1178/pips/internal/coding/tools/patch"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 const temporaryNameAttempts = 16
 
-type patchTransaction struct {
+// changeKind is the transaction's per-file operation. Editing tools use Add
+// and Update; Delete remains part of the shared transaction for future
+// single-file tools.
+type changeKind uint8
+
+const (
+	changeAdd changeKind = iota
+	changeUpdate
+	changeDelete
+)
+
+type plannedChange struct {
+	kind           changeKind
+	path           string
+	parent         string
+	base           string
+	before         []byte
+	after          []byte
+	expected       fs.FileInfo
+	mode           fs.FileMode
+	hash           [sha256.Size]byte
+	missingParents []string
+
+	directory *workspace.MutationDir
+	stage     string
+	backup    string
+	committed bool
+	restored  bool
+}
+
+type mutationTransaction struct {
 	service     *service
 	changes     []*plannedChange
 	dirs        map[string]*workspace.MutationDir
 	mutation    *workspace.Mutation
-	createdDirs []*createdPatchDirectory
+	createdDirs []*createdMutationDirectory
 	applied     bool
 }
 
-type createdPatchDirectory struct {
+type createdMutationDirectory struct {
 	path     string
 	parent   string
 	base     string
@@ -39,7 +70,7 @@ type createdPatchDirectory struct {
 
 func (s *service) commitPatch(ctx context.Context, changes []*plannedChange) error {
 	return s.tree.Mutate(ctx, func(mutation *workspace.Mutation) error {
-		transaction := &patchTransaction{
+		transaction := &mutationTransaction{
 			service: s, changes: changes, dirs: make(map[string]*workspace.MutationDir),
 		}
 
@@ -47,8 +78,7 @@ func (s *service) commitPatch(ctx context.Context, changes []*plannedChange) err
 	})
 }
 
-//nolint:gocyclo // Transaction phases and recovery routing are intentionally visible in the orchestrator.
-func (t *patchTransaction) run(ctx context.Context, mutation *workspace.Mutation) (returnErr error) {
+func (t *mutationTransaction) run(ctx context.Context, mutation *workspace.Mutation) (returnErr error) {
 	t.mutation = mutation
 	defer func() {
 		closeErr := t.closeDirectories()
@@ -108,7 +138,7 @@ func (t *patchTransaction) run(ctx context.Context, mutation *workspace.Mutation
 	return nil
 }
 
-func (t *patchTransaction) openDirectories(mutation *workspace.Mutation) error {
+func (t *mutationTransaction) openDirectories(mutation *workspace.Mutation) error {
 	for _, change := range t.changes {
 		directory, err := t.openDirectory(mutation, change.parent)
 		if err != nil {
@@ -121,7 +151,7 @@ func (t *patchTransaction) openDirectories(mutation *workspace.Mutation) error {
 	return nil
 }
 
-func (t *patchTransaction) createMissingDirectories(mutation *workspace.Mutation) error {
+func (t *mutationTransaction) createMissingDirectories(mutation *workspace.Mutation) error {
 	missing := make([]string, 0)
 	for _, change := range t.changes {
 		missing = append(missing, change.missingParents...)
@@ -140,7 +170,7 @@ func (t *patchTransaction) createMissingDirectories(mutation *workspace.Mutation
 		_, err = parentDirectory.Lstat(base)
 		if err == nil {
 			return fmt.Errorf(
-				"%w: patch parent %q appeared during patch",
+				"%w: mutation parent %q appeared during write",
 				workspace.ErrChanged,
 				directoryPath,
 			)
@@ -148,14 +178,14 @@ func (t *patchTransaction) createMissingDirectories(mutation *workspace.Mutation
 		if !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
-		if err := t.service.patchStep("prepare", "mkdir", directoryPath); err != nil {
+		if err := t.service.mutationStep("prepare", "mkdir", directoryPath); err != nil {
 			return err
 		}
 		if err := parentDirectory.Mkdir(base, 0o755); err != nil {
 			return err
 		}
 
-		created := &createdPatchDirectory{
+		created := &createdMutationDirectory{
 			path: directoryPath, parent: parent, base: base,
 		}
 		t.createdDirs = append(t.createdDirs, created)
@@ -166,7 +196,7 @@ func (t *patchTransaction) createMissingDirectories(mutation *workspace.Mutation
 		}
 		if info.Mode()&fs.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf(
-				"%w: created patch parent %q changed type",
+				"%w: created mutation parent %q changed type",
 				workspace.ErrChanged,
 				directoryPath,
 			)
@@ -181,7 +211,7 @@ func (t *patchTransaction) createMissingDirectories(mutation *workspace.Mutation
 	return nil
 }
 
-func (t *patchTransaction) openDirectory(
+func (t *mutationTransaction) openDirectory(
 	mutation *workspace.Mutation,
 	name string,
 ) (*workspace.MutationDir, error) {
@@ -199,7 +229,7 @@ func (t *patchTransaction) openDirectory(
 	return directory, nil
 }
 
-func (t *patchTransaction) prepare(ctx context.Context) error {
+func (t *mutationTransaction) prepare(ctx context.Context) error {
 	for _, change := range t.changes {
 		if err := t.revalidate(ctx, change); err != nil {
 			return err
@@ -207,7 +237,7 @@ func (t *patchTransaction) prepare(ctx context.Context) error {
 	}
 
 	for _, change := range t.changes {
-		if change.kind == patchdoc.Delete {
+		if change.kind == changeDelete {
 			continue
 		}
 
@@ -217,7 +247,7 @@ func (t *patchTransaction) prepare(ctx context.Context) error {
 	}
 
 	for _, change := range t.changes {
-		if change.kind == patchdoc.Add {
+		if change.kind == changeAdd {
 			continue
 		}
 
@@ -229,7 +259,7 @@ func (t *patchTransaction) prepare(ctx context.Context) error {
 	return nil
 }
 
-func (t *patchTransaction) stage(ctx context.Context, change *plannedChange) error {
+func (t *mutationTransaction) stage(ctx context.Context, change *plannedChange) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -240,7 +270,7 @@ func (t *patchTransaction) stage(ctx context.Context, change *plannedChange) err
 			return err
 		}
 
-		if err := t.service.patchStep("prepare", "stage", displayPath(change.parent, name)); err != nil {
+		if err := t.service.mutationStep("prepare", "stage", displayPath(change.parent, name)); err != nil {
 			return err
 		}
 
@@ -266,7 +296,7 @@ func (t *patchTransaction) stage(ctx context.Context, change *plannedChange) err
 	return errors.New("coding tools: could not allocate a unique stage file")
 }
 
-func (t *patchTransaction) backup(ctx context.Context, change *plannedChange) error {
+func (t *mutationTransaction) backup(ctx context.Context, change *plannedChange) error {
 	if err := t.revalidate(ctx, change); err != nil {
 		return err
 	}
@@ -286,7 +316,7 @@ func (t *patchTransaction) backup(ctx context.Context, change *plannedChange) er
 			return err
 		}
 
-		if err := t.service.patchStep("prepare", "backup", displayPath(change.parent, name)); err != nil {
+		if err := t.service.mutationStep("prepare", "backup", displayPath(change.parent, name)); err != nil {
 			return err
 		}
 
@@ -308,14 +338,14 @@ func (t *patchTransaction) backup(ctx context.Context, change *plannedChange) er
 }
 
 //nolint:gocyclo // Each supported change kind has distinct atomic filesystem operations.
-func (t *patchTransaction) commit(ctx context.Context, change *plannedChange) error {
+func (t *mutationTransaction) commit(ctx context.Context, change *plannedChange) error {
 	if err := t.revalidate(ctx, change); err != nil {
 		return err
 	}
 
 	switch change.kind {
-	case patchdoc.Add:
-		if err := t.service.patchStep("commit", "link", change.path); err != nil {
+	case changeAdd:
+		if err := t.service.mutationStep("commit", "link", change.path); err != nil {
 			return err
 		}
 
@@ -325,7 +355,7 @@ func (t *patchTransaction) commit(ctx context.Context, change *plannedChange) er
 
 		change.committed = true
 
-		if err := t.service.patchStep("commit", "remove_stage", displayPath(change.parent, change.stage)); err != nil {
+		if err := t.service.mutationStep("commit", "remove_stage", displayPath(change.parent, change.stage)); err != nil {
 			return err
 		}
 
@@ -335,8 +365,8 @@ func (t *patchTransaction) commit(ctx context.Context, change *plannedChange) er
 
 		change.stage = ""
 
-	case patchdoc.Update:
-		if err := t.service.patchStep("commit", "rename", change.path); err != nil {
+	case changeUpdate:
+		if err := t.service.mutationStep("commit", "rename", change.path); err != nil {
 			return err
 		}
 
@@ -351,8 +381,8 @@ func (t *patchTransaction) commit(ctx context.Context, change *plannedChange) er
 			return fmt.Errorf("%w: original %q changed during commit: %w", workspace.ErrChanged, change.path, err)
 		}
 
-	case patchdoc.Delete:
-		if err := t.service.patchStep("commit", "remove", change.path); err != nil {
+	case changeDelete:
+		if err := t.service.mutationStep("commit", "remove", change.path); err != nil {
 			return err
 		}
 
@@ -370,13 +400,13 @@ func (t *patchTransaction) commit(ctx context.Context, change *plannedChange) er
 	return nil
 }
 
-func (t *patchTransaction) revalidate(ctx context.Context, change *plannedChange) error {
+func (t *mutationTransaction) revalidate(ctx context.Context, change *plannedChange) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	info, err := change.directory.Lstat(change.base)
-	if change.kind == patchdoc.Add {
+	if change.kind == changeAdd {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
@@ -385,25 +415,25 @@ func (t *patchTransaction) revalidate(ctx context.Context, change *plannedChange
 			return err
 		}
 
-		return fmt.Errorf("%w: add target %q appeared during patch", workspace.ErrChanged, change.path)
+		return fmt.Errorf("%w: add target %q appeared during write", workspace.ErrChanged, change.path)
 	}
 
 	if err != nil {
-		return fmt.Errorf("%w: target %q changed during patch: %w", workspace.ErrChanged, change.path, err)
+		return fmt.Errorf("%w: target %q changed during write: %w", workspace.ErrChanged, change.path, err)
 	}
 
 	if info.Mode()&fs.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("%w: target %q changed type during patch", workspace.ErrChanged, change.path)
+		return fmt.Errorf("%w: target %q changed type during write", workspace.ErrChanged, change.path)
 	}
 
 	if !os.SameFile(change.expected, info) || info.Mode().Perm() != change.mode.Perm() || info.Size() != int64(len(change.before)) {
-		return fmt.Errorf("%w: target %q metadata changed during patch", workspace.ErrChanged, change.path)
+		return fmt.Errorf("%w: target %q metadata changed during write", workspace.ErrChanged, change.path)
 	}
 
 	return t.verifyFile(ctx, change, change.base, change.hash, int64(len(change.before)))
 }
 
-func (t *patchTransaction) verifyFile(
+func (t *mutationTransaction) verifyFile(
 	ctx context.Context,
 	change *plannedChange,
 	name string,
@@ -422,7 +452,7 @@ func (t *patchTransaction) verifyFile(
 	return nil
 }
 
-func (t *patchTransaction) rollback(ctx context.Context, cause error) error {
+func (t *mutationTransaction) rollback(ctx context.Context, cause error) error {
 	var rollbackErrors []error
 
 	for _, v := range slices.Backward(t.changes) {
@@ -454,7 +484,7 @@ func (t *patchTransaction) rollback(ctx context.Context, cause error) error {
 	return cause
 }
 
-func (t *patchTransaction) abortCreatedDirectories(phase string, cause error) error {
+func (t *mutationTransaction) abortCreatedDirectories(phase string, cause error) error {
 	cleanupErr := t.removeCreatedDirectories(phase)
 	if cleanupErr != nil {
 		return t.recoveryError(false, joinedError(cause, cleanupErr))
@@ -463,7 +493,7 @@ func (t *patchTransaction) abortCreatedDirectories(phase string, cause error) er
 	return cause
 }
 
-func (t *patchTransaction) removeCreatedDirectories(phase string) error {
+func (t *mutationTransaction) removeCreatedDirectories(phase string) error {
 	if len(t.createdDirs) == 0 {
 		return nil
 	}
@@ -493,12 +523,12 @@ func (t *patchTransaction) removeCreatedDirectories(phase string) error {
 	return errors.Join(errorsToJoin...)
 }
 
-func (t *patchTransaction) removeCreatedDirectory(
+func (t *mutationTransaction) removeCreatedDirectory(
 	phase string,
 	parent *workspace.MutationDir,
-	directory *createdPatchDirectory,
+	directory *createdMutationDirectory,
 ) error {
-	if err := t.service.patchStep(phase, "rmdir", directory.path); err != nil {
+	if err := t.service.mutationStep(phase, "rmdir", directory.path); err != nil {
 		return err
 	}
 
@@ -514,7 +544,7 @@ func (t *patchTransaction) removeCreatedDirectory(
 	if directory.expected == nil || !current.IsDir() ||
 		current.Mode()&fs.ModeSymlink != 0 || !os.SameFile(directory.expected, current) {
 		return fmt.Errorf(
-			"coding tools: refuse to remove changed patch directory %q",
+			"coding tools: refuse to remove changed mutation directory %q",
 			directory.path,
 		)
 	}
@@ -529,7 +559,7 @@ func (t *patchTransaction) removeCreatedDirectory(
 	return nil
 }
 
-func (t *patchTransaction) closeDirectories() error {
+func (t *mutationTransaction) closeDirectories() error {
 	if len(t.dirs) == 0 {
 		return nil
 	}
@@ -552,11 +582,11 @@ func (t *patchTransaction) closeDirectories() error {
 }
 
 //nolint:gocyclo // Recovery spells out non-overwriting behavior for every change kind.
-func (t *patchTransaction) rollbackChange(ctx context.Context, change *plannedChange) error {
+func (t *mutationTransaction) rollbackChange(ctx context.Context, change *plannedChange) error {
 	recoveryContext := context.WithoutCancel(ctx)
 
 	switch change.kind {
-	case patchdoc.Add:
+	case changeAdd:
 		data, _, err := readMutationFile(recoveryContext, change.directory, change.base, t.service.limits.FileBytes)
 		if err != nil {
 			return err
@@ -566,7 +596,7 @@ func (t *patchTransaction) rollbackChange(ctx context.Context, change *plannedCh
 			return fmt.Errorf("coding tools: refuse to overwrite changed rollback target %q", change.path)
 		}
 
-		if err := t.service.patchStep("rollback", "remove", change.path); err != nil {
+		if err := t.service.mutationStep("rollback", "remove", change.path); err != nil {
 			return err
 		}
 
@@ -574,7 +604,7 @@ func (t *patchTransaction) rollbackChange(ctx context.Context, change *plannedCh
 			return err
 		}
 
-	case patchdoc.Update:
+	case changeUpdate:
 		data, _, err := readMutationFile(recoveryContext, change.directory, change.base, t.service.limits.FileBytes)
 		if err != nil {
 			return err
@@ -584,7 +614,7 @@ func (t *patchTransaction) rollbackChange(ctx context.Context, change *plannedCh
 			return fmt.Errorf("coding tools: refuse to overwrite changed rollback target %q", change.path)
 		}
 
-		if err := t.service.patchStep("rollback", "rename", change.path); err != nil {
+		if err := t.service.mutationStep("rollback", "rename", change.path); err != nil {
 			return err
 		}
 
@@ -594,7 +624,7 @@ func (t *patchTransaction) rollbackChange(ctx context.Context, change *plannedCh
 
 		change.backup = ""
 
-	case patchdoc.Delete:
+	case changeDelete:
 		_, err := change.directory.Lstat(change.base)
 		if err == nil {
 			return fmt.Errorf("coding tools: refuse to overwrite recreated rollback target %q", change.path)
@@ -604,7 +634,7 @@ func (t *patchTransaction) rollbackChange(ctx context.Context, change *plannedCh
 			return err
 		}
 
-		if err := t.service.patchStep("rollback", "rename", change.path); err != nil {
+		if err := t.service.mutationStep("rollback", "rename", change.path); err != nil {
 			return err
 		}
 
@@ -621,7 +651,7 @@ func (t *patchTransaction) rollbackChange(ctx context.Context, change *plannedCh
 	return nil
 }
 
-func (t *patchTransaction) cleanupPrepared(phase string) error {
+func (t *mutationTransaction) cleanupPrepared(phase string) error {
 	var cleanupErrors []error
 
 	for _, change := range t.changes {
@@ -641,13 +671,13 @@ func (t *patchTransaction) cleanupPrepared(phase string) error {
 	return errors.Join(cleanupErrors...)
 }
 
-func (t *patchTransaction) removeTemporary(phase string, change *plannedChange, name *string) error {
+func (t *mutationTransaction) removeTemporary(phase string, change *plannedChange, name *string) error {
 	if *name == "" {
 		return nil
 	}
 
 	display := displayPath(change.parent, *name)
-	if err := t.service.patchStep(phase, "remove", display); err != nil {
+	if err := t.service.mutationStep(phase, "remove", display); err != nil {
 		return err
 	}
 
@@ -660,7 +690,7 @@ func (t *patchTransaction) removeTemporary(phase string, change *plannedChange, 
 	return nil
 }
 
-func (t *patchTransaction) syncDirectories(phase string) error {
+func (t *mutationTransaction) syncDirectories(phase string) error {
 	parents := make([]string, 0, len(t.dirs))
 	for parent := range t.dirs {
 		parents = append(parents, parent)
@@ -671,7 +701,7 @@ func (t *patchTransaction) syncDirectories(phase string) error {
 	var syncErrors []error
 
 	for _, parent := range parents {
-		if err := t.service.patchStep(phase, "sync", parent); err != nil {
+		if err := t.service.mutationStep(phase, "sync", parent); err != nil {
 			syncErrors = append(syncErrors, err)
 			continue
 		}
@@ -684,7 +714,45 @@ func (t *patchTransaction) syncDirectories(phase string) error {
 	return errors.Join(syncErrors...)
 }
 
-func (t *patchTransaction) recoveryError(applied bool, cause error) error {
+// RecoveryError means the mutation could not finish or cleanly restore every
+// path. RecoveryPaths are workspace-relative materials retained for recovery.
+type RecoveryError struct {
+	Applied       bool
+	RecoveryPaths []string
+	cause         error
+}
+
+func (e *RecoveryError) Error() string {
+	state := "mutation recovery is incomplete"
+	if e.Applied {
+		state = "mutation was applied but cleanup is incomplete"
+	}
+
+	if e.cause != nil {
+		state += ": " + e.cause.Error()
+	}
+
+	if len(e.RecoveryPaths) > 0 {
+		state += "; retained " + strings.Join(e.RecoveryPaths, ", ")
+	}
+
+	return state
+}
+
+// Unwrap returns the transaction or cleanup failure.
+func (e *RecoveryError) Unwrap() error { return e.cause }
+
+type mutationFault func(phase, operation, name string) error
+
+func (s *service) mutationStep(phase, operation, name string) error {
+	if s.mutationFault == nil {
+		return nil
+	}
+
+	return s.mutationFault(phase, operation, name)
+}
+
+func (t *mutationTransaction) recoveryError(applied bool, cause error) error {
 	var paths []string
 
 	for _, change := range t.changes {
@@ -799,4 +867,16 @@ func displayPath(parent, base string) string {
 	}
 
 	return parent + "/" + base
+}
+
+func joinedError(errorsToJoin ...error) error {
+	var nonNil []error
+
+	for _, err := range errorsToJoin {
+		if err != nil {
+			nonNil = append(nonNil, err)
+		}
+	}
+
+	return errors.Join(nonNil...)
 }

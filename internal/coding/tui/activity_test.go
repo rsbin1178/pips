@@ -320,7 +320,7 @@ func TestResolveActivityUsesSemanticToolLabels(t *testing.T) {
 		{
 			name: "workspace update",
 			tool: coding.ToolState{
-				Call:   coding.ToolCall{ID: "call-1", Name: "apply_patch"},
+				Call:   coding.ToolCall{ID: "call-1", Name: "Edit"},
 				Status: coding.ToolStatusRunning,
 			},
 			label: "Updating workspace…",

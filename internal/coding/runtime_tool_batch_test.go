@@ -33,17 +33,17 @@ func TestRuntimeBatchedWriteToolsRunSeriallyInOrder(t *testing.T) {
 
 	model := newRuntimeModel(
 		runtimeToolBatchResponse(
-			ai.ToolCallPart{ID: "add", Name: "apply_patch", Args: ai.JSON(
-				`{"patch":"*** Begin Patch\n*** Add File: notes.txt\n+one\n*** End Patch\n"}`,
+			ai.ToolCallPart{ID: "add", Name: "Edit", Args: ai.JSON(
+				`{"file_path":"notes.txt","old_string":"","new_string":"one\n"}`,
 			)},
-			ai.ToolCallPart{ID: "update", Name: "apply_patch", Args: ai.JSON(
-				`{"patch":"*** Begin Patch\n*** Update File: notes.txt\n@@\n-one\n+two\n*** End Patch\n"}`,
+			ai.ToolCallPart{ID: "update", Name: "Edit", Args: ai.JSON(
+				`{"file_path":"notes.txt","old_string":"one","new_string":"two"}`,
 			)},
 		),
 		runtimeToolBatchResponse(
 			ai.ToolCallPart{ID: "read", Name: "read", Args: ai.JSON(`{"path":"notes.txt"}`)},
-			ai.ToolCallPart{ID: "rewrite", Name: "apply_patch", Args: ai.JSON(
-				`{"patch":"*** Begin Patch\n*** Update File: notes.txt\n@@\n-two\n+three\n*** End Patch\n"}`,
+			ai.ToolCallPart{ID: "rewrite", Name: "Edit", Args: ai.JSON(
+				`{"file_path":"notes.txt","old_string":"two","new_string":"three"}`,
 			)},
 		),
 		runtimeTextResponse("done"),

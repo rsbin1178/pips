@@ -3,6 +3,7 @@ package coding
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/tools"
@@ -144,7 +146,7 @@ func TestRuntimePlanModeExitApprovalAppliesThePlanFile(t *testing.T) {
 		payloadsOfType[PlanModeChanged](events, EventPlanModeChanged),
 	)
 
-	// The model wrote the plan through the admitted apply_patch gate, then
+	// The model wrote the plan through the admitted Edit gate, then
 	// asked for review in the same interaction.
 	document, err := runtime.planStore.Read(t.Context())
 	require.NoError(t, err)
@@ -322,14 +324,24 @@ func TestRuntimePlanModeEditGateRejectsWorkspaceWrites(t *testing.T) {
 	runtime := openTestRuntimeAt(t, t.TempDir(), SessionTarget{}, model)
 	planPath := runtime.planStore.Path()
 	workspaceFile := filepath.Join(runtime.workspace.Root(), "note.md")
-	// The patch tool addresses workspace files relatively; only the plan file
-	// itself is accepted as an absolute path.
+	// Only the exact plan file path is admitted; every workspace path and every
+	// Write call is rejected while the gate is armed.
 	setRuntimeResponses(model,
 		runtimeToolResponse("enter-plan", planmode.EnterToolName, `{}`),
 		runtimeToolResponse(
-			"write-workspace",
-			tools.ApplyPatchName,
-			planPatchArgs(planPatchAdd("note.md", "edits are not allowed yet\n")),
+			"edit-workspace",
+			tools.EditName,
+			`{"file_path":"note.md","old_string":"old","new_string":"new"}`,
+		),
+		runtimeToolResponse(
+			"edit-outside",
+			tools.EditName,
+			fmt.Sprintf(`{"file_path":%q,"old_string":"","new_string":"x"}`, workspaceFile),
+		),
+		runtimeToolResponse(
+			"write-file",
+			tools.WriteName,
+			`{"file_path":"note.md","content":"edits are not allowed yet\n"}`,
 		),
 		runtimeTextResponse("staying read-only"),
 	)
@@ -348,6 +360,10 @@ func TestRuntimePlanModeEditGateRejectsWorkspaceWrites(t *testing.T) {
 	assert.Equal(t, planmode.StateActive, state.PlanMode)
 	assert.Contains(t, transcriptText(state.Transcript), planmode.EditRejection(planPath))
 	assert.Contains(t, transcriptText(state.Transcript), "file edits are not allowed in plan mode")
+	assert.Equal(t, 2, strings.Count(transcriptText(state.Transcript), planmode.EditRejection(planPath)),
+		"workspace paths must be denied by the plan gate")
+	assert.NotContains(t, transcriptText(state.Transcript), "edits are not allowed yet",
+		"a Write call must not reach the workspace while plan mode is armed")
 
 	_, err := os.Lstat(workspaceFile)
 	require.ErrorIs(t, err, os.ErrNotExist)
@@ -588,38 +604,20 @@ func setRuntimeResponses(model *runtimeModel, responses ...*ai.Response) {
 	model.mu.Unlock()
 }
 
-func planPatchArgs(document string) string {
-	return fmt.Sprintf(`{"patch":%q}`, document)
-}
-
-// planWriteResponse scripts one apply_patch call that fills the session plan
-// file. The empty plan file is created up front so the patch stays valid
-// whether or not entering plan mode seeds it.
+// planWriteResponse scripts one Edit call that fills the session plan file.
+// The plan file is the exact admitted target, so an empty old_string creates
+// or overwrites it.
 func planWriteResponse(t *testing.T, runtime *Runtime, id, content string) *ai.Response {
 	t.Helper()
 
-	_, err := runtime.planStore.Replace(t.Context(), "")
+	args, err := json.Marshal(map[string]string{
+		"file_path":  runtime.planStore.Path(),
+		"old_string": "",
+		"new_string": content,
+	})
 	require.NoError(t, err)
 
-	var document strings.Builder
-	document.WriteString("*** Begin Patch\n*** Update File: " + runtime.planStore.Path() + "\n@@\n")
-	for _, line := range strings.Split(strings.TrimSuffix(content, "\n"), "\n") {
-		document.WriteString("+" + line + "\n")
-	}
-	document.WriteString("*** End Patch")
-
-	return runtimeToolResponse(id, tools.ApplyPatchName, planPatchArgs(document.String()))
-}
-
-func planPatchAdd(path, content string) string {
-	var builder strings.Builder
-	builder.WriteString("*** Begin Patch\n*** Add File: " + path + "\n")
-	for _, line := range strings.Split(strings.TrimSuffix(content, "\n"), "\n") {
-		builder.WriteString("+" + line + "\n")
-	}
-	builder.WriteString("*** End Patch")
-
-	return builder.String()
+	return runtimeToolResponse(id, tools.EditName, string(args))
 }
 
 // collectRuntimeEventsAndError drains a Runtime sequence, preserving the first
@@ -704,4 +702,55 @@ func payloadsOfType[T EventPayload](events []Event, eventType EventType) []T {
 	}
 
 	return values
+}
+
+func TestRuntimePlanModeUsesEditOnlyAndAdmitsTheExactPlanPath(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel()
+	runtime := openTestRuntimeConfiguredWithSandboxAndConfig(
+		t,
+		t.TempDir(),
+		SessionTarget{},
+		model,
+		nil,
+		nil,
+		nil,
+		false,
+		config.SandboxWorkspaceWrite,
+		func(cfg *config.Config) {
+			cfg.Mode = config.ModePlan
+			cfg.EditStrategy = config.EditStrategyWriteAndReplace
+		},
+	)
+	planPath := runtime.planStore.Path()
+
+	planArgs, err := json.Marshal(map[string]string{
+		"file_path": planPath, "old_string": "", "new_string": "# Plan\n\n- Ship it.\n",
+	})
+	require.NoError(t, err)
+	setRuntimeResponses(
+		model,
+		runtimeToolResponse("write-plan", tools.EditName, string(planArgs)),
+		runtimeToolResponse(
+			"write-workspace", tools.WriteName,
+			`{"file_path":"note.md","content":"not allowed\n"}`,
+		),
+		runtimeTextResponse("planned"),
+	)
+
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("plan the change")))
+
+	requests := model.Requests()
+	require.NotEmpty(t, requests)
+	names := toolNamesFromRequest(requests[0])
+	assert.Contains(t, names, tools.EditName)
+	assert.NotContains(t, names, tools.WriteName,
+		"plan mode exposes Edit even under write_and_replace")
+
+	document, err := runtime.planStore.Read(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "# Plan\n\n- Ship it.\n", document.Content)
+	_, statErr := os.Lstat(filepath.Join(runtime.workspace.Root(), "note.md"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
 }

@@ -21,14 +21,17 @@ type toolProjectionEntry struct {
 
 type toolProjectionCache struct {
 	sessionID string
+	workspace string
 	entries   map[string]toolProjectionEntry
 }
 
 // projectActivities returns the ordered tool activity the timeline projection
 // consumes, reusing the per-tool description cache.
 func (m *Model) projectActivities(state coding.State, excluded map[string]struct{}) []toolActivity {
-	if m.toolProjection.sessionID != state.SessionID {
-		m.toolProjection = toolProjectionCache{sessionID: state.SessionID}
+	workspace := m.options.Workspace
+	if m.toolProjection.sessionID != state.SessionID ||
+		m.toolProjection.workspace != workspace {
+		m.toolProjection = toolProjectionCache{sessionID: state.SessionID, workspace: workspace}
 	}
 
 	return projectToolActivitiesCached(state, excluded, &m.toolProjection)
@@ -42,8 +45,12 @@ func (m *Model) projectTimeline(state coding.State, excluded map[string]struct{}
 // the activity list and the scan behind it, so a cached frame can rebuild only the
 // volatile tail and the append path can resume the transcript fold.
 func (m *Model) projectCommittedTimeline() (committedProjection, toolScanState) {
-	if m.toolProjection.sessionID != m.state.SessionID {
-		m.toolProjection = toolProjectionCache{sessionID: m.state.SessionID}
+	workspace := m.options.Workspace
+	if m.toolProjection.sessionID != m.state.SessionID ||
+		m.toolProjection.workspace != workspace {
+		m.toolProjection = toolProjectionCache{
+			sessionID: m.state.SessionID, workspace: workspace,
+		}
 	}
 
 	var scan toolScanState
@@ -73,7 +80,7 @@ func (c *toolProjectionCache) describe(record toolActivityRecord) toolActivity {
 		return entry.activity
 	}
 
-	activity := describeToolActivity(record)
+	activity := describeToolActivityInWorkspace(record, c.workspace)
 
 	if c.entries == nil {
 		c.entries = make(map[string]toolProjectionEntry)

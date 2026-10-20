@@ -112,26 +112,28 @@ func TestToolDetailShellShowsCommandAndStreams(t *testing.T) {
 	assert.Contains(t, detail, "cwd               internal")
 }
 
-func TestToolDetailPatchShowsDiffWithoutRawPatchOrDuplicateResult(t *testing.T) {
+func TestToolDetailEditShowsDiffWithoutDuplicatedArguments(t *testing.T) {
 	t.Parallel()
 
 	state := detailState(coding.ToolState{
 		Call: coding.ToolCall{
-			ID: "call-1", Name: "apply_patch",
-			Arguments: ai.JSON(`{"patch":"*** Begin Patch\n*** Update File: a.go\n@@\n-old\n+new\n*** End Patch\n"}`),
+			ID: "call-1", Name: "Edit",
+			Arguments: ai.JSON(`{"file_path":"a.go","old_string":"old\n","new_string":"new\n"}`),
 		},
 		Status: coding.ToolStatusCompleted,
-		Result: ai.ToolResultText("call-1", "apply_patch",
-			`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":1}}`+
-				"\n\nM a.go\n"),
+		Result: ai.ToolResultText("call-1", "Edit",
+			`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"Edit","counts":{"files":1},`+
+				`"edit":{"path":"a.go","kind":"replace","lines":[1]}}`+
+				"\n\nM a.go\n@@ line 1 @@\n-old\n+new\n"),
 	})
 	blocks := projectTimeline(state)
 	require.Len(t, blocks, 1)
 
 	detail := newToolDetailView(blocks[0]).text()
 	assert.Contains(t, detail, "Edited a.go")
-	assert.Contains(t, detail, "Changes\n  M a.go\n    -old\n    +new")
-	assert.NotContains(t, detail, "*** Begin Patch")
+	assert.Contains(t, detail, "Changes\n  M a.go")
+	assert.Contains(t, detail, "  -old\n  +new")
+	assert.NotContains(t, detail, "old_string")
 	assert.NotContains(t, detail, "\nResult\n")
 }
 
@@ -398,18 +400,19 @@ func TestToolCompactJSONResultIsOneHumanLine(t *testing.T) {
 	assert.NotContains(t, rendered, `{"items"`)
 }
 
-func TestToolExpandedPatchShowsDiffRows(t *testing.T) {
+func TestToolExpandedEditShowsDiffRows(t *testing.T) {
 	t.Parallel()
 
 	state := detailState(coding.ToolState{
 		Call: coding.ToolCall{
-			ID: "call-1", Name: "apply_patch",
-			Arguments: ai.JSON(`{"patch":"*** Begin Patch\n*** Update File: a.go\n@@\n-old\n+new\n*** End Patch\n"}`),
+			ID: "call-1", Name: "Edit",
+			Arguments: ai.JSON(`{"file_path":"a.go","old_string":"old\n","new_string":"new\n"}`),
 		},
 		Status: coding.ToolStatusCompleted,
-		Result: ai.ToolResultText("call-1", "apply_patch",
-			`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":1}}`+
-				"\n\nM a.go\n"),
+		Result: ai.ToolResultText("call-1", "Edit",
+			`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"Edit","counts":{"files":1},`+
+				`"edit":{"path":"a.go","kind":"replace","lines":[1]}}`+
+				"\n\nM a.go\n@@ line 1 @@\n-old\n+new\n"),
 	})
 	expanded := renderTimelineContentWithOptions(
 		projectTimeline(state), newMarkdownRenderer(8), 100, themeDark, true,

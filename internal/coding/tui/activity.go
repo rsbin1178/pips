@@ -102,6 +102,7 @@ type activityStatus struct {
 
 type activityContext struct {
 	state                      coding.State
+	workspace                  string
 	isStarting                 bool
 	hasBridge                  bool
 	isCanceling                bool
@@ -440,7 +441,9 @@ func retryActivityDetail(retry coding.RetryState, now time.Time) string {
 }
 
 func resolveProgressActivity(context activityContext) (activityStatus, bool) {
-	if activities := runningToolActivities(context.state.Tools); len(activities) > 0 {
+	if activities := runningToolActivitiesInWorkspace(
+		context.state.Tools, context.workspace,
+	); len(activities) > 0 {
 		if len(activities) == 1 {
 			activity := activities[0]
 			if activity.name == subagent.ToolName {
@@ -519,6 +522,13 @@ func semanticToolActivityStatus(activity toolActivity) activityStatus {
 }
 
 func runningToolActivities(values []coding.ToolState) []toolActivity {
+	return runningToolActivitiesInWorkspace(values, "")
+}
+
+func runningToolActivitiesInWorkspace(
+	values []coding.ToolState,
+	workspace string,
+) []toolActivity {
 	var running []toolActivity
 
 	for _, value := range values {
@@ -532,7 +542,9 @@ func runningToolActivities(values []coding.ToolState) []toolActivity {
 			id: value.Call.ID, name: oneLineToolText(value.Call.Name),
 			state: toolStateRunning,
 		}
-		activity.class, activity.action, activity.subject = describeToolCall(value.Call)
+		activity.class, activity.action, activity.subject = describeToolCallInWorkspace(
+			value.Call, workspace,
+		)
 		running = append(running, activity)
 	}
 

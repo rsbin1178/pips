@@ -8,6 +8,8 @@ import (
 	"errors"
 	"slices"
 	"time"
+
+	"github.com/rsbin1178/pips/internal/coding/config"
 )
 
 var (
@@ -226,14 +228,17 @@ type Definition struct {
 	// CapabilityMode narrows the tool kinds this type may use. It applies only
 	// when Tools.Allow is empty; an explicit allowlist already names its tools.
 	CapabilityMode CapabilityMode
-	Visibility     Visibility
-	Delivery       []Delivery
-	Limits         ExecutionLimits
-	Tools          ToolSelection
-	Skills         SkillSelection
-	MCP            MCPSelection
-	Hooks          HookSelection
-	Output         OutputContract
+	// EditStrategy selects this profile's file-editing tool surface. Empty
+	// inherits the parent Runtime's strategy; a read-only builtin sets none.
+	EditStrategy config.EditStrategy
+	Visibility   Visibility
+	Delivery     []Delivery
+	Limits       ExecutionLimits
+	Tools        ToolSelection
+	Skills       SkillSelection
+	MCP          MCPSelection
+	Hooks        HookSelection
+	Output       OutputContract
 }
 
 // Clone returns a detached definition snapshot.

@@ -27,6 +27,7 @@ func TestConfigShowResolvesSelectedFileAndChangedFlags(t *testing.T) {
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
 tool_search = true
 mode = "plan"
+edit_strategy = "write_and_replace"
 
 [subagents]
 max_concurrent = 6
@@ -87,6 +88,7 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `subagents.models = <none> # source=default detail="built-in"`)
 	assert.Contains(t, output, `dynamic_subagents = true # source=default detail="built-in"`)
 	assert.Contains(t, output, `active_agent_messages = false # source=default detail="built-in"`)
+	assert.Contains(t, output, `edit_strategy = "write_and_replace" # source=config_file detail="`)
 	assert.Contains(t, output, `mode = "plan" # source=config_file detail="`)
 	assert.Contains(t, output, `tui.theme = "auto" # source=default detail="built-in"`)
 	assert.Contains(t, output, `tui.screen = "fullscreen" # source=default detail="built-in"`)

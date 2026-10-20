@@ -42,7 +42,7 @@ func TestTeamWorkerRuntimeUsesExactProfileAndCatalog(t *testing.T) {
 	require.Len(t, requests, 1)
 	tools := toolNamesFromRequest(requests[0])
 	for _, expected := range []string{
-		"read", "ls", "glob", "grep", "apply_patch", "shell", "ask_user",
+		"read", "ls", "glob", "grep", "Edit", "shell", "ask_user",
 		"team_get_status", "team_list_tasks", "team_send_message",
 		"team_list_messages", "team_acknowledge_messages",
 	} {

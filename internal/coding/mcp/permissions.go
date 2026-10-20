@@ -234,7 +234,7 @@ func (p *Permissions) tracked(ctx context.Context) (bool, bool, error) {
 }
 
 type projectPermissionFile struct {
-	Schema string              `toml:"schema"`
+	Schema *string             `toml:"schema"`
 	MCP    []projectPermission `toml:"mcp"`
 }
 
@@ -273,8 +273,8 @@ func (p *Permissions) loadProjectFile() ([]projectPermission, bool, error) {
 		return nil, false, fmt.Errorf("%w: decode project permissions: %w", ErrInvalid, err)
 	}
 
-	if file.Schema != PermissionSchema {
-		return nil, false, fmt.Errorf("%w: unsupported permission schema %q", ErrInvalid, file.Schema)
+	if file.Schema != nil && *file.Schema != PermissionSchema {
+		return nil, false, fmt.Errorf("%w: unsupported permission schema %q", ErrInvalid, *file.Schema)
 	}
 
 	if len(file.MCP) > p.limits.MaxServers {
@@ -360,7 +360,8 @@ func (p *Permissions) writeProject(ctx context.Context, records []projectPermiss
 
 	encoder := toml.NewEncoder(&encoded)
 
-	if err := encoder.Encode(projectPermissionFile{Schema: PermissionSchema, MCP: records}); err != nil {
+	schema := PermissionSchema
+	if err := encoder.Encode(projectPermissionFile{Schema: &schema, MCP: records}); err != nil {
 		return fmt.Errorf("coding mcp: encode project permissions: %w", err)
 	}
 

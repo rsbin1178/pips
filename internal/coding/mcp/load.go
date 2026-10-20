@@ -166,7 +166,7 @@ func LoadDefinitions(ctx context.Context, options LoadOptions) (Definitions, []C
 
 func decodeDefinitions(data []byte, scope Scope, limits Limits) ([]Definition, []ConnectionDiagnostic, error) {
 	var header struct {
-		Schema string `json:"schema"`
+		Schema *string `json:"schema"`
 	}
 	if err := json.Unmarshal(data, &header); err != nil {
 		// Report the strict decoder's precise syntax error, and never let a
@@ -179,7 +179,12 @@ func decodeDefinitions(data []byte, scope Scope, limits Limits) ([]Definition, [
 		return nil, nil, fmt.Errorf("%w: definition file schema must be a string", ErrInvalid)
 	}
 
-	switch header.Schema {
+	schema := DefinitionSchema
+	if header.Schema != nil {
+		schema = *header.Schema
+	}
+
+	switch schema {
 	case DefinitionSchema:
 		return decodeServers(data, scope, limits)
 	case LegacyDefinitionSchema:
@@ -189,7 +194,7 @@ func decodeDefinitions(data []byte, scope Scope, limits Limits) ([]Definition, [
 	default:
 		return nil, nil, fmt.Errorf(
 			"%w: unsupported schema %q (use %q with an mcpServers object)",
-			ErrInvalid, header.Schema, DefinitionSchema,
+			ErrInvalid, schema, DefinitionSchema,
 		)
 	}
 }

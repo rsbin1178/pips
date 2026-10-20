@@ -14,6 +14,7 @@ import (
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/agentprofile"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/session"
 )
 
@@ -315,19 +316,21 @@ type ExecutionPlan struct {
 	Cwd string `json:"cwd,omitempty"`
 	// ResumeFrom names the completed sibling child whose transcript, tool
 	// state, and usage this execution inherits.
-	ResumeFrom         string                `json:"resume_from,omitempty"`
-	Capabilities       []EffectiveCapability `json:"capabilities"`
-	Skills             []string              `json:"skills"`
-	PreloadedSkills    []string              `json:"preloaded_skills"`
-	ToolSearch         bool                  `json:"tool_search,omitempty"`
-	DelegationDepth    int                   `json:"delegation_depth,omitempty"`
-	MaxDelegationDepth int                   `json:"max_delegation_depth,omitempty"`
-	Ancestry           []string              `json:"ancestry,omitempty"`
-	DelegationTargets  []string              `json:"delegation_targets,omitempty"`
-	PrivateMCP         []PrivateBinding      `json:"private_mcp,omitempty"`
-	PrivateHooks       []PrivateBinding      `json:"private_hooks,omitempty"`
-	Limits             Limits                `json:"limits"`
-	Output             OutputContract        `json:"output"`
+	ResumeFrom      string                `json:"resume_from,omitempty"`
+	Capabilities    []EffectiveCapability `json:"capabilities"`
+	Skills          []string              `json:"skills"`
+	PreloadedSkills []string              `json:"preloaded_skills"`
+	ToolSearch      bool                  `json:"tool_search,omitempty"`
+	// EditStrategy is the resolved file-editing tool surface for this child.
+	EditStrategy       config.EditStrategy `json:"edit_strategy,omitempty"`
+	DelegationDepth    int                 `json:"delegation_depth,omitempty"`
+	MaxDelegationDepth int                 `json:"max_delegation_depth,omitempty"`
+	Ancestry           []string            `json:"ancestry,omitempty"`
+	DelegationTargets  []string            `json:"delegation_targets,omitempty"`
+	PrivateMCP         []PrivateBinding    `json:"private_mcp,omitempty"`
+	PrivateHooks       []PrivateBinding    `json:"private_hooks,omitempty"`
+	Limits             Limits              `json:"limits"`
+	Output             OutputContract      `json:"output"`
 	// Legacy records did not carry an execution snapshot. It is set only while
 	// normalizing those durable records for read-only inspection; dispatch must
 	// never admit a legacy plan.
@@ -372,6 +375,7 @@ func validateExecutionPlan(plan ExecutionPlan, allowLegacy bool) error {
 		len(plan.DelegationTargets) > maxPlanDelegationTargets ||
 		len(plan.PrivateMCP) > maxPlanPrivateBindings || len(plan.PrivateHooks) > maxPlanPrivateBindings ||
 		!validPlanLimits(plan.Limits) ||
+		(plan.EditStrategy != "" && !plan.EditStrategy.Valid()) ||
 		!validPlanPersona(plan) || !validPlanWorkspace(plan) ||
 		validateOutputContract(plan.Output) != nil {
 		return fmt.Errorf("%w: invalid execution plan", ErrInvalid)
@@ -385,6 +389,7 @@ func validateExecutionPlan(plan ExecutionPlan, allowLegacy bool) error {
 			len(plan.Ancestry) != 0 || len(plan.DelegationTargets) != 0 ||
 			len(plan.PrivateMCP) != 0 || len(plan.PrivateHooks) != 0 ||
 			plan.Persona != "" || plan.PersonaReminder != "" || plan.ReasoningEffort != "" ||
+			plan.EditStrategy != "" ||
 			plan.Isolation != "" || plan.Cwd != "" || plan.ResumeFrom != "" {
 			return fmt.Errorf("%w: invalid legacy execution plan", ErrInvalid)
 		}

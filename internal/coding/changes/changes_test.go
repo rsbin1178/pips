@@ -11,6 +11,7 @@ import (
 	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/changes"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
@@ -180,7 +181,11 @@ func TestCodingToolsCloseChangeInspectionBoundary(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, tree.Close()) })
 
-	toolCatalog, err := tools.NewCatalog(tree, tools.DefaultLimits())
+	toolCatalog, err := tools.NewCatalog(
+		tree,
+		tools.DefaultLimits(),
+		tools.WithEditStrategy(config.EditStrategyWriteAndReplace),
+	)
 	require.NoError(t, err)
 	toolSet, err := toolCatalog.Snapshot(t.Context(), catalog.AllowAll("test", catalog.RiskWrite))
 	require.NoError(t, err)
@@ -209,8 +214,9 @@ func TestCodingToolsCloseChangeInspectionBoundary(t *testing.T) {
 	found := executeTool(t, byName, "glob", `{"pattern":"**/*.go"}`)
 	assert.Contains(t, found, "code.go")
 	searched := executeTool(t, byName, "grep", `{"pattern":"needle"}`)
-	assert.Contains(t, searched, "code.go:2")
-	executeTool(t, byName, "apply_patch", `{"patch":"*** Begin Patch\n*** Update File: code.go\n@@\n-// needle old\n+// needle new\n*** End Patch\n"}`)
+	assert.Contains(t, searched, "code.go\n2:// needle old")
+	executeTool(t, byName, "Edit", `{"file_path":"code.go","old_string":"// needle old","new_string":"// needle new"}`)
+	executeTool(t, byName, "Write", `{"file_path":"created.go","content":"package code\n"}`)
 
 	observed, err := inspector.Changes(t.Context(), baseline)
 	require.NoError(t, err)

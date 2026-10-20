@@ -94,7 +94,7 @@ func Load(ctx context.Context, options LoadOptions) (Definitions, error) {
 }
 
 type hookFile struct {
-	Schema string                 `json:"schema"`
+	Schema *string                `json:"schema"`
 	Hooks  map[string][]hookGroup `json:"hooks"`
 }
 
@@ -116,8 +116,9 @@ func decodeFile(data []byte, scope Scope, source string, limits Limits) ([]Defin
 	if err := jsonx.Decode(data, &file); err != nil {
 		return nil, err
 	}
-	if file.Schema != Schema {
-		return nil, fmt.Errorf("%w: unsupported schema %q", ErrInvalid, file.Schema)
+
+	if file.Schema != nil && *file.Schema != Schema {
+		return nil, fmt.Errorf("%w: unsupported schema %q", ErrInvalid, *file.Schema)
 	}
 	if file.Hooks == nil {
 		return nil, fmt.Errorf("%w: hooks must be an object", ErrInvalid)

@@ -498,6 +498,7 @@ func (r *Runtime) schedulerDispatcher(ctx context.Context) (subagent.Dispatcher,
 		childModels,
 		factory,
 		r.config.ToolSearch,
+		r.config.EditStrategy,
 		r.config.Subagent.StructuredResults,
 		r.config.DynamicSubagents,
 		subagentPresets{
@@ -531,6 +532,7 @@ func (r *Runtime) schedulerAmbientCatalog(
 	}
 
 	localOptions := []tools.CatalogOption{
+		tools.WithEditStrategy(r.config.EditStrategy),
 		tools.WithControlledShell(shell),
 		tools.WithControlledMonitor(monitor),
 		tools.WithKillBackground(func(ctx context.Context, taskID string) (background.Outcome, background.Subject, error) {

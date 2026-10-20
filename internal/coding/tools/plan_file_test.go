@@ -67,10 +67,10 @@ func planTool(t *testing.T, root string, store *planmode.Store, admitted bool, n
 	return nil
 }
 
-func planPatcher(t *testing.T, root string, store *planmode.Store, admitted bool) agent.Tool {
+func planEditor(t *testing.T, root string, store *planmode.Store, admitted bool) agent.Tool {
 	t.Helper()
 
-	return planTool(t, root, store, admitted, tools.ApplyPatchName)
+	return planTool(t, root, store, admitted, tools.EditName)
 }
 
 func planReader(t *testing.T, root string, store *planmode.Store, admitted bool) agent.Tool {
@@ -101,14 +101,16 @@ func callRead(t *testing.T, tool agent.Tool, path string) (string, error) {
 	return "", nil
 }
 
-func callPatch(t *testing.T, tool agent.Tool, document string) (string, error) {
+func callEdit(t *testing.T, tool agent.Tool, path, oldString, newString string) (string, error) {
 	t.Helper()
 
-	args, err := json.Marshal(map[string]string{"patch": document})
+	args, err := json.Marshal(map[string]string{
+		"file_path": path, "old_string": oldString, "new_string": newString,
+	})
 	require.NoError(t, err)
 
 	parts, execErr := tool.Exec(t.Context(), agent.ToolCall{
-		Name: tools.ApplyPatchName, Args: ai.JSON(args),
+		Name: tools.EditName, Args: ai.JSON(args),
 	})
 	if execErr != nil {
 		return "", execErr
@@ -123,16 +125,15 @@ func callPatch(t *testing.T, tool agent.Tool, document string) (string, error) {
 	return "", nil
 }
 
-func TestApplyPatchWritesOnlyTheAdmittedPlanFile(t *testing.T) {
+func TestEditWritesOnlyTheAdmittedPlanFile(t *testing.T) {
 	t.Parallel()
 
 	store, err := planmode.NewStore(t.TempDir(), "session-plan", planmode.DefaultLimits())
 	require.NoError(t, err)
 
-	tool := planPatcher(t, t.TempDir(), store, true)
+	tool := planEditor(t, t.TempDir(), store, true)
 
-	create := "*** Begin Patch\n*** Add File: " + store.Path() + "\n+# Plan\n+Do it.\n*** End Patch"
-	result, err := callPatch(t, tool, create)
+	result, err := callEdit(t, tool, store.Path(), "", "# Plan\nDo it.\n")
 	require.NoError(t, err)
 	assert.Contains(t, result, "A "+store.Path())
 
@@ -140,8 +141,7 @@ func TestApplyPatchWritesOnlyTheAdmittedPlanFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "# Plan\nDo it.\n", document.Content)
 
-	update := "*** Begin Patch\n*** Update File: " + store.Path() + "\n@@\n # Plan\n-Do it.\n+Ship it.\n*** End Patch"
-	_, err = callPatch(t, tool, update)
+	_, err = callEdit(t, tool, store.Path(), "Do it.", "Ship it.")
 	require.NoError(t, err)
 
 	document, err = store.Read(t.Context())
@@ -149,33 +149,31 @@ func TestApplyPatchWritesOnlyTheAdmittedPlanFile(t *testing.T) {
 	assert.Equal(t, "# Plan\nShip it.\n", document.Content)
 }
 
-func TestApplyPatchRejectsPlanTargetOutsidePlanMode(t *testing.T) {
+func TestEditRejectsPlanTargetOutsidePlanMode(t *testing.T) {
 	t.Parallel()
 
 	store, err := planmode.NewStore(t.TempDir(), "session-plan-off", planmode.DefaultLimits())
 	require.NoError(t, err)
 
-	tool := planPatcher(t, t.TempDir(), store, false)
+	tool := planEditor(t, t.TempDir(), store, false)
 
-	patch := "*** Begin Patch\n*** Add File: " + store.Path() + "\n+escape\n*** End Patch"
-	_, err = callPatch(t, tool, patch)
+	_, err = callEdit(t, tool, store.Path(), "", "escape")
 	require.Error(t, err)
 }
 
-func TestApplyPatchRejectsMixedPlanAndWorkspaceTargets(t *testing.T) {
+func TestEditRejectsWorkspaceTargetsWhilePlanModeIsAdmitted(t *testing.T) {
 	t.Parallel()
 
 	store, err := planmode.NewStore(t.TempDir(), "session-plan-mixed", planmode.DefaultLimits())
 	require.NoError(t, err)
 
-	tool := planPatcher(t, t.TempDir(), store, true)
+	tool := planEditor(t, t.TempDir(), store, true)
 
-	patch := "*** Begin Patch\n*** Add File: " + store.Path() + "\n+plan\n*** Add File: note.md\n+note\n*** End Patch"
-	_, err = callPatch(t, tool, patch)
+	_, err = callEdit(t, tool, "note.md", "a", "b")
 	require.Error(t, err)
 }
 
-func TestApplyPatchReplacesTheSeededPlanFile(t *testing.T) {
+func TestEditReplacesTheSeededPlanFile(t *testing.T) {
 	t.Parallel()
 
 	store, err := planmode.NewStore(t.TempDir(), "session-plan-seeded", planmode.DefaultLimits())
@@ -185,10 +183,9 @@ func TestApplyPatchReplacesTheSeededPlanFile(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, created)
 
-	tool := planPatcher(t, t.TempDir(), store, true)
+	tool := planEditor(t, t.TempDir(), store, true)
 
-	patch := "*** Begin Patch\n*** Add File: " + store.Path() + "\n+# Plan\n+Ship it.\n*** End Patch"
-	result, err := callPatch(t, tool, patch)
+	result, err := callEdit(t, tool, store.Path(), "", "# Plan\nShip it.\n")
 	require.NoError(t, err)
 	assert.Contains(t, result, "M "+store.Path())
 

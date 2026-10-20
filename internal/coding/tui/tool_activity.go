@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"image/color"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -28,6 +30,7 @@ import (
 
 const (
 	compactToolPreviewLines = 4
+	compactEditPreviewLines = 8
 	compactExploreRows      = 6
 	maximumExpandedToolRows = 256
 	// compactToolPreviewWidth bounds a one-line JSON summary in compact rows.
@@ -38,7 +41,8 @@ const (
 	toolNameGlob            = "glob"
 	toolNameSearch          = "grep"
 	toolNameShell           = "shell"
-	toolNamePatch           = "apply_patch"
+	toolNameEdit            = "Edit"
+	toolNameWrite           = "Write"
 	toolStateTextFailed     = "failed"
 )
 
@@ -344,6 +348,10 @@ func toolResultPart(message ai.ToolMessage, callID string) (ai.ToolResultPart, b
 }
 
 func describeToolActivity(record toolActivityRecord) toolActivity {
+	return describeToolActivityInWorkspace(record, "")
+}
+
+func describeToolActivityInWorkspace(record toolActivityRecord, workspace string) toolActivity {
 	activity := toolActivity{
 		id: record.call.ID, name: oneLineToolText(record.call.Name),
 		runID: record.runID, turn: record.turn,
@@ -351,8 +359,10 @@ func describeToolActivity(record toolActivityRecord) toolActivity {
 		arguments: record.call.Arguments,
 		update:    visibleToolParts(record.update),
 	}
-	activity.class, activity.action, activity.subject = describeToolCall(record.call)
-	activity.invocation = compactToolInvocation(record.call)
+	activity.class, activity.action, activity.subject = describeToolCallInWorkspace(
+		record.call, workspace,
+	)
+	activity.invocation = compactToolInvocationInWorkspace(record.call, workspace)
 	if activity.name == harness.SkillToolName {
 		activity.invocation = strings.TrimSpace(activity.action + " " + activity.subject)
 	}
@@ -404,37 +414,55 @@ func classifyToolActivity(record toolActivityRecord) toolActivityState {
 }
 
 func describeToolCall(call coding.ToolCall) (toolActivityClass, string, string) {
+	return describeToolCallInWorkspace(call, "")
+}
+
+//nolint:gocyclo // One dispatch switch names each built-in tool.
+func describeToolCallInWorkspace(
+	call coding.ToolCall,
+	workspace string,
+) (toolActivityClass, string, string) {
 	arguments := decodeToolArguments(call.Arguments)
 
 	switch call.Name {
 	case toolNameRead:
-		return toolClassExplore, "Read", safeWorkspaceToolPath(
-			toolArgumentString(arguments, "path"),
+		return toolClassExplore, "Read", safeWorkspaceToolPathIn(
+			toolArgumentString(arguments, "path"), workspace,
 		)
 	case toolNameList:
-		workspacePath := safeWorkspaceToolPath(toolArgumentString(arguments, "path"))
+		workspacePath := safeWorkspaceToolPathIn(
+			toolArgumentString(arguments, "path"), workspace,
+		)
 		if workspacePath == "" {
 			workspacePath = "."
 		}
 
 		return toolClassExplore, "List", workspacePath
 	case toolNameGlob:
-		return toolClassExplore, "Glob", subjectInPath(
+		return toolClassExplore, "Glob", subjectInPathIn(
 			toolArgumentString(arguments, "pattern"),
 			toolArgumentString(arguments, "path"),
+			workspace,
 		)
 	case toolNameSearch:
-		return toolClassExplore, "Search", subjectInPath(
+		return toolClassExplore, "Search", subjectInPathIn(
 			toolArgumentString(arguments, "pattern"),
 			toolArgumentString(arguments, "path"),
+			workspace,
 		)
 	case toolNameShell:
 		// Show the script rather than the `<shell> -c` wrapper the caller used.
 		return toolClassShell, "Run", safeToolSubject(
 			shellCommandScript(toolArgumentString(arguments, "command")),
 		)
-	case toolNamePatch:
-		return toolClassPatch, "Update", workspaceLabel
+	case toolNameEdit:
+		return toolClassPatch, "Edit", safeWorkspaceToolPathIn(
+			toolArgumentString(arguments, "file_path"), workspace,
+		)
+	case toolNameWrite:
+		return toolClassPatch, "Write", safeWorkspaceToolPathIn(
+			toolArgumentString(arguments, "file_path"), workspace,
+		)
 	case tasklist.ToolName, tasklist.LegacyToolName:
 		return toolClassTaskList, "", ""
 	case harness.SkillToolName:
@@ -453,9 +481,9 @@ func describeToolCall(call coding.ToolCall) (toolActivityClass, string, string) 
 	}
 }
 
-func subjectInPath(subject, path string) string {
+func subjectInPathIn(subject, path, workspace string) string {
 	subject = oneLineToolText(subject)
-	path = safeWorkspaceToolPath(path)
+	path = safeWorkspaceToolPathIn(path, workspace)
 	if path == "" {
 		return subject
 	}
@@ -467,21 +495,95 @@ func subjectInPath(subject, path string) string {
 }
 
 func safeWorkspaceToolPath(value string) string {
+	return safeWorkspaceToolPathIn(value, "")
+}
+
+func safeWorkspaceToolPathIn(value, workspace string) string {
 	value = oneLineToolText(value)
-	clean := path.Clean(value)
-	if value != "" && (path.IsAbs(value) || filepath.IsAbs(value)) {
-		base := filepath.Base(value)
-		if base == "" || base == "." || base == string(filepath.Separator) {
-			return "[absolute path]"
-		}
-
-		return "…/" + base
-	}
-	if value != "" && (clean == ".." || strings.HasPrefix(clean, "../")) {
-		return "[invalid path]"
+	if value == "" {
+		return ""
 	}
 
-	return value
+	if path.IsAbs(value) || filepath.IsAbs(value) || filepath.VolumeName(value) != "" {
+		return normalizedToolPath(value, workspace)
+	}
+	if expanded, ok := expandToolTilde(value); ok {
+		return normalizedToolPath(expanded, workspace)
+	}
+	if strings.HasPrefix(value, "~") {
+		// ~user is intentionally left as typed; only the current user's home is
+		// expanded, matching the Tool path resolver's supported spelling.
+		return value
+	}
+	if strings.TrimSpace(workspace) == "" {
+		return filepath.ToSlash(filepath.Clean(value))
+	}
+
+	target := filepath.Clean(filepath.Join(workspace, filepath.FromSlash(value)))
+
+	return normalizedToolPath(target, workspace)
+}
+
+// toolHomeDir caches the user home used by display-only tilde expansion. The
+// value is stable for the process, like grok-build's OnceLock home directory.
+var toolHomeDir = sync.OnceValues(os.UserHomeDir)
+
+// expandToolTilde expands a leading "~" or "~/" using the user home directory.
+// "~user" is not a spelling the Tool path resolver supports, so it stays
+// literal. The result is lexical; no symlink or filesystem lookup is done.
+func expandToolTilde(value string) (string, bool) {
+	if value == "" || value[0] != '~' {
+		return "", false
+	}
+
+	rest := value[1:]
+	if rest != "" && rest[0] != '/' && rest[0] != '\\' {
+		return "", false
+	}
+
+	home, err := toolHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "", false
+	}
+	if rest == "" {
+		return home, true
+	}
+
+	relative := filepath.FromSlash(strings.ReplaceAll(rest[1:], "\\", "/"))
+
+	return filepath.Join(home, relative), true
+}
+
+// normalizedToolPath prefers the workspace-relative spelling and falls back to
+// the normalized absolute target. The workspace root itself keeps its absolute
+// spelling, matching the default expanded Tool header.
+func normalizedToolPath(value, workspace string) string {
+	if relative, ok := workspaceRelativePath(workspace, value); ok && relative != "." {
+		return relative
+	}
+
+	return filepath.ToSlash(filepath.Clean(value))
+}
+
+// workspaceRelativePath returns a slash-separated path below workspace. A path
+// outside the workspace, a different Windows volume, or an empty workspace is
+// not relative, so the caller keeps the bounded absolute-path form.
+func workspaceRelativePath(workspace, value string) (string, bool) {
+	if strings.TrimSpace(workspace) == "" {
+		return "", false
+	}
+
+	relative, err := filepath.Rel(filepath.Clean(workspace), filepath.Clean(value))
+	if err != nil {
+		return "", false
+	}
+
+	relative = filepath.ToSlash(relative)
+	if relative == ".." || strings.HasPrefix(relative, "../") {
+		return "", false
+	}
+
+	return relative, true
 }
 
 func decodeToolArguments(value ai.JSON) map[string]any {
@@ -502,7 +604,7 @@ func toolArgumentString(arguments map[string]any, key string) string {
 	return oneLineToolText(value)
 }
 
-func compactToolInvocation(call coding.ToolCall) string {
+func compactToolInvocationInWorkspace(call coding.ToolCall, workspace string) string {
 	name := oneLineToolText(call.Name)
 	if name == "" {
 		name = "tool"
@@ -515,7 +617,7 @@ func compactToolInvocation(call coding.ToolCall) string {
 		if value == "" || isSensitiveToolKey(key) || containsSensitiveToolText(value) {
 			continue
 		}
-		if key == "path" && safeWorkspaceToolPath(value) != value {
+		if key == "path" && safeWorkspaceToolPathIn(value, workspace) != value {
 			continue
 		}
 		if key == "url" {
@@ -601,11 +703,8 @@ func compactPatchPreview(activity toolActivity) []string {
 	if !activity.hasHeader {
 		return nil
 	}
-	if preview, ok := compactPatchDiffPreview(activity); ok {
-		return preview
-	}
 
-	return patchResultLines(activity.body, compactToolPreviewLines)
+	return boundedToolLines(activity.body, compactEditPreviewLines)
 }
 
 func compactGenericPreview(activity toolActivity) []string {
@@ -1128,7 +1227,6 @@ func expandedToolOutput(activity toolActivity) string {
 			return changes
 		}
 	}
-
 	parts := make([]string, 0, 2)
 	if facts := toolResultFacts(activity); facts != "" {
 		parts = append(parts, facts)
@@ -1472,11 +1570,6 @@ func toolActivityRows(
 	case toolClassShell:
 		return slices.Clone(activities[0].preview)
 	case toolClassPatch:
-		if _, parsed := parsePatchDisplayChanges(activities[0]); !parsed {
-			if _, _, single := singlePatchChange(activities[0]); single {
-				return nil
-			}
-		}
 		if len(activities[0].preview) == 0 {
 			return nil
 		}
@@ -1526,18 +1619,36 @@ func toolActivityReason(activity toolActivity) string {
 	return toolStateTextFailed
 }
 
+func patchDetailChanges(activity toolActivity) string {
+	if activity.state != toolStateSucceeded || !activity.hasHeader ||
+		!activity.header.OK || activity.header.Edit == nil {
+		return ""
+	}
+
+	body := strings.TrimSpace(sanitizeToolText(activity.body))
+
+	return truncateText(body, maximumToolDetailBytes)
+}
+
 func singlePatchChange(activity toolActivity) (verb, subject string, ok bool) {
 	if activity.state != toolStateSucceeded || !activity.hasHeader ||
 		activity.header.Counts.Files != 1 {
 		return "", "", false
 	}
-	lines := patchResultLines(activity.body, 2)
+	rawLines := patchResultLines(activity.body, 3)
+	lines := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		if strings.HasPrefix(line, "… ") {
+			continue
+		}
+		lines = append(lines, line)
+	}
 	if len(lines) != 1 || len(lines[0]) < 3 || lines[0][1] != ' ' {
 		return "", "", false
 	}
 
 	subject = safeWorkspaceToolPath(strings.TrimSpace(lines[0][2:]))
-	if subject == "" || subject == "[invalid path]" {
+	if subject == "" {
 		return "", "", false
 	}
 	switch lines[0][0] {

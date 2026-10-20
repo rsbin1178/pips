@@ -253,8 +253,12 @@ func writeModeGuidance(prompt *strings.Builder, options systemPromptOptions, too
 		prompt.WriteString("- Use shell for commands, builds, and tests, not as a substitute for a more precise available workspace tool.\n")
 	}
 
-	if _, ok := available[tools.ApplyPatchName]; ok {
-		prompt.WriteString("- Use apply_patch for deliberate source edits. Let project formatters or generators own mechanical and generated output.\n")
+	if _, ok := available[tools.EditName]; ok {
+		prompt.WriteString("- Use " + tools.EditName + " for precise workspace edits: old_string must match exactly once unless replace_all is true, and an empty old_string creates or replaces one whole file. Read an existing file first; the read tool's \"N: \" line prefixes are not part of the file.\n")
+	}
+
+	if _, ok := available[tools.WriteName]; ok {
+		prompt.WriteString("- Use " + tools.WriteName + " to create or overwrite one complete file. It creates missing parent directories and preserves an existing file's permission bits.\n")
 	}
 
 	if _, ok := available[tasklist.ToolName]; ok {

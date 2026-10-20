@@ -474,15 +474,14 @@ func (m *staleDependencyRecoveryModel) Generate(
 		}
 	}
 	if call == 1 {
-		arguments, err := json.Marshal(struct {
-			Patch string `json:"patch"`
-		}{Patch: "*** Begin Patch\n*** Add File: " + path +
-			"\n+captured by " + path + "\n*** End Patch"})
+		arguments, err := json.Marshal(map[string]string{
+			"file_path": path, "old_string": "", "new_string": "captured by " + path + "\n",
+		})
 		if err != nil {
 			return nil, err
 		}
 
-		return runtimeToolResponse("write-"+path, "apply_patch", string(arguments)), nil
+		return runtimeToolResponse("write-"+path, "Edit", string(arguments)), nil
 	}
 	if call == 2 {
 		return runtimeTextResponse("Worker result is ready for capture."), nil

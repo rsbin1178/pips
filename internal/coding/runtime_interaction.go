@@ -741,6 +741,7 @@ func (r *Runtime) openInteraction(
 	}
 
 	localOptions := []tools.CatalogOption{
+		tools.WithEditStrategy(effectiveEditStrategy(started.Mode, r.config.EditStrategy)),
 		tools.WithControlledShell(shell),
 		tools.WithControlledMonitor(monitor),
 		tools.WithKillBackground(func(ctx context.Context, taskID string) (background.Outcome, background.Subject, error) {
@@ -976,6 +977,7 @@ func (r *Runtime) openInteraction(
 				childModels,
 				childFactory,
 				r.config.ToolSearch,
+				effectiveEditStrategy(started.Mode, r.config.EditStrategy),
 				r.config.Subagent.StructuredResults,
 				r.config.DynamicSubagents,
 				subagentPresets{
