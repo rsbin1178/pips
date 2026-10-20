@@ -3,6 +3,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -81,6 +82,51 @@ func TestToolDetailRendersArgumentsWithoutJSONEscapes(t *testing.T) {
 	assert.Contains(t, detail, "items")
 	assert.Contains(t, detail, "- title           first")
 	assert.NotContains(t, detail, `{"total":2`)
+}
+
+func TestToolDetailUsesWorkspaceRelativePathArguments(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	outside := filepath.Join(filepath.Dir(workspace), "outside.go")
+
+	cases := []struct {
+		name string
+		key  string
+		args string
+		want string
+	}{
+		{name: "workspace root", key: "path", args: `{"path":` + fmt.Sprintf("%q", workspace) + `,"offset":0,"limit":30}`, want: "."},
+		{name: "inside", key: "path", args: `{"path":` + fmt.Sprintf("%q", filepath.Join(workspace, "src")) + `}`, want: "src"},
+		{name: "outside", key: "file_path", args: `{"file_path":` + fmt.Sprintf("%q", outside) + `}`, want: filepath.ToSlash(outside)},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := detailState(coding.ToolState{
+				Call: coding.ToolCall{
+					ID: "call-1", Name: "ls", Arguments: ai.JSON(testCase.args),
+				},
+				Status: coding.ToolStatusCompleted,
+				Result: ai.ToolResultText("call-1", "ls", "3 entries"),
+			})
+			blocks := projectTimeline(state)
+			require.Len(t, blocks, 1)
+
+			detail := newToolDetailViewInWorkspace(blocks[0], workspace)
+			found := false
+
+			for _, row := range detail.rows {
+				if row.key != testCase.key {
+					continue
+				}
+				found = true
+				assert.Equal(t, testCase.want, row.text)
+			}
+			assert.True(t, found, "the path argument row is rendered")
+		})
+	}
 }
 
 func TestToolDetailShellShowsCommandAndStreams(t *testing.T) {

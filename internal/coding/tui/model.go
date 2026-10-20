@@ -2515,7 +2515,7 @@ func (m *Model) refreshToolDetailRoute() {
 		var detail toolDetailView
 		switch block.kind {
 		case blockTool:
-			detail = newToolDetailView(block)
+			detail = newToolDetailViewInWorkspace(block, m.options.Workspace)
 		case blockQuestion:
 			detail = newQuestionDetailView(block)
 		default:
@@ -2552,7 +2552,7 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 			if len(block.tools) > 0 && block.tools[0].childSessionID != "" {
 				return m.openSubagentRoute(block.tools[0].childSessionID)
 			}
-			detail := newToolDetailView(block)
+			detail := newToolDetailViewInWorkspace(block, m.options.Workspace)
 
 			return m.openToolDetailRoute(detail)
 		case blockQuestion:

@@ -554,11 +554,11 @@ func expandToolTilde(value string) (string, bool) {
 	return filepath.Join(home, relative), true
 }
 
-// normalizedToolPath prefers the workspace-relative spelling and falls back to
-// the normalized absolute target. The workspace root itself keeps its absolute
-// spelling, matching the default expanded Tool header.
+// normalizedToolPath prefers the workspace-relative spelling, including "."
+// for the workspace root itself. A path outside the workspace keeps its
+// normalized absolute target.
 func normalizedToolPath(value, workspace string) string {
-	if relative, ok := workspaceRelativePath(workspace, value); ok && relative != "." {
+	if relative, ok := workspaceRelativePath(workspace, value); ok {
 		return relative
 	}
 
