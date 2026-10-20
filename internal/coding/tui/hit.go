@@ -191,5 +191,5 @@ func (m *Model) activateEntry(row int) tea.Cmd {
 		return m.openToolDetailRoute(newQuestionDetailView(block))
 	}
 
-	return m.openToolDetailRoute(newToolDetailView(block))
+	return m.openToolDetailRoute(newToolDetailViewInWorkspace(block, m.options.Workspace))
 }
