@@ -889,6 +889,8 @@ func (m *Model) appendToolFrameCache(
 func (m *Model) volatileTimelineBlocks(activities []toolActivity, markerSplit int) []timelineBlock {
 	blocks := projectVolatileBlocks(m.state, activities)
 	blocks = insertCompletionMarkers(blocks, m.completionMarkers[markerSplit:])
+	blocks = insertQuestionPreviews(blocks, m.optimisticQuestionBlocks())
+
 	if !m.showThinkingBlocks() {
 		blocks = withoutThinkingBlocks(blocks)
 	}

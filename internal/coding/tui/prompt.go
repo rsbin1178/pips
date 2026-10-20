@@ -39,6 +39,13 @@ const (
 	questionEditChat
 )
 
+const (
+	// questionTabHeaderLimit keeps four question tabs and the Submit tab inside
+	// a typical frame; a click still needs to reach every one of them.
+	questionTabHeaderLimit = 12
+	questionUnchecked      = "[ ]"
+)
+
 type questionPromptState struct {
 	request  question.Request
 	tab      int
@@ -49,6 +56,70 @@ type questionPromptState struct {
 	editor   textarea.Model
 	loading  bool
 	err      error
+}
+
+// questionPromptHitKind names one pointer target the question band painted.
+type questionPromptHitKind uint8
+
+const (
+	questionPromptHitNone questionPromptHitKind = iota
+	questionPromptHitTab
+	questionPromptHitOption
+	questionPromptHitCustom
+	questionPromptHitChat
+)
+
+// questionPromptTabSegment is the display-column range one tab occupies on the
+// tabs row, so a click can address the tab it landed on.
+type questionPromptTabSegment struct {
+	start int
+	end   int
+	index int
+}
+
+// questionPromptHitRow is what one painted prompt row accepts. Option, custom
+// and chat rows accept a click anywhere on the row (and on the description and
+// preview rows that explain them); a tabs row resolves the clicked segment.
+type questionPromptHitRow struct {
+	kind     questionPromptHitKind
+	question int
+	option   int
+	// detail marks explanation and preview rows. They are the first thing a
+	// short window gives up, because every choice has to stay visible.
+	detail   bool
+	segments []questionPromptTabSegment
+}
+
+// questionPromptHit is the question band's pointer map for the frame that was
+// last painted. top is the frame row of the first painted prompt row; rows are
+// aligned with the band's rows after every cap and crop the frame applied.
+type questionPromptHit struct {
+	top     int
+	rows    []questionPromptHitRow
+	cursor  bool
+	cursorX int
+	cursorY int
+}
+
+// questionPromptRows collects prompt rows and their pointer targets while the
+// band is built, which keeps the hit map aligned with what is actually drawn.
+type questionPromptRows struct {
+	values  []string
+	targets []questionPromptHitRow
+	cursor  bool
+	cursorX int
+	cursorY int
+}
+
+func (rows *questionPromptRows) add(value string, target questionPromptHitRow) {
+	rows.values = append(rows.values, value)
+	rows.targets = append(rows.targets, target)
+}
+
+func (rows *questionPromptRows) addBlock(value string, target questionPromptHitRow) {
+	for line := range strings.SplitSeq(value, "\n") {
+		rows.add(line, target)
+	}
 }
 
 type promptState struct {
@@ -88,11 +159,16 @@ func (m *Model) openCompactPrompt() tea.Cmd {
 	return tea.Batch(load, m.startActivityClock(activityWasVisible))
 }
 
+//nolint:gocyclo // The prompt owners form one mutually exclusive state machine.
 func (m *Model) syncApprovalPrompt() {
 	if m.syncPlanReviewPrompt() {
 		return
 	}
 	if m.state.Question.Required != nil {
+		// A question that is still required means its resolution did not land;
+		// drop the optimistic card so the prompt owns the state again.
+		delete(m.questionPreviews, m.state.Question.Required.ToolCallID)
+
 		if m.prompt.kind == promptQuestion &&
 			m.prompt.team == nil &&
 			m.prompt.subagent == nil &&
@@ -370,6 +446,10 @@ func (m *Model) newQuestionPrompt(request question.Request) questionPromptState 
 		state.editing = questionEditChat
 		state.editor.Placeholder = "Type the missing preference or constraint"
 		state.editor.Focus()
+	} else if len(state.request.Questions) > 0 && state.request.Questions[0].IsText() {
+		state.editing = questionEditCustom
+		state.editor.Placeholder = "Type your answer"
+		state.editor.Focus()
 	}
 
 	return state
@@ -398,11 +478,9 @@ func (m *Model) updateQuestionPromptKey(message tea.KeyPressMsg) (tea.Model, tea
 
 		return m, m.rejectQuestionPromptCommand(state.request, activityWasVisible)
 	case keyLeft:
-		state.tab = wrapIndex(state.tab-1, questionCount+1)
-		state.err = nil
+		return m, m.moveQuestionTab(state, -1)
 	case keyRight, keyTab:
-		state.tab = wrapIndex(state.tab+1, questionCount+1)
-		state.err = nil
+		return m, m.moveQuestionTab(state, 1)
 	case "up", "k":
 		if state.tab < questionCount {
 			rows := len(state.request.Questions[state.tab].Options) + 2
@@ -450,6 +528,10 @@ func (m *Model) activateQuestionSelection() (tea.Model, tea.Cmd) {
 	}
 
 	item := state.request.Questions[state.tab]
+	if item.IsText() {
+		return m, m.enterQuestionTab(state, state.tab)
+	}
+
 	cursor := state.cursors[state.tab]
 	switch {
 	case cursor < len(item.Options):
@@ -465,7 +547,7 @@ func (m *Model) activateQuestionSelection() (tea.Model, tea.Cmd) {
 		state.tab = min(state.tab+1, len(state.request.Questions))
 		state.err = nil
 
-		return m, nil
+		return m, m.enterQuestionTab(state, state.tab)
 	case cursor == len(item.Options):
 		state.editing = questionEditCustom
 		state.editor.Reset()
@@ -486,8 +568,22 @@ func (m *Model) activateQuestionSelection() (tea.Model, tea.Cmd) {
 
 func (m *Model) updateQuestionEditorKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	state := &m.prompt.question
+	if m.questionTabIsText(state) {
+		return m.updateQuestionTextKey(message)
+	}
+
 	switch message.String() {
 	case keyEscape:
+		if state.request.Kind == question.RequestFreeform {
+			// This prompt has no list to return to, so Esc is the cancel action
+			// the hint advertises.
+			activityWasVisible := m.activityClockVisible()
+			state.editing = questionEditNone
+			state.editor.Blur()
+			state.loading = true
+
+			return m, m.rejectQuestionPromptCommand(state.request, activityWasVisible)
+		}
 		state.editing = questionEditNone
 		state.editor.Blur()
 		state.err = nil
@@ -501,9 +597,7 @@ func (m *Model) updateQuestionEditorKey(message tea.KeyPressMsg) (tea.Model, tea
 
 		return m, m.rejectQuestionPromptCommand(state.request, activityWasVisible)
 	case keyCtrlJ, keyShiftEnter:
-		if state.editing == questionEditChat {
-			state.editor.InsertString("\n")
-		}
+		state.editor.InsertString("\n")
 
 		return m, nil
 	case keyEnter:
@@ -526,7 +620,7 @@ func (m *Model) updateQuestionEditorKey(message tea.KeyPressMsg) (tea.Model, tea
 			activityWasVisible := m.activityClockVisible()
 			state.loading = true
 
-			return m, m.resolveQuestionPromptCommand(resolution, activityWasVisible)
+			return m, m.resolveQuestionPromptCommand(state.request, resolution, activityWasVisible)
 		}
 
 		clear(state.selected[state.tab])
@@ -536,7 +630,7 @@ func (m *Model) updateQuestionEditorKey(message tea.KeyPressMsg) (tea.Model, tea
 		state.tab = min(state.tab+1, len(state.request.Questions))
 		state.err = nil
 
-		return m, nil
+		return m, m.enterQuestionTab(state, state.tab)
 	}
 
 	var command tea.Cmd
@@ -545,14 +639,117 @@ func (m *Model) updateQuestionEditorKey(message tea.KeyPressMsg) (tea.Model, tea
 	return m, command
 }
 
+func (m *Model) updateQuestionTextKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	state := &m.prompt.question
+	switch message.String() {
+	case keyEscape, keyCtrlC:
+		activityWasVisible := m.activityClockVisible()
+		state.editing = questionEditNone
+		state.editor.Blur()
+		state.loading = true
+
+		return m, m.rejectQuestionPromptCommand(state.request, activityWasVisible)
+	case keyCtrlJ, keyShiftEnter:
+		state.editor.InsertString("\n")
+
+		return m, nil
+	case keyTab:
+		state.custom[state.tab] = strings.TrimSpace(state.editor.Value())
+		state.editor.Blur()
+		state.editing = questionEditNone
+		state.err = nil
+
+		return m, m.enterQuestionTab(state, min(state.tab+1, len(state.request.Questions)))
+	case keyShiftTab:
+		state.custom[state.tab] = strings.TrimSpace(state.editor.Value())
+		state.editor.Blur()
+		state.editing = questionEditNone
+		state.err = nil
+
+		return m, m.enterQuestionTab(state, max(0, state.tab-1))
+	case keyEnter:
+		value := strings.TrimSpace(state.editor.Value())
+		if value == "" {
+			state.err = errors.New("enter a response before continuing")
+
+			return m, nil
+		}
+		state.custom[state.tab] = value
+		state.editor.Blur()
+		state.editing = questionEditNone
+		state.tab = min(state.tab+1, len(state.request.Questions))
+		state.err = nil
+
+		return m, m.enterQuestionTab(state, state.tab)
+	}
+
+	var command tea.Cmd
+	state.err = nil
+	state.editor, command = state.editor.Update(message)
+
+	return m, command
+}
+
+// moveQuestionTab moves the active tab and opens the editor when the tab is a
+// kind text question. It clears the previous validation error.
+func (m *Model) moveQuestionTab(state *questionPromptState, delta int) tea.Cmd {
+	state.err = nil
+
+	return m.enterQuestionTab(
+		state,
+		wrapIndex(state.tab+delta, len(state.request.Questions)+1),
+	)
+}
+
+// enterQuestionTab focuses the tab and enters text editing for a kind text
+// question. Choice questions and Submit keep the list keyboard behavior.
+func (m *Model) enterQuestionTab(state *questionPromptState, index int) tea.Cmd {
+	count := len(state.request.Questions)
+	if index < 0 || index > count {
+		return nil
+	}
+
+	state.tab = index
+	state.editing = questionEditNone
+	if state.editor.Focused() {
+		state.editor.Blur()
+	}
+	if index >= count {
+		return nil
+	}
+
+	item := state.request.Questions[index]
+	if !item.IsText() {
+		return nil
+	}
+
+	state.editing = questionEditCustom
+	state.editor.Reset()
+	state.editor.SetValue(state.custom[index])
+	state.editor.Placeholder = "Type your answer"
+
+	return state.editor.Focus()
+}
+
+func (m *Model) questionTabIsText(state *questionPromptState) bool {
+	return state.tab >= 0 && state.tab < len(state.request.Questions) &&
+		state.request.Questions[state.tab].IsText()
+}
+
 func (m *Model) resolveStructuredQuestion() (tea.Model, tea.Cmd) {
 	state := &m.prompt.question
 	answers := make([]question.Answer, len(state.request.Questions))
 	for questionIndex, item := range state.request.Questions {
+		if item.IsText() {
+			answers[questionIndex].Custom = state.custom[questionIndex]
+			continue
+		}
+
 		if state.custom[questionIndex] != "" {
 			answers[questionIndex].Custom = state.custom[questionIndex]
 			continue
 		}
+
 		for optionIndex, option := range item.Options {
 			if state.selected[questionIndex][optionIndex] {
 				answers[questionIndex].Selections = append(
@@ -569,20 +766,33 @@ func (m *Model) resolveStructuredQuestion() (tea.Model, tea.Cmd) {
 	}
 	if err := question.ValidateResolution(state.request, resolution); err != nil {
 		state.err = errors.New("answer every question before submitting")
+		var command tea.Cmd
+		if index := firstUnansweredQuestion(*state); index >= 0 {
+			// Stay with the decision that still needs an answer instead of
+			// leaving the reader on a Submit tab that cannot explain itself.
+			state.err = fmt.Errorf("answer %q before submitting", state.request.Questions[index].Header)
+			command = m.enterQuestionTab(state, index)
+		}
 
-		return m, nil
+		return m, command
 	}
 	activityWasVisible := m.activityClockVisible()
 	state.loading = true
 	state.err = nil
 
-	return m, m.resolveQuestionPromptCommand(resolution, activityWasVisible)
+	return m, m.resolveQuestionPromptCommand(state.request, resolution, activityWasVisible)
 }
 
 func (m *Model) resolveQuestionPromptCommand(
+	request question.Request,
 	resolution question.Resolution,
 	activityWasVisible bool,
 ) tea.Cmd {
+	if m.prompt.team == nil && m.prompt.subagent == nil {
+		m.previewQuestionOutcome(request, resolution, false)
+		m.dismissMainQuestionPrompt()
+	}
+
 	if m.prompt.team != nil {
 		command := m.submitTeamQuestionResolution(m.prompt.team.key, resolution, false)
 		if command == nil {
@@ -609,10 +819,28 @@ func (m *Model) resolveQuestionPromptCommand(
 	})
 }
 
+// dismissMainQuestionPrompt closes the band in the same frame as the answer or
+// cancellation. The preview card in the transcript explains what happened while
+// the Runtime publishes the durable result.
+func (m *Model) dismissMainQuestionPrompt() {
+	if m.prompt.kind != promptQuestion || m.prompt.team != nil || m.prompt.subagent != nil {
+		return
+	}
+	m.prompt = promptState{}
+	m.composer.Focus()
+}
+
 func (m *Model) rejectQuestionPromptCommand(
 	request question.Request,
 	activityWasVisible bool,
 ) tea.Cmd {
+	if m.prompt.team == nil && m.prompt.subagent == nil {
+		m.previewQuestionOutcome(request, question.Resolution{
+			RequestID: request.ID, SchemaDigest: request.SchemaDigest,
+		}, true)
+		m.dismissMainQuestionPrompt()
+	}
+
 	if m.prompt.team != nil {
 		command := m.submitTeamQuestionResolution(
 			m.prompt.team.key,
@@ -649,24 +877,24 @@ func (m *Model) rejectQuestionPromptCommand(
 	})
 }
 
-func (m *Model) promptView() string {
+func (m *Model) promptView() (string, questionPromptHit) {
 	switch m.prompt.kind {
 	case promptApproval:
 		if m.mainApprovalExecutionStarting() {
-			return ""
+			return "", questionPromptHit{}
 		}
 
-		return m.approvalPromptView()
+		return m.approvalPromptView(), questionPromptHit{}
 	case promptCompact:
-		return m.compactPromptView()
+		return m.compactPromptView(), questionPromptHit{}
 	case promptQuestion:
 		return m.questionPromptView()
 	case promptPlanReview:
-		return m.planReviewPromptView()
+		return m.planReviewPromptView(), questionPromptHit{}
 	case promptPlanView:
-		return m.planViewPromptView()
+		return m.planViewPromptView(), questionPromptHit{}
 	default:
-		return ""
+		return "", questionPromptHit{}
 	}
 }
 
@@ -678,143 +906,500 @@ func (m *Model) promptBandWidth() int {
 	return max(1, m.width-2*timelineInset(m.width))
 }
 
-//nolint:gocyclo,nestif // The inline question renderer mirrors the explicit navigation state machine.
-func (m *Model) questionPromptView() string {
+//nolint:gocyclo,funlen,nestif // The inline question renderer mirrors the explicit navigation state machine.
+func (m *Model) questionPromptView() (string, questionPromptHit) {
 	state := &m.prompt.question
 	request := state.request
-	if request.Kind == question.RequestFreeform {
-		lines := []string{"Input required"}
-		if source := m.promptSourceLine(); source != "" {
-			lines = append(lines, source)
-		}
-		lines = append(lines, "", request.Prompt, "", state.editor.View(), "Enter submit · Ctrl+J newline · Ctrl+C cancel")
-		if state.loading {
-			lines = append(lines, m.activityNotice("Working…"))
-		}
-		if state.err != nil {
-			lines = append(lines, "Error: "+safeError(state.err))
-		}
+	rows := &questionPromptRows{}
+	m.resizeQuestionEditor(state)
 
-		// This prompt has no accent gutter, so every row still has to be
-		// bounded to the band on its own.
-		return truncateBandRows(strings.Join(lines, "\n"), m.promptBandWidth())
+	if request.Kind == question.RequestFreeform {
+		if source := m.promptSourceLine(); source != "" {
+			rows.add(source, questionPromptHitRow{})
+			rows.add("", questionPromptHitRow{})
+		}
+		m.appendQueueProgress(rows, request)
+		rows.add("←  [□ Input required]", questionPromptHitRow{})
+		rows.add("", questionPromptHitRow{})
+		rows.addBlock(request.Prompt, questionPromptHitRow{})
+		rows.add("", questionPromptHitRow{})
+		rows.addEditor(state.editor, state.editing != questionEditNone, 0)
+		rows.add("Enter submit · Ctrl+J newline · Esc cancel", questionPromptHitRow{})
+		m.appendQuestionStatusRows(rows, state)
+		m.applyQuestionGutter(rows)
+
+		return strings.Join(rows.values, "\n"), rows.hit()
 	}
 	if len(request.Questions) == 0 {
-		return "△ Structured question unavailable"
+		return "△ Structured question unavailable", questionPromptHit{}
 	}
 
-	tabs := make([]string, 0, len(request.Questions)+3)
-	tabs = append(tabs, "←")
+	tabs := "←"
+	if len(request.Questions) > 1 {
+		tabs += " " + strconv.Itoa(min(state.tab+1, len(request.Questions))) +
+			"/" + strconv.Itoa(len(request.Questions))
+	}
+	tabsWidth := ansi.StringWidth(tabs)
+	segments := make([]questionPromptTabSegment, 0, len(request.Questions)+1)
+
+	addTab := func(label string, index int) {
+		tabs += "  " + label
+		start := tabsWidth + 2
+		tabsWidth = start + ansi.StringWidth(label)
+		segments = append(segments, questionPromptTabSegment{
+			start: start, end: tabsWidth - 1, index: index,
+		})
+	}
 	for index, item := range request.Questions {
 		marker := "□"
 		if questionAnswered(*state, index) {
 			marker = "✓"
 		}
-		label := marker + " " + item.Header
+		// The tabs row has to keep Submit reachable, so a long header is
+		// shortened here; the review pane still prints it in full.
+		label := marker + " " + ansi.Truncate(questionOneLine(item.Header), questionTabHeaderLimit, "…")
 		if state.tab == index {
 			label = "[" + label + "]"
 		}
-		tabs = append(tabs, label)
+		addTab(label, index)
 	}
 	submit := "✓ Submit"
 	if state.tab == len(request.Questions) {
 		submit = "[" + submit + "]"
 	}
-	tabs = append(tabs, submit, "→")
+	addTab(submit, len(request.Questions))
+	tabs += "  →"
 
-	lines := make([]string, 0, 16)
 	if source := m.promptSourceLine(); source != "" {
-		lines = append(lines, source, "")
+		rows.add(source, questionPromptHitRow{})
+		rows.add("", questionPromptHitRow{})
 	}
-	lines = append(lines, strings.Join(tabs, "  "), "")
+	m.appendQueueProgress(rows, request)
+	rows.add(tabs, questionPromptHitRow{kind: questionPromptHitTab, segments: segments})
+	rows.add("", questionPromptHitRow{})
+
 	if state.tab == len(request.Questions) {
-		lines = append(lines, "Review your answers", "")
+		rows.add("Review your answers", questionPromptHitRow{})
+		rows.add("", questionPromptHitRow{})
 		for index, item := range request.Questions {
-			lines = append(lines, strconv.Itoa(index+1)+". "+item.Header+": "+questionAnswerLabel(*state, index))
+			rows.addBlock(
+				strconv.Itoa(index+1)+". "+questionOneLine(item.Header)+": "+
+					questionAnswerLabel(*state, index),
+				questionPromptHitRow{},
+			)
 		}
-		lines = append(lines, "", "Enter submit · Tab/←/→ navigate · Esc cancel")
+		rows.add("", questionPromptHitRow{})
+		rows.add("Enter submit · Click Submit again · Tab/←/→ navigate · Esc cancel", questionPromptHitRow{})
 	} else {
 		item := request.Questions[state.tab]
 		cursor := state.cursors[state.tab]
-		lines = append(lines, item.Question, "")
-		for index, option := range item.Options {
-			focus := "  "
-			if cursor == index {
-				focus = "› "
-			}
-			marker := "○"
-			if item.Multiple {
-				marker = "[ ]"
-			}
-			if state.selected[state.tab][index] {
-				marker = "●"
-				if item.Multiple {
-					marker = "[✓]"
+		rows.addBlock(item.Question, questionPromptHitRow{})
+		rows.add("", questionPromptHitRow{})
+
+		if item.IsText() {
+			rows.addEditor(state.editor, state.editing != questionEditNone, 0)
+			rows.add(
+				"Enter continue · Ctrl+J newline · Tab/Shift+Tab questions · Esc cancel",
+				questionPromptHitRow{},
+			)
+		} else {
+			for index, option := range item.Options {
+				target := questionPromptHitRow{
+					kind: questionPromptHitOption, question: state.tab, option: index,
 				}
-			}
-			line := focus + strconv.Itoa(index+1) + ". " + marker + " " + option.Label
-			lines = append(lines, m.styleQuestionChoice(line, cursor == index))
-			if cursor == index {
-				lines = append(lines, "     "+option.Description)
-				if option.Preview != "" {
-					preview, err := m.markdown.render(
-						option.Preview,
-						max(1, m.promptBandWidth()-6),
-						m.theme,
-						m.options.NoColor,
-					)
-					if err == nil {
-						lines = append(lines, truncateHeight(preview, max(2, min(6, m.height/4))))
+				focus := "  "
+				if cursor == index {
+					focus = "› "
+				}
+				marker := "○"
+				if item.Multiple {
+					marker = questionUnchecked
+				}
+				if state.selected[state.tab][index] {
+					marker = "●"
+					if item.Multiple {
+						marker = "[✓]"
 					}
 				}
+				line := focus + strconv.Itoa(index+1) + ". " + marker + " " + questionOneLine(option.Label)
+				rows.add(m.styleQuestionChoice(line, cursor == index), target)
+
+				// The focused option carries the explanation and preview the choice
+				// needs; the other rows stay one line so four options remain
+				// scannable in a short window.
+				if cursor == index {
+					m.appendQuestionOptionDetail(rows, option, target)
+				}
+			}
+
+			customIndex := len(item.Options)
+			rows.add(m.styleQuestionChoice(
+				questionFocus(cursor == customIndex)+strconv.Itoa(customIndex+1)+". Type something",
+				cursor == customIndex,
+			), questionPromptHitRow{kind: questionPromptHitCustom, question: state.tab})
+			rows.add(
+				strings.Repeat("─", max(1, min(m.promptBandWidth()-2, 72))),
+				questionPromptHitRow{},
+			)
+			chatIndex := customIndex + 1
+			rows.add(m.styleQuestionChoice(
+				questionFocus(cursor == chatIndex)+strconv.Itoa(chatIndex+1)+". Chat about this",
+				cursor == chatIndex,
+			), questionPromptHitRow{kind: questionPromptHitChat, question: state.tab})
+
+			switch {
+			case state.editing != questionEditNone:
+				rows.add("", questionPromptHitRow{})
+				rows.addEditor(state.editor, true, 0)
+				rows.add("Enter submit · Ctrl+J newline · Esc back", questionPromptHitRow{})
+			case item.Multiple:
+				rows.add("", questionPromptHitRow{})
+				rows.add("Space/Click toggle · Enter continue · Tab/←/→ questions · Esc cancel", questionPromptHitRow{})
+			default:
+				rows.add("", questionPromptHitRow{})
+				rows.add("Enter/Click select · Tab/←/→ questions · Esc cancel", questionPromptHitRow{})
 			}
 		}
-		customIndex := len(item.Options)
-		lines = append(lines, m.styleQuestionChoice(
-			questionFocus(cursor == customIndex)+strconv.Itoa(customIndex+1)+". Type something",
-			cursor == customIndex,
-		))
-		lines = append(lines, strings.Repeat("─", max(1, min(m.promptBandWidth()-2, 72))))
-		chatIndex := customIndex + 1
-		lines = append(lines, m.styleQuestionChoice(
-			questionFocus(cursor == chatIndex)+strconv.Itoa(chatIndex+1)+". Chat about this",
-			cursor == chatIndex,
-		))
-
-		switch {
-		case state.editing != questionEditNone:
-			lines = append(lines, "", state.editor.View(), "Enter submit · Ctrl+J newline · Esc back")
-		case item.Multiple:
-			lines = append(lines, "", "Space toggle · Enter continue · Tab/←/→ questions · Esc cancel")
-		default:
-			lines = append(lines, "", "Enter select · Tab/←/→ questions · Esc cancel")
-		}
 	}
 
-	if state.loading {
-		lines = append(lines, m.activityNotice("Working…"))
-	}
-	if state.err != nil {
-		lines = append(lines, "Error: "+safeError(state.err))
-	}
-	maximum := max(8, min(18, m.height/2))
-	if len(lines) > maximum {
-		tail := 3
-		lines = append(
-			append(slices.Clone(lines[:maximum-tail-1]), "…"),
-			lines[len(lines)-tail:]...,
-		)
-	}
+	m.appendQuestionStatusRows(rows, state)
 
+	// The band budget owns the final cut; this only keeps an unusually tall
+	// preview from building rows no frame can show.
+	rows.crop(max(8, min(16, m.height-8)))
+
+	m.applyQuestionGutter(rows)
+
+	return strings.Join(rows.values, "\n"), rows.hit()
+}
+
+// applyQuestionGutter paints the accent gutter every question row shares and
+// moves the pointer map and caret with it.
+func (m *Model) applyQuestionGutter(rows *questionPromptRows) {
 	bar := "▌"
 	if !m.options.NoColor {
 		bar = lipgloss.NewStyle().Foreground(paletteFor(m.theme).session).Render(bar)
 	}
-	for index := range lines {
-		lines[index] = bar + " " + ansi.Truncate(lines[index], max(1, m.promptBandWidth()-2), "…")
+	gutter := ansi.StringWidth(bar) + 1
+	for index := range rows.values {
+		rows.values[index] = bar + " " +
+			ansi.Truncate(rows.values[index], max(1, m.promptBandWidth()-2), "…")
+	}
+	// Pointer columns and the caret are measured against the painted row, so
+	// the accent gutter and its separating space move both by the same width.
+	for index := range rows.targets {
+		for segment := range rows.targets[index].segments {
+			rows.targets[index].segments[segment].start += gutter
+			rows.targets[index].segments[segment].end += gutter
+		}
+	}
+	if rows.cursor {
+		rows.cursorX += gutter
+	}
+}
+
+// addEditor appends the textarea's rows and records where its caret sits
+// relative to the prompt. gutter is the display width the caller will prepend to
+// every row before the rows are painted.
+func (rows *questionPromptRows) addEditor(editor textarea.Model, active bool, gutter int) {
+	start := len(rows.values)
+	rows.addBlock(editor.View(), questionPromptHitRow{})
+
+	cursor := editor.Cursor()
+	if !active || cursor == nil {
+		return
+	}
+	row := start + cursor.Y
+	if row < 0 || row >= len(rows.values) {
+		return
+	}
+	rows.cursor = true
+	rows.cursorX = gutter + cursor.X
+	rows.cursorY = row
+}
+
+func (m *Model) appendQuestionOptionDetail(
+	rows *questionPromptRows,
+	option question.Option,
+	target questionPromptHitRow,
+) {
+	target.detail = true
+	if option.Description != "" {
+		rows.add("     "+questionOneLine(option.Description), target)
+	}
+	if option.Preview == "" {
+		return
+	}
+	preview, err := m.markdown.render(
+		option.Preview,
+		max(1, m.promptBandWidth()-6),
+		m.theme,
+		m.options.NoColor,
+	)
+	if err != nil {
+		return
+	}
+	preview = truncateHeight(preview, max(2, min(4, m.height/6)))
+	for line := range strings.SplitSeq(preview, "\n") {
+		rows.add("     "+strings.TrimRight(line, " "), target)
+	}
+}
+
+// appendQueueProgress shows where this prompt sits in a same-response ask_user
+// batch. A single call keeps the original compact layout.
+func (m *Model) appendQueueProgress(rows *questionPromptRows, request question.Request) {
+	if request.QueueSize <= 1 || request.QueueIndex < 1 {
+		return
 	}
 
-	return strings.Join(lines, "\n")
+	rows.add(fmt.Sprintf("Question %d/%d", request.QueueIndex, request.QueueSize), questionPromptHitRow{})
+	rows.add("", questionPromptHitRow{})
+}
+
+func (m *Model) appendQuestionStatusRows(rows *questionPromptRows, state *questionPromptState) {
+	if state.loading {
+		rows.add(m.activityNotice("Working…"), questionPromptHitRow{})
+	}
+	if state.err != nil {
+		rows.add("Error: "+safeError(state.err), questionPromptHitRow{})
+	}
+}
+
+// crop keeps at most maximum rows while preserving the hit map and the caret.
+// The dropped middle is replaced by one ellipsis row, so a preview can never
+// push the question or the editor off the band.
+func (rows *questionPromptRows) crop(maximum int) {
+	if maximum <= 0 || len(rows.values) <= maximum {
+		return
+	}
+
+	// Every choice stays on screen. The explanation and preview after the
+	// focused option are detail, so a short band spends its remaining rows on as
+	// much of that detail as fits and drops the rest.
+	essential := 0
+	for index := range rows.targets {
+		if !rows.targets[index].detail {
+			essential++
+		}
+	}
+	if essential <= maximum {
+		rows.trimDetails(maximum - essential)
+
+		return
+	}
+
+	tail := min(3, maximum)
+	head := max(0, maximum-tail-1)
+	tailStart := max(head, len(rows.values)-tail)
+
+	mapIndex := func(index int) int {
+		switch {
+		case index < head:
+			return index
+		case index >= tailStart:
+			return head + 1 + index - tailStart
+		default:
+			return -1
+		}
+	}
+
+	if rows.cursor {
+		rows.cursorY = mapIndex(rows.cursorY)
+		rows.cursor = rows.cursorY >= 0
+	}
+	values := make([]string, 0, maximum)
+	values = append(values, rows.values[:head]...)
+	values = append(values, "…")
+	values = append(values, rows.values[tailStart:]...)
+	targets := make([]questionPromptHitRow, 0, maximum)
+	targets = append(targets, rows.targets[:head]...)
+	targets = append(targets, questionPromptHitRow{})
+	targets = append(targets, rows.targets[tailStart:]...)
+	rows.values = values
+	rows.targets = targets
+}
+
+// trimDetails keeps at most available detail rows in place, preserving the
+// order of every essential row and the caret's row.
+func (rows *questionPromptRows) trimDetails(available int) {
+	if available < 0 {
+		available = 0
+	}
+	values := make([]string, 0, len(rows.values))
+	targets := make([]questionPromptHitRow, 0, len(rows.targets))
+	cursor := -1
+	kept := 0
+
+	for index := range rows.values {
+		if rows.targets[index].detail {
+			if kept >= available {
+				continue
+			}
+			kept++
+		}
+		if rows.cursor && index == rows.cursorY {
+			cursor = len(values)
+		}
+		values = append(values, rows.values[index])
+		targets = append(targets, rows.targets[index])
+	}
+	rows.values = values
+	rows.targets = targets
+	if rows.cursor {
+		rows.cursor = cursor >= 0
+		rows.cursorY = cursor
+	}
+}
+
+// hit returns the pointer map for the rows as painted so far. readyView adds the
+// frame row the band starts on.
+func (rows *questionPromptRows) hit() questionPromptHit {
+	return questionPromptHit{
+		top: -1, rows: rows.targets,
+		cursor: rows.cursor, cursorX: rows.cursorX, cursorY: rows.cursorY,
+	}
+}
+
+// cropTop drops rows the frame cap removed from the top of the band, keeping
+// the hit map and caret aligned with the rows that were actually painted.
+func (hit *questionPromptHit) cropTop(dropped int) {
+	if dropped <= 0 {
+		return
+	}
+	if dropped >= len(hit.rows) {
+		hit.rows = nil
+		hit.cursor = false
+
+		return
+	}
+	hit.rows = hit.rows[dropped:]
+	if hit.cursor {
+		hit.cursorY -= dropped
+		hit.cursor = hit.cursorY >= 0
+	}
+}
+
+// place resolves the hit map against the frame: top is the frame row the first
+// prompt row was painted at, and inset is the transcript column the band shares.
+func (hit *questionPromptHit) place(top, inset int) {
+	hit.top = -1
+	if len(hit.rows) == 0 || top < 0 {
+		hit.rows = nil
+		hit.cursor = false
+
+		return
+	}
+	hit.top = top
+	for index := range hit.rows {
+		for segment := range hit.rows[index].segments {
+			hit.rows[index].segments[segment].start += inset
+			hit.rows[index].segments[segment].end += inset
+		}
+	}
+	if hit.cursor {
+		hit.cursorX += inset
+		hit.cursorY += top
+	}
+}
+
+// resizeQuestionEditor keeps the textarea's wrap width tied to the current
+// frame, so a question received before a resize still wraps inside the band.
+func (m *Model) resizeQuestionEditor(state *questionPromptState) {
+	width := max(1, m.promptBandWidth()-4)
+	if state.editor.Width() != width {
+		state.editor.SetWidth(width)
+	}
+}
+
+// questionPromptMouse answers a left click on the question band. It uses the
+// same state transitions as the keys, so the pointer can never select something
+// the keyboard could not.
+//
+//nolint:gocyclo // Each hit target is one explicit binding, mirroring the key switch.
+func (m *Model) questionPromptMouse(message tea.MouseMsg) (tea.Cmd, bool) {
+	if m.prompt.kind != promptQuestion || m.frameHit.question.top < 0 {
+		return nil, false
+	}
+	click, ok := message.(tea.MouseClickMsg)
+	if !ok || click.Button != tea.MouseLeft {
+		return nil, false
+	}
+
+	state := &m.prompt.question
+	if state.loading {
+		return nil, true
+	}
+	if state.editing != questionEditNone && !m.questionTabIsText(state) {
+		return nil, true
+	}
+
+	row := click.Y - m.frameHit.question.top
+	if row < 0 || row >= len(m.frameHit.question.rows) {
+		return nil, false
+	}
+	target := m.frameHit.question.rows[row]
+
+	switch target.kind {
+	case questionPromptHitTab:
+		for _, segment := range target.segments {
+			if click.X < segment.start || click.X > segment.end {
+				continue
+			}
+			submitting := segment.index == len(state.request.Questions)
+			if submitting && state.tab == segment.index {
+				// A second click on the active Submit tab is the pointer form of
+				// Enter on the review pane.
+				_, command := m.activateQuestionSelection()
+
+				return command, true
+			}
+			if m.questionTabIsText(state) {
+				state.custom[state.tab] = strings.TrimSpace(state.editor.Value())
+			}
+			state.err = nil
+			command := m.enterQuestionTab(state, segment.index)
+			if command != nil {
+				return tea.Batch(redrawFrame(), command), true
+			}
+
+			return redrawFrame(), true
+		}
+
+		return nil, true
+	case questionPromptHitOption:
+		if target.question < 0 || target.question >= len(state.request.Questions) {
+			return nil, true
+		}
+		m.enterQuestionTab(state, target.question)
+		state.cursors[target.question] = target.option
+		state.err = nil
+
+		if item := state.request.Questions[target.question]; item.Multiple {
+			m.toggleQuestionSelection()
+
+			return redrawFrame(), true
+		}
+
+		_, command := m.activateQuestionSelection()
+
+		return command, true
+	case questionPromptHitCustom, questionPromptHitChat:
+		if target.question < 0 || target.question >= len(state.request.Questions) {
+			return nil, true
+		}
+		m.enterQuestionTab(state, target.question)
+		cursor := len(state.request.Questions[target.question].Options)
+		if target.kind == questionPromptHitChat {
+			cursor++
+		}
+		state.cursors[target.question] = cursor
+		state.err = nil
+		_, command := m.activateQuestionSelection()
+
+		return command, true
+	default:
+		return nil, true
+	}
 }
 
 func (m *Model) styleQuestionChoice(value string, focused bool) string {
@@ -831,6 +1416,26 @@ func questionFocus(focused bool) string {
 	}
 
 	return "  "
+}
+
+// questionOneLine keeps model-supplied labels from adding rows to a band whose
+// pointer map counts one row per label. Free-form answer text keeps its line
+// breaks because it is rendered as a block instead.
+func questionOneLine(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+
+	return strings.ReplaceAll(value, "\r", " ")
+}
+
+func firstUnansweredQuestion(state questionPromptState) int {
+	for index := range state.request.Questions {
+		if !questionAnswered(state, index) {
+			return index
+		}
+	}
+
+	return -1
 }
 
 func questionAnswered(state questionPromptState, index int) bool {
@@ -1046,17 +1651,6 @@ func renderGutterLines(lines []string, width int, noColor bool, tone color.Color
 		for part := range strings.SplitSeq(wrapped, "\n") {
 			rows = append(rows, bar+" "+leading+part)
 		}
-	}
-
-	return strings.Join(rows, "\n")
-}
-
-// truncateBandRows bounds every row of an unguttered prompt to the band width, so
-// a long prompt or editor row cannot widen the frame the renderer paints.
-func truncateBandRows(content string, width int) string {
-	rows := strings.Split(content, "\n")
-	for index, row := range rows {
-		rows[index] = ansi.Truncate(row, max(1, width), "…")
 	}
 
 	return strings.Join(rows, "\n")

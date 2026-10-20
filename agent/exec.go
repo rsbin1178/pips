@@ -79,7 +79,13 @@ func (a *Agent) gateCalls(ctx context.Context, turn int, calls []ai.ToolCallPart
 	if a.cfg.beforeTool == nil {
 		return calls, denials, nil
 	}
+
 	runnable := slices.Clone(calls)
+	batchCalls := make([]ToolCall, len(calls))
+
+	for idx, call := range calls {
+		batchCalls[idx] = ToolCall{ID: call.ID, Name: call.Name, Args: call.Args}
+	}
 
 	for idx, call := range runnable {
 		info := ToolCallInfo{
@@ -87,6 +93,7 @@ func (a *Agent) gateCalls(ctx context.Context, turn int, calls []ai.ToolCallPart
 			Turn:       turn,
 			BatchIndex: idx,
 			BatchSize:  len(calls),
+			BatchCalls: batchCalls,
 		}
 
 		decision := a.cfg.beforeTool(ctx, info)
@@ -94,9 +101,23 @@ func (a *Agent) gateCalls(ctx context.Context, turn int, calls []ai.ToolCallPart
 			runnable[idx].Args = slices.Clone(decision.UpdatedInput)
 			call = runnable[idx]
 		}
+
 		switch decision.Action {
 		case ToolDecisionPause:
 			return runnable[:idx], denials[:idx], slices.Clone(runnable[idx:])
+		case ToolDecisionDenyBatch:
+			reason := decision.Reason
+			if reason == "" {
+				reason = "tool batch denied"
+			}
+
+			for batchIdx := range runnable {
+				batchCall := runnable[batchIdx]
+				result := errorResult(batchCall, reason)
+				denials[batchIdx] = &result
+			}
+
+			return runnable, denials, nil
 		case ToolDecisionDeny:
 			reason := decision.Reason
 			if reason == "" {

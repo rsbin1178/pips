@@ -75,6 +75,15 @@ func elicitationForQuestion(
 
 	for index, item := range request.Questions {
 		key := questionKey(index)
+		if item.IsText() {
+			result.RequestedSchema.Properties[key] = elicitationProperty{
+				Type: jsonTypeString, Title: item.Header, Description: item.Question,
+			}
+			result.RequestedSchema.Required = append(result.RequestedSchema.Required, key)
+
+			continue
+		}
+
 		labels := make([]string, len(item.Options))
 
 		descriptions := make([]string, len(item.Options))
@@ -157,6 +166,20 @@ func populateStructuredResolution(
 	resolution.Answers = make([]question.Answer, len(request.Questions))
 	for index, item := range request.Questions {
 		key := questionKey(index)
+		if item.IsText() {
+			value, _, err := optionalString(content, key)
+			if err != nil {
+				return err
+			}
+
+			if value == "" {
+				return fmt.Errorf("%w: empty free-text answer", ErrInvalid)
+			}
+
+			resolution.Answers[index].Custom = value
+
+			continue
+		}
 
 		custom, customSet, err := optionalString(content, key+"_custom")
 		if err != nil {

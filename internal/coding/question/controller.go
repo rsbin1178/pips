@@ -21,15 +21,19 @@ import (
 const (
 	// CatalogID is the application-owned provenance of ask_user.
 	CatalogID = "coding.question"
-	// ToolName is the provider-neutral structured user-question capability.
+	// ToolName is the provider-neutral user-question capability.
 	ToolName = "ask_user"
-	// TextToolName is the exact one-field recovery capability used after a
-	// malformed structured question.
+	// TextToolName is the retired free-form tool. It is never registered, but
+	// old sessions can still contain its calls and results.
 	TextToolName = "ask_user_text"
+	// MixedBatchErrorPrefix starts the batch-level denial reason. The TUI uses
+	// it to collapse every rejected call in one message into one card.
+	MixedBatchErrorPrefix = "ask_user cannot be combined with other tools in the same message"
 	// RejectionToolResult is the durable result of an explicit user cancellation.
 	RejectionToolResult   = "The user canceled this question without selecting an answer."
 	maxToolErrorBytes     = 1024
 	questionField         = "question"
+	questionsField        = "questions"
 	schemaTypeString      = "string"
 	genericFreeformPrompt = "Pips could not form a valid structured question. Provide the missing preference or constraint in your own words, or cancel planning."
 )
@@ -53,7 +57,10 @@ type Controller struct {
 	resolver Resolver
 	pending  *Request
 	tool     agent.Tool
-	textTool agent.Tool
+	// queueIDs is the same-response ask_user batch in model order. It lets a
+	// live interaction report Question 2/3 while pending shrinks one call at a
+	// time. Resume rebuilds it from the pending suffix.
+	queueIDs []string
 }
 
 // NewController constructs one question coordinator.
@@ -64,43 +71,34 @@ func NewController(resolver Resolver) (*Controller, error) {
 
 	baseTool := agent.NewTool(
 		ToolName,
-		"Ask the user one to four structured questions when a decision materially affects the work. "+
-			"Each question must contain two to four concrete options; Pips adds custom-response "+
-			"and discussion choices, so do not add an Other option. Prefer structured choices "+
-			"over listing selectable options in assistant text.",
+		"Ask the user for input that blocks the work. One call submits 1-4 questions. Each "+
+			"question is either a choice question (two to four options, single- or multiple-select) "+
+			"or a free-text question (kind \"text\", no options). Choice and free-text questions "+
+			"can be mixed in the same call. A top-level question field is a one-question free-text "+
+			"shortcut. Combine every decision for this turn into a single ask_user call, keep it "+
+			"the only ask call in the assistant message, and never combine it with other tools. "+
+			"Pips adds custom-response and discussion choices to choice questions, so do not add "+
+			"an Other option. Prefer structured choices over listing selectable options in "+
+			"assistant text.",
 		func(context.Context, Spec) (string, error) {
 			return "", errors.New("ask_user requires Runtime-mediated user input")
 		},
 	)
 	declaration := baseTool.Decl()
 	declaration.InputSchema = inputSchema()
-	controller := &Controller{
+
+	return &Controller{
 		resolver: resolver,
 		tool: declaredTool{
 			Tool:        baseTool,
 			declaration: declaration,
 		},
-	}
-	textBase := agent.NewTool(
-		TextToolName,
-		"Ask one direct free-form question. Use only as the exact recovery requested by Pips after ask_user arguments were rejected.",
-		func(context.Context, struct {
-			Question string `json:"question"`
-		},
-		) (string, error) {
-			return "", errors.New("ask_user_text requires Runtime-mediated user input")
-		},
-	)
-	textDeclaration := textBase.Decl()
-	textDeclaration.InputSchema = textInputSchema()
-	controller.textTool = declaredTool{Tool: textBase, declaration: textDeclaration}
-
-	return controller, nil
+	}, nil
 }
 
 // Catalog returns the exact local read-risk ask_user registration.
 func (c *Controller) Catalog() (*catalog.Catalog, error) {
-	if c == nil || c.tool == nil || c.textTool == nil {
+	if c == nil || c.tool == nil {
 		return nil, errors.New("coding question: unavailable controller")
 	}
 
@@ -108,8 +106,19 @@ func (c *Controller) Catalog() (*catalog.Catalog, error) {
 
 	return catalog.New(
 		catalog.Entry{Tool: c.tool, Source: source, Risk: catalog.RiskRead, Tags: []string{"builtin", "coding", questionField}},
-		catalog.Entry{Tool: c.textTool, Source: source, Risk: catalog.RiskRead, Tags: []string{"builtin", "coding", questionField, "fallback"}},
 	)
+}
+
+// BeforeBatch rejects one model response that mixes ask_user with any other
+// tool. It never pauses, so it can run before capability gates without letting
+// an unauthorized ask_user call bypass their decisions.
+func (c *Controller) BeforeBatch(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
+	batch, known := questionBatch(info)
+	if !known || !mixedBatch(batch) {
+		return agent.ToolDecision{}
+	}
+
+	return mixedBatchDecision(batch)
 }
 
 // BeforeTool validates ask_user arguments before pausing the Agent loop.
@@ -122,8 +131,15 @@ func (c *Controller) BeforeTool(_ context.Context, info agent.ToolCallInfo) agen
 		return agent.DenyTool("structured user input is unavailable")
 	}
 
-	if batchSize(info) != 1 {
+	batch, known := questionBatch(info)
+	if !known {
 		return agent.DenyTool(info.Name + " must be called alone")
+	}
+
+	// BeforeBatch normally owns this decision. Keep the fallback here so a
+	// caller that wires only this gate still refuses a mixed response.
+	if mixedBatch(batch) {
+		return mixedBatchDecision(batch)
 	}
 
 	request, err := requestFromCall(ai.ToolCallPart{
@@ -136,6 +152,7 @@ func (c *Controller) BeforeTool(_ context.Context, info agent.ToolCallInfo) agen
 			return agent.DenyTool(invalidArgumentsReason(err))
 		}
 	}
+
 	if err != nil {
 		return agent.DenyTool(invalidArgumentsReason(err))
 	}
@@ -145,6 +162,14 @@ func (c *Controller) BeforeTool(_ context.Context, info agent.ToolCallInfo) agen
 
 	if c.pending != nil && !sameRequest(*c.pending, request) {
 		return agent.DenyTool("another structured question is already pending")
+	}
+
+	queue := questionQueue(info, batch)
+	if len(queue) > 1 {
+		request.QueueIndex, request.QueueSize = 1, len(queue)
+		c.queueIDs = queue
+	} else {
+		c.queueIDs = nil
 	}
 
 	cloned := CloneRequest(request)
@@ -176,8 +201,12 @@ func (c *Controller) Reconcile(pending []ai.ToolCallPart) (*Request, error) {
 
 	if request == nil {
 		c.pending = nil
+		c.queueIDs = nil
+
 		return nil, nil
 	}
+
+	applyQueuePosition(request, pending, c.queueIDs)
 
 	cloned := CloneRequest(*request)
 	c.pending = &cloned
@@ -320,9 +349,9 @@ func inputSchema() *ai.Schema {
 	}
 	options := &ai.Schema{
 		Type: "array", Items: option,
-		Description: "Two to four concrete choices. Do not add Other; Pips provides a custom response.",
+		Description: "Choice questions only: two to four concrete choices. Omit for kind text. " +
+			"Do not add Other; Pips provides a custom response.",
 		Extra: map[string]json.RawMessage{
-			"minItems": json.RawMessage(strconv.Itoa(minOptionCount)),
 			"maxItems": json.RawMessage(strconv.Itoa(maxOptionCount)),
 		},
 	}
@@ -334,41 +363,39 @@ func inputSchema() *ai.Schema {
 				Type: schemaTypeString, Description: "Short section label for the question.",
 			},
 			"question": {
-				Type: schemaTypeString, Description: "The decision the user needs to make.",
+				Type: schemaTypeString, Description: "The decision or information the user needs to provide.",
+			},
+			"kind": {
+				Type: "string", Enum: []any{string(KindChoice), string(KindText)},
+				Description: "choice (default) uses options; text asks for a free-form answer and omits options.",
 			},
 			"options": options,
 			"multiple": {
-				Type: "boolean", Description: "Set true only when multiple choices may be selected.",
+				Type: "boolean", Description: "Choice questions only: set true when multiple choices may be selected.",
 			},
 		},
-		Required: []string{"header", "question", "options"},
+		Required: []string{"header", "question"},
 	}
 
 	return &ai.Schema{
 		Type:                 "object",
 		AdditionalProperties: false,
 		Properties: map[string]*ai.Schema{
-			"questions": {
+			questionsField: {
 				Type: "array", Items: item,
-				Description: "One to four independent decisions to ask in one interaction.",
+				Description: "One to four decisions. Each item is a choice question or a kind text question. " +
+					"Provide questions or question, not both.",
 				Extra: map[string]json.RawMessage{
 					"minItems": json.RawMessage(strconv.Itoa(minQuestionCount)),
 					"maxItems": json.RawMessage(strconv.Itoa(maxQuestionCount)),
 				},
 			},
+			questionField: {
+				Type: schemaTypeString,
+				Description: "One free-form question shortcut for a single kind text question. " +
+					"Provide questions or question, not both.",
+			},
 		},
-		Required: []string{"questions"},
-	}
-}
-
-func textInputSchema() *ai.Schema {
-	return &ai.Schema{
-		Type:                 "object",
-		AdditionalProperties: false,
-		Properties: map[string]*ai.Schema{
-			questionField: {Type: schemaTypeString, Description: "The one missing preference or constraint to ask directly."},
-		},
-		Required: []string{questionField},
 		Extra: map[string]json.RawMessage{
 			"minProperties": json.RawMessage("1"),
 			"maxProperties": json.RawMessage("1"),
@@ -382,20 +409,30 @@ func requestFromCall(call ai.ToolCallPart) (Request, error) {
 	}
 
 	if call.Name == TextToolName {
-		var arguments struct {
-			Question string `json:"question"`
-		}
-		if err := jsonx.Decode(call.Args, &arguments); err != nil {
-			return Request{}, fmt.Errorf("%w: decode ask_user_text arguments: %w", ErrInvalid, err)
-		}
+		return legacyTextRequest(call)
+	}
 
+	var arguments struct {
+		Questions json.RawMessage `json:"questions"`
+		Question  string          `json:"question"`
+	}
+	if err := jsonx.Decode(call.Args, &arguments); err != nil {
+		return Request{}, fmt.Errorf("%w: decode ask_user arguments: %w", ErrInvalid, err)
+	}
+
+	hasQuestions := len(bytes.TrimSpace(arguments.Questions)) > 0
+	hasQuestion := arguments.Question != ""
+
+	if hasQuestions == hasQuestion {
+		return Request{}, fmt.Errorf("%w: provide exactly one of questions or question", ErrInvalid)
+	}
+
+	if hasQuestion {
 		if !validText(arguments.Question, maxFreeformBytes) {
 			return Request{}, fmt.Errorf("%w: question contains invalid text", ErrInvalid)
 		}
 
-		sum := sha256.Sum256([]byte(TextToolName + "\x00" + call.ID + "\x00" + arguments.Question))
-
-		return NewFreeformRequest("q-"+hex.EncodeToString(sum[:16]), call.ID, arguments.Question)
+		return newFreeformRequest(ToolName, call.ID, arguments.Question)
 	}
 
 	spec, err := decodeSpecArguments(call.Args)
@@ -414,6 +451,28 @@ func requestFromCall(call ai.ToolCallPart) (Request, error) {
 	return NewRequest(requestID, call.ID, spec)
 }
 
+// legacyTextRequest decodes a call produced by the retired ask_user_text tool.
+func legacyTextRequest(call ai.ToolCallPart) (Request, error) {
+	var arguments struct {
+		Question string `json:"question"`
+	}
+	if err := jsonx.Decode(call.Args, &arguments); err != nil {
+		return Request{}, fmt.Errorf("%w: decode ask_user_text arguments: %w", ErrInvalid, err)
+	}
+
+	if !validText(arguments.Question, maxFreeformBytes) {
+		return Request{}, fmt.Errorf("%w: question contains invalid text", ErrInvalid)
+	}
+
+	return newFreeformRequest(TextToolName, call.ID, arguments.Question)
+}
+
+func newFreeformRequest(toolName, toolCallID, prompt string) (Request, error) {
+	sum := sha256.Sum256([]byte(toolName + "\x00" + toolCallID + "\x00" + prompt))
+
+	return NewFreeformRequest("q-"+hex.EncodeToString(sum[:16]), toolCallID, prompt)
+}
+
 // ValidateCall checks one question Tool call through the same strict decoder
 // used by the pause owner. Plan flow uses it only to choose the bounded
 // recovery phase; it never repairs arguments.
@@ -427,12 +486,135 @@ func genericRequest(toolCallID string) (Request, error) {
 	return NewFreeformRequest("q-"+hex.EncodeToString(sum[:16]), toolCallID, genericFreeformPrompt)
 }
 
-func batchSize(info agent.ToolCallInfo) int {
-	if info.BatchSize == 0 {
-		return 1
+// questionBatch returns the whole response's calls. known is false when the
+// gate cannot see the batch composition and BatchSize says more than one call,
+// where pausing at the first call would silently hide the rest.
+func questionBatch(info agent.ToolCallInfo) ([]agent.ToolCall, bool) {
+	if len(info.BatchCalls) > 0 {
+		return info.BatchCalls, true
 	}
 
-	return info.BatchSize
+	if info.BatchSize > 1 {
+		return nil, false
+	}
+
+	return []agent.ToolCall{info.ToolCall}, true
+}
+
+func mixedBatch(batch []agent.ToolCall) bool {
+	hasQuestion, hasOther := false, false
+
+	for _, call := range batch {
+		if isQuestionToolName(call.Name) {
+			hasQuestion = true
+		} else {
+			hasOther = true
+		}
+	}
+
+	return hasQuestion && hasOther
+}
+
+func batchCounts(batch []agent.ToolCall) (int, int) {
+	askCount := 0
+
+	for _, call := range batch {
+		if isQuestionToolName(call.Name) {
+			askCount++
+		}
+	}
+
+	return askCount, len(batch) - askCount
+}
+
+// questionQueue returns the ask calls from the pause point onward. Earlier
+// calls in the same response may already have been denied, so they are not
+// part of the queue the user will see.
+func questionQueue(info agent.ToolCallInfo, batch []agent.ToolCall) []string {
+	if len(batch) <= 1 {
+		return nil
+	}
+
+	start := max(0, min(info.BatchIndex, len(batch)))
+	queue := make([]string, 0, len(batch)-start)
+
+	for _, call := range batch[start:] {
+		if isQuestionToolName(call.Name) {
+			queue = append(queue, call.ID)
+		}
+	}
+
+	if len(queue) == 0 {
+		return nil
+	}
+
+	return queue
+}
+
+func applyQueuePosition(request *Request, pending []ai.ToolCallPart, known []string) {
+	if request == nil || len(known) <= 1 && len(pending) <= 1 {
+		return
+	}
+
+	for index, callID := range known {
+		if len(known) > 1 && callID == request.ToolCallID {
+			request.QueueIndex, request.QueueSize = index+1, len(known)
+
+			return
+		}
+	}
+
+	queue := make([]string, 0, len(pending))
+	for _, call := range pending {
+		if isQuestionCall(call) {
+			queue = append(queue, call.ID)
+		}
+	}
+
+	if len(queue) <= 1 {
+		return
+	}
+
+	for index, callID := range queue {
+		if callID == request.ToolCallID {
+			request.QueueIndex, request.QueueSize = index+1, len(queue)
+
+			return
+		}
+	}
+}
+
+func isQuestionToolName(name string) bool {
+	return name == ToolName || name == TextToolName
+}
+
+func mixedBatchReason(askCount, otherCount int) string {
+	return fmt.Sprintf(
+		"%s (%d %s, %d %s).\nThis message was not executed. "+
+			"Send one ask_user call alone with 1-4 questions, or retry the other tools without ask_user.",
+		MixedBatchErrorPrefix,
+		askCount,
+		plural(askCount, "ask call", "ask calls"),
+		otherCount,
+		plural(otherCount, "other tool", "other tools"),
+	)
+}
+
+func mixedBatchDecision(batch []agent.ToolCall) agent.ToolDecision {
+	askCount, otherCount := batchCounts(batch)
+
+	return agent.ToolDecision{
+		Action: agent.ToolDecisionDenyBatch,
+		Reason: mixedBatchReason(askCount, otherCount),
+	}
+}
+
+func plural(count int, singular, pluralForm string) string {
+	if count == 1 {
+		return singular
+	}
+
+	return pluralForm
 }
 
 func decodeSpecArguments(data ai.JSON) (Spec, error) {

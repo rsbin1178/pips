@@ -136,10 +136,68 @@ func TestTimelineProjectsQuestionResultSemantically(t *testing.T) {
 	require.Len(t, blocks, 1)
 	assert.Equal(t, blockQuestion, blocks[0].kind)
 	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
-	assert.Contains(t, rendered, "Answered questions")
-	assert.Contains(t, rendered, "Framework: React")
+	assert.Contains(t, rendered, "• User answered the question")
+	assert.Contains(t, rendered, "└ Choose one → React")
 	assert.NotContains(t, rendered, question.ToolName)
 	assert.NotContains(t, rendered, "selections")
+}
+
+func TestTimelineTitlesMultiQuestionAnswer(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{Transcript: []ai.Message{
+		ai.Assistant(ai.ToolCallPart{
+			ID: "question-multi", Name: question.ToolName,
+			Args: ai.JSON(`{"questions":[` +
+				`{"header":"Framework","question":"Choose a framework","options":[{"label":"React","description":"Components"},{"label":"Vue","description":"Progressive"}]},` +
+				`{"header":"Scope","question":"Choose the scope","multiple":true,"options":[{"label":"UI","description":"Screens"},{"label":"API","description":"Endpoints"}]}` +
+				`]}`),
+		}),
+		ai.ToolResultText(
+			"question-multi", question.ToolName,
+			`{"answers":[{"selections":["React"]},{"selections":["UI","API"]}]}`,
+		),
+	}}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, blockQuestion, blocks[0].kind)
+	assert.Equal(t, questionAnsweredTitle, blocks[0].title)
+	assert.Contains(t, blocks[0].body, "Choose a framework → React")
+	assert.Contains(t, blocks[0].body, "Choose the scope → UI, API")
+
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 100, themeDark, true)
+	assert.Contains(t, rendered, "• User answered the questions")
+}
+
+func TestTimelineRendersMixedChoiceAndTextAnswers(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{Transcript: []ai.Message{
+		ai.Assistant(ai.ToolCallPart{
+			ID: "question-mixed", Name: question.ToolName,
+			Args: ai.JSON(`{"questions":[` +
+				`{"header":"Framework","question":"Choose a framework","options":[{"label":"React","description":"Components"},{"label":"Vue","description":"Progressive"}]},` +
+				`{"header":"Risk","question":"Which risk matters first?","kind":"text"}` +
+				`]}`),
+		}),
+		ai.ToolResultText(
+			"question-mixed", question.ToolName,
+			`{"answers":[{"selections":["React"]},{"custom":"Payment retries"}]}`,
+		),
+	}}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, blockQuestion, blocks[0].kind)
+	assert.Equal(t, questionAnsweredTitle, blocks[0].title)
+	assert.Contains(t, blocks[0].body, "Choose a framework → React")
+	assert.Contains(t, blocks[0].body, "Which risk matters first? → Payment retries")
+
+	detail := newQuestionDetailView(blocks[0])
+	text := detailRowsText(detail.rows)
+	assert.Contains(t, text, "Free text")
+	assert.Contains(t, text, "Payment retries")
 }
 
 func TestTimelineHidesPendingQuestionToolActivity(t *testing.T) {
@@ -154,6 +212,20 @@ func TestTimelineHidesPendingQuestionToolActivity(t *testing.T) {
 	}}}
 
 	assert.Empty(t, projectTimeline(state))
+}
+
+func TestTimelineHidesQuestionCallUntilItsResultExists(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{Transcript: []ai.Message{
+		ai.Assistant(ai.ToolCallPart{
+			ID: "question-pending", Name: question.ToolName,
+			Args: ai.JSON(`{"questions":[{"header":"Framework","question":"Choose one","options":[{"label":"React","description":"Components"},{"label":"Vue","description":"Progressive"}]}]}`),
+		}),
+	}}
+
+	assert.Empty(t, projectTimeline(state),
+		"the committed ask_user call is waiting for the prompt, not failed")
 }
 
 func TestTimelineDistinguishesRejectedAndInvalidQuestions(t *testing.T) {
@@ -181,6 +253,136 @@ func TestTimelineDistinguishesRejectedAndInvalidQuestions(t *testing.T) {
 	assert.Contains(t, blocks[0].body, "two to four options")
 	assert.Equal(t, "Question canceled", blocks[1].title)
 	assert.Equal(t, "No answer was submitted.", blocks[1].body)
+}
+
+func TestTimelineCollapsesMixedBatchQuestionRejections(t *testing.T) {
+	t.Parallel()
+
+	reason := question.MixedBatchErrorPrefix + " (2 ask calls, 1 other tool).\nThis message was not executed. " +
+		"Send one ask_user call alone with 1-4 questions, or retry the other tools without ask_user."
+	state := coding.State{Transcript: []ai.Message{
+		ai.Assistant(
+			ai.ToolCallPart{
+				ID: "ask-1", Name: question.ToolName,
+				Args: ai.JSON(`{"questions":[{"header":"Framework","question":"Choose one","options":[{"label":"React","description":"Components"},{"label":"Vue","description":"Progressive"}]}]}`),
+			},
+			ai.ToolCallPart{ID: "read-1", Name: "read", Args: ai.JSON(`{"path":"a.go"}`)},
+			ai.ToolCallPart{
+				ID: "ask-2", Name: question.ToolName,
+				Args: ai.JSON(`{"questions":[{"header":"Database","question":"Choose one","options":[{"label":"SQLite","description":"Embedded"},{"label":"Postgres","description":"Server"}]}]}`),
+			},
+		),
+		ai.ToolResults(
+			ai.ToolResultPart{ToolCallID: "ask-1", Name: question.ToolName, Content: agent.TextResult(reason), IsError: true},
+			ai.ToolResultPart{ToolCallID: "read-1", Name: "read", Content: agent.TextResult(reason), IsError: true},
+			ai.ToolResultPart{ToolCallID: "ask-2", Name: question.ToolName, Content: agent.TextResult(reason), IsError: true},
+		),
+	}}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	block := blocks[0]
+	assert.Equal(t, blockQuestion, block.kind)
+	assert.Equal(t, questionNotSentTitle, block.title)
+	assert.Equal(t, questionStatusFailed, block.status)
+	assert.Contains(t, block.body, "2 ask calls, 1 other tool")
+	assert.Len(t, block.tools, 3)
+
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 120, themeDark, true)
+	assert.Contains(t, rendered, "Questions not sent")
+	assert.Contains(t, rendered, "ask_user cannot be combined with other tools")
+	assert.NotContains(t, rendered, "Question failed")
+
+	detail := newQuestionDetailView(block)
+	assert.Equal(t, "Question details", detail.title)
+	require.Len(t, detail.callIDs, 3)
+}
+
+func TestTimelineCollapsesLiveMixedBatchQuestionRejections(t *testing.T) {
+	t.Parallel()
+
+	reason := question.MixedBatchErrorPrefix + " (2 ask calls, 1 other tool).\nThis message was not executed."
+	ask := func(id, header string) ai.ToolCallPart {
+		return ai.ToolCallPart{
+			ID: id, Name: question.ToolName,
+			Args: ai.JSON(`{"questions":[{"header":"` + header + `","question":"Choose one","options":[{"label":"A","description":"A"},{"label":"B","description":"B"}]}]}`),
+		}
+	}
+	calls := []ai.ToolCallPart{
+		ask("ask-1", "Framework"),
+		{ID: "read-1", Name: "read", Args: ai.JSON(`{"path":"a.go"}`)},
+		ask("ask-2", "Database"),
+	}
+	state := coding.State{Transcript: []ai.Message{
+		ai.Assistant(calls[0], calls[1], calls[2]),
+	}}
+	for _, call := range calls {
+		state.Tools = append(state.Tools, coding.ToolState{
+			RunID: "run-1", Turn: 1,
+			Call:   coding.ToolCall{ID: call.ID, Name: call.Name, Arguments: call.Args},
+			Status: coding.ToolStatusCompleted,
+			Result: ai.ToolResults(ai.ToolResultPart{
+				ToolCallID: call.ID, Name: call.Name,
+				Content: agent.TextResult(reason), IsError: true,
+			}),
+		})
+	}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, blockQuestion, blocks[0].kind)
+	assert.Equal(t, questionNotSentTitle, blocks[0].title)
+	assert.Len(t, blocks[0].tools, 3)
+}
+
+func TestTimelineProjectsLegacyTextQuestionPrompt(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{Transcript: []ai.Message{
+		ai.Assistant(ai.ToolCallPart{
+			ID: "legacy-text", Name: question.TextToolName,
+			Args: ai.JSON(`{"question":"Say something"}`),
+		}),
+		ai.ToolResultText("legacy-text", question.TextToolName, `{"chat":"hello"}`),
+	}}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, blockQuestion, blocks[0].kind)
+	assert.Equal(t, questionAnsweredSingleTitle, blocks[0].title)
+	assert.Equal(t, "Say something → hello", blocks[0].body)
+}
+
+func TestTimelineProjectsUnifiedFreeformQuestion(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{Transcript: []ai.Message{
+		ai.Assistant(ai.ToolCallPart{
+			ID: "freeform", Name: question.ToolName,
+			Args: ai.JSON(`{"question":"Why is the sky blue?"}`),
+		}),
+		ai.ToolResultText("freeform", question.ToolName, `{"chat":"Rayleigh scattering."}`),
+	}}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, blockQuestion, blocks[0].kind)
+	assert.Equal(t, questionAnsweredSingleTitle, blocks[0].title)
+	assert.Equal(t, "Why is the sky blue? → Rayleigh scattering.", blocks[0].body)
+
+	detail := newQuestionDetailView(blocks[0])
+	assert.Contains(t, detailRowsText(detail.rows), "Why is the sky blue?")
+	assert.Contains(t, detailRowsText(detail.rows), "Rayleigh scattering.")
+}
+
+func detailRowsText(rows []toolDetailRow) string {
+	var text strings.Builder
+	for _, row := range rows {
+		text.WriteString(row.text)
+		text.WriteString("\n")
+	}
+
+	return text.String()
 }
 
 func TestTimelineLabelsPlanModeToolActivity(t *testing.T) {
@@ -347,8 +549,8 @@ func TestTimelineUsesUniformInterBlockSpacing(t *testing.T) {
 	inset := strings.Repeat(" ", transcriptHorizontalInset)
 	assert.Equal(t, strings.Join([]string{
 		inset + "assistant",
-		inset + questionFailedTitle + "\n" + inset + "first failure",
-		inset + questionFailedTitle + "\n" + inset + "second failure",
+		inset + "• " + questionFailedTitle + "\n" + inset + "  └ first failure",
+		inset + "• " + questionFailedTitle + "\n" + inset + "  └ second failure",
 	}, separator), rendered)
 }
 
@@ -361,7 +563,7 @@ func TestTimelineUsesUniformOuterContentMargin(t *testing.T) {
 	rendered := renderTimeline(
 		[]timelineBlock{
 			{kind: blockAssistant, body: "assistant"},
-			{kind: blockQuestion, title: questionFailedTitle, body: "failure"},
+			{kind: blockDiagnostic, title: "Notice", body: "failure"},
 		},
 		newMarkdownRenderer(4),
 		80,
@@ -380,7 +582,7 @@ func TestTimelineUsesUniformOuterContentMargin(t *testing.T) {
 		require.Equal(t, transcriptHorizontalInset, indent, "row starts at the Composer text column: %q", line)
 	}
 	assert.Equal(t, inset+"assistant", strings.TrimRight(lines[0], " "))
-	assert.Contains(t, lines, inset+questionFailedTitle)
+	assert.Contains(t, lines, inset+"Notice")
 }
 
 func TestTimelineRendersThinkingTextButNeverSignatures(t *testing.T) {

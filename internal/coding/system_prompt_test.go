@@ -186,7 +186,8 @@ func TestBuildCodingSystemPromptPrefersStructuredQuestionsWhenAvailable(t *testi
 
 		prompt, err := buildCodingSystemPrompt(options)
 		require.NoError(t, err)
-		assert.Contains(t, prompt, "Prefer ask_user when a decision would materially affect the work")
+		assert.Contains(t, prompt, "Use ask_user when a decision would materially affect the work")
+		assert.Contains(t, prompt, "keep ask_user out of tool batches")
 		assert.Contains(t, prompt, "Continue independently when the answer can be inferred safely")
 	}
 
@@ -194,7 +195,7 @@ func TestBuildCodingSystemPromptPrefersStructuredQuestionsWhenAvailable(t *testi
 	base.ToolNames = []string{"read"}
 	prompt, err := buildCodingSystemPrompt(base)
 	require.NoError(t, err)
-	assert.NotContains(t, prompt, "Prefer ask_user")
+	assert.NotContains(t, prompt, "Use ask_user")
 }
 
 func TestBuildCodingSystemPromptGuidesTaskProgressOnlyWhenAvailable(t *testing.T) {

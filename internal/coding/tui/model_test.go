@@ -315,6 +315,47 @@ func TestReadyLongCompletionMarkerStaysVisibleAtBottom(t *testing.T) {
 	assert.Contains(t, model.View().Content, "▣ openai/test-model · 7s")
 }
 
+func TestCompletionMarkerStaysAfterItsAnswerWhenToolResultIsInserted(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	final := ai.AssistantText("final answer")
+	call := ai.Assistant(ai.ToolCallPart{
+		ID: "call-1", Name: "read", Args: ai.JSON(`{"path":"a.go"}`),
+	})
+	model.state.Transcript = []ai.Message{ai.UserText("ask"), call, final}
+	model.recordCompletion(coding.Event{
+		InteractionID: "interaction-1",
+		Type:          coding.EventInteractionCompleted,
+		Payload: coding.InteractionCompleted{
+			Outcome: coding.InteractionSucceeded, DurationMillis: 7_000,
+		},
+	})
+	require.Len(t, model.completionMarkers, 1)
+	require.Equal(t, 3, model.completionMarkers[0].afterMessages)
+
+	// The pending question's Tool result is adopted ahead of the final answer
+	// after the interaction completed; the marker must follow the answer, not
+	// stay at the old count.
+	model.state.Transcript = []ai.Message{
+		ai.UserText("ask"), call, ai.ToolResultText("call-1", "read", "ok"), final,
+	}
+	model.rebaseCompletionMarkers()
+	assert.Equal(t, 4, model.completionMarkers[0].afterMessages)
+
+	rendered := renderTimeline(model.timelineBlocks(), model.markdown, 80, themeDark, true)
+	answerAt := strings.LastIndex(rendered, "final answer")
+	markerAt := strings.Index(rendered, "▣ openai/test-model · 7s")
+	require.NotEqual(t, -1, answerAt)
+	require.NotEqual(t, -1, markerAt)
+	assert.Less(t, answerAt, markerAt, "the completion row follows the answer it belongs to")
+
+	// A later turn appends below the marker and must not drag the marker down.
+	model.state.Transcript = append(model.state.Transcript, ai.UserText("next"))
+	model.rebaseCompletionMarkers()
+	assert.Equal(t, 4, model.completionMarkers[0].afterMessages)
+}
+
 func TestReadyBoundsLongLiveTailToTerminalHeight(t *testing.T) {
 	t.Parallel()
 

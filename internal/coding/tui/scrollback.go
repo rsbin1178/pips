@@ -214,6 +214,7 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 
 		m.markCompletionCommitted(marker)
 	}
+	blocks = insertQuestionPreviews(blocks, m.takeOptimisticQuestionBlocks())
 
 	streamError := currentStreamError(m.streamErr)
 	if streamError != "" && streamError != m.scrollback.streamError {
@@ -297,6 +298,7 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 			blocks = append(blocks, block)
 		}
 	}
+	blocks = insertQuestionPreviews(blocks, m.optimisticQuestionBlocks())
 
 	streamError := currentStreamError(m.streamErr)
 	if streamError != "" && streamError != m.scrollback.streamError {
