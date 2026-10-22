@@ -257,7 +257,7 @@ func newToolDetailViewInWorkspace(block timelineBlock, workspace string) toolDet
 		if index > 0 {
 			rows = append(rows, toolDetailRow{})
 		}
-		rows = append(rows, toolDetailCallRows(index+1, activity, budget, workspace)...)
+		rows = append(rows, toolDetailCallRows(index+1, *activity, budget, workspace)...)
 	}
 	// The section budgets already reserve room for every part; the clamp is the
 	// document-wide backstop measured against the same byte limit.
@@ -455,7 +455,7 @@ func detailHeadingRowFor(index int, activity toolActivity) toolDetailRow {
 	label := expandedToolCallLabel(activity)
 	switch activity.class {
 	case toolClassPatch, toolClassShell, toolClassTaskList:
-		_, verb, subject := toolActivityHeading(activity.class, activity.state, []toolActivity{activity})
+		_, verb, subject := toolActivityHeading(activity.class, activity.state, []*toolActivity{&activity})
 		label = strings.TrimSpace(verb + " " + subject)
 	case toolClassExplore, toolClassGeneric, toolClassPlan, toolClassSubagent:
 		if target, _, ok := detailDispatchArguments(activity); ok {

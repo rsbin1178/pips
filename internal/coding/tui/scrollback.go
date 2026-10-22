@@ -18,15 +18,20 @@ import (
 // tail Bubble Tea still owns. Stable blocks are printed above the inline
 // Program once, so the terminal can retain, select, and scroll them natively.
 type scrollbackCursor struct {
-	messages     int
-	tools        int
-	diagnostics  int
-	toolIDs      map[string]struct{}
-	completions  map[string]struct{}
-	teamAttempts map[teamAttemptKey]projectionFingerprint
-	changes      projectionFingerprint
-	lastError    projectionFingerprint
-	streamError  string
+	messages    int
+	tools       int
+	diagnostics int
+	// transcriptBase and toolsBase record the State window the cursors were
+	// measured against. A live transcript trim advances the base; the cursors
+	// then move down by the same amount so the printed prefix stays aligned.
+	transcriptBase int
+	toolsBase      int
+	toolIDs        map[string]struct{}
+	completions    map[string]struct{}
+	teamAttempts   map[teamAttemptKey]projectionFingerprint
+	changes        projectionFingerprint
+	lastError      projectionFingerprint
+	streamError    string
 	// compactionShown records that the first stable projection after a compaction
 	// already handed the divider to the terminal. The cursor may still sit at
 	// message zero because a checkpoint replaces the transcript with no visible
@@ -50,13 +55,22 @@ type scrollbackWrite struct {
 
 func (m *Model) resetScrollback() {
 	teamAttempts := m.scrollback.teamAttempts
-	m.scrollback = scrollbackCursor{}
+	m.scrollback = scrollbackCursor{
+		transcriptBase: m.state.TranscriptBase(),
+		toolsBase:      m.state.ToolsBase(),
+	}
 	m.scrollback.teamAttempts = teamAttempts
 	// Inspection output belongs to the projection being replaced, so a session
 	// change drops whatever a route was holding instead of printing it later.
 	m.presentation.heldInspections = nil
+	// Deferred pages are the replaced projection's rendered content; accepted
+	// writes stay queued because they are already on their way to the terminal.
+	m.dropPendingScrollback()
 	m.streaming.reset()
 	m.timeline = ""
+	// A live version of the replaced projection must not reach the new frame, so
+	// outstanding background work is retired with it.
+	m.retireLiveRenderState()
 	// The managed store is part of the replaced projection. Its position-based
 	// identities can collide with different content after a compaction or a
 	// session switch, so the next frame must render the replacement from scratch.
@@ -65,7 +79,7 @@ func (m *Model) resetScrollback() {
 
 func (m *Model) commitStableTimeline() tea.Cmd {
 	if !m.sizeReady || m.route.kind != routeNone || m.presentation.pendingRoute.pending() {
-		return nil
+		return m.armLiveWork()
 	}
 
 	// Fullscreen has no terminal history to catch up on, so a stable commit is a
@@ -75,14 +89,23 @@ func (m *Model) commitStableTimeline() tea.Cmd {
 	if m.fullscreen() {
 		m.rerenderTranscript(false)
 
-		return nil
+		return m.armLiveWork()
+	}
+
+	// A slow terminal is the backpressure boundary: while rendered pages wait,
+	// keep the stable projection in State instead of rendering another copy. The
+	// write completion catches up once the queue has room.
+	if m.presentation.backpressured() {
+		m.rerenderTranscript(false)
+
+		return m.armLiveWork()
 	}
 
 	blocks := m.takeStableTimelineBlocks()
-	writes := m.streamingScrollbackWrites(blocks)
+	sources := m.streamingScrollbackSources(blocks)
 	m.rerenderTranscript(false)
 
-	return m.printScrollbackWrites(writes)
+	return tea.Batch(m.printScrollbackSources(sources), m.armLiveWork())
 }
 
 // printScrollback is the single boundary for output that leaves Bubble Tea's
@@ -92,37 +115,78 @@ func (m *Model) printScrollback(content string) tea.Cmd {
 	return m.printScrollbackWrites([]scrollbackWrite{{content: content}})
 }
 
-func (m *Model) printScrollbackWrites(writes []scrollbackWrite) tea.Cmd {
-	var content strings.Builder
+// printScrollbackBlocks renders stable blocks in byte-bounded pages instead of
+// joining the whole delta into one string. The banner, when present, is the
+// first page's pre-rendered content. Pages that do not fit the queue stay in a
+// pager and are written when earlier pages complete.
+func (m *Model) printScrollbackBlocks(blocks []timelineBlock, banner string) tea.Cmd {
+	pager := newScrollbackPager(blocks)
+	pager.prependRendered(banner)
+	if pager.empty() {
+		return nil
+	}
 
-	hasOutput := m.scrollbackOutput
+	return m.printScrollbackSources([]scrollbackSource{pager})
+}
+
+// printScrollbackSources queues lazy sources behind whatever is already waiting
+// and moves as many pages into the write queue as it has room for.
+func (m *Model) printScrollbackSources(sources []scrollbackSource) tea.Cmd {
+	var commands []tea.Cmd
+
+	for _, source := range sources {
+		if source == nil {
+			continue
+		}
+
+		m.presentation.pendingSources = append(m.presentation.pendingSources, source)
+	}
+
+	if !m.presentation.hasPendingScrollback() {
+		return nil
+	}
+
+	if command := m.pumpPendingScrollback(); command != nil {
+		commands = append(commands, command)
+	}
+
+	return tea.Batch(commands...)
+}
+
+// printScrollbackWrites queues already rendered writes. A write that fits one
+// page is enqueued directly; a larger one waits as a pager over the caller's
+// string, so deferring a huge payload never holds a rendered copy per page.
+func (m *Model) printScrollbackWrites(writes []scrollbackWrite) tea.Cmd {
+	var commands []tea.Cmd
 
 	for _, write := range writes {
 		if write.content == "" {
 			continue
 		}
 
-		switch {
-		case content.Len() > 0 && write.continuation:
-			content.WriteByte('\n')
-		case content.Len() > 0:
-			content.WriteString(strings.Repeat("\n", conversationGapHeight+1))
-		case hasOutput && !write.continuation:
-			content.WriteString(strings.Repeat("\n", conversationGapHeight))
+		// Content already waiting is older than this write, so this write is
+		// deferred behind it rather than overtaking it in the terminal.
+		if len(write.content) <= scrollbackPageBytes && !m.presentation.backpressured() {
+			if command := m.enqueueScrollbackPage(write.content, write.continuation); command != nil {
+				commands = append(commands, command)
+			}
+
+			continue
 		}
 
-		content.WriteString(write.content)
-
-		hasOutput = true
+		m.presentation.pendingSources = append(m.presentation.pendingSources,
+			newScrollbackTextPager(write.content, write.continuation))
 	}
 
-	if content.Len() == 0 {
-		return nil
+	// A deferred write owns no dispatch of its own, so the queue is filled here
+	// instead of waiting for a completion that would never arrive.
+	if m.presentation.hasPendingScrollback() {
+		if command := m.pumpPendingScrollback(); command != nil {
+			commands = append(commands, command)
+		}
 	}
 
-	m.scrollbackOutput = true
-
-	return m.enqueueScrollback(content.String())
+	return tea.Batch(commands...)
 }
 
 // takeStableTimeline advances the scrollback cursor and returns the immutable
@@ -171,26 +235,14 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 		stableMessages = min(stableMessages, m.heldExploreMessageFrontier(exploreStart))
 	}
 
-	delta := m.state.Clone()
+	delta := m.incrementalProjection(stableMessages, stableTools)
 
-	delta.Transcript = delta.Transcript[m.scrollback.messages:stableMessages]
-	delta.MessageCandidates = sliceMessageCandidates(
-		m.state.MessageCandidates, m.scrollback.messages, stableMessages,
-	)
-	delta.SyntheticMessages = sliceSyntheticMessageIndexes(
-		m.state.SyntheticMessages,
-		m.scrollback.messages,
-		stableMessages,
-	)
 	// The divider belongs to the first stable projection after a compaction.
 	// Later deltas start below it, and the terminal already holds the printed row.
 	if m.scrollback.compactionShown {
 		delta.Compaction = coding.CompactionState{}
 	}
 	delta.Draft = coding.StreamDraft{}
-	delta.Tools = delta.Tools[m.scrollback.tools:stableTools]
-
-	delta.Diagnostics = delta.Diagnostics[m.scrollback.diagnostics:]
 
 	changes := currentChanges(m.state)
 	if changes == m.scrollback.changes {
@@ -207,14 +259,15 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 		m.scrollback.compactionShown = true
 	}
 
-	for _, marker := range m.pendingCompletionMarkers() {
-		if block, ok := projectCompletionMarker(marker); ok {
-			blocks = append(blocks, block)
-		}
-
+	ready, _ := m.completionMarkersForDelta(stableMessages)
+	for _, marker := range ready {
 		m.markCompletionCommitted(marker)
 	}
-	blocks = insertQuestionPreviews(blocks, m.takeOptimisticQuestionBlocks())
+	blocks = insertCompletionMarkers(blocks, ready)
+	blocks = insertQuestionPreviews(
+		blocks,
+		rebaseQuestionPreviews(m.takeOptimisticQuestionBlocks(), m.scrollback.messages),
+	)
 
 	streamError := currentStreamError(m.streamErr)
 	if streamError != "" && streamError != m.scrollback.streamError {
@@ -261,28 +314,42 @@ func (m *Model) renderTimelineBlocksWithOptions(
 	)
 }
 
+// incrementalProjection returns a read-only view of the current State with the
+// committed prefix sliced away. State transitions are copy-on-write and the
+// timeline projection only reads, so the message, tool and diagnostic backings
+// are shared instead of copied; the inline tail therefore costs its own rows,
+// not a clone of the whole conversation.
+func (m *Model) incrementalProjection(messageEnd, toolEnd int) coding.State {
+	state := m.state
+	messageStart := min(max(0, m.scrollback.messages), len(m.state.Transcript))
+	messageEnd = min(max(messageStart, messageEnd), len(m.state.Transcript))
+	toolStart := min(max(0, m.scrollback.tools), len(m.state.Tools))
+	toolEnd = min(max(toolStart, toolEnd), len(m.state.Tools))
+	diagnosticStart := min(max(0, m.scrollback.diagnostics), len(m.state.Diagnostics))
+
+	state.Transcript = state.Transcript[messageStart:messageEnd]
+	state.MessageCandidates = sliceMessageCandidates(
+		m.state.MessageCandidates, messageStart, messageEnd,
+	)
+	state.SyntheticMessages = sliceSyntheticMessageIndexes(
+		m.state.SyntheticMessages, messageStart, messageEnd,
+	)
+	state.Tools = state.Tools[toolStart:toolEnd]
+	state.Diagnostics = state.Diagnostics[diagnosticStart:]
+
+	return state
+}
+
 func (m *Model) activeTimelineBlocks() []timelineBlock {
 	m.reconcileScrollback()
 
-	active := m.state.Clone()
+	active := m.incrementalProjection(len(m.state.Transcript), len(m.state.Tools))
 
-	active.Transcript = active.Transcript[m.scrollback.messages:]
-	active.MessageCandidates = sliceMessageCandidates(
-		m.state.MessageCandidates, m.scrollback.messages, len(m.state.Transcript),
-	)
-	active.SyntheticMessages = sliceSyntheticMessageIndexes(
-		m.state.SyntheticMessages,
-		m.scrollback.messages,
-		len(m.state.Transcript),
-	)
 	// The stable projection already printed the compaction divider. The live tail
 	// starts below it, so it must not paint a second copy.
 	if m.scrollback.compactionShown {
 		active.Compaction = coding.CompactionState{}
 	}
-	active.Tools = active.Tools[m.scrollback.tools:]
-
-	active.Diagnostics = active.Diagnostics[m.scrollback.diagnostics:]
 
 	if currentChanges(m.state) == m.scrollback.changes {
 		active.Changes = nil
@@ -293,12 +360,12 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 	}
 
 	blocks := m.projectTimeline(active, m.scrollback.toolIDs)
-	for _, marker := range m.pendingCompletionMarkers() {
-		if block, ok := projectCompletionMarker(marker); ok {
-			blocks = append(blocks, block)
-		}
-	}
-	blocks = insertQuestionPreviews(blocks, m.optimisticQuestionBlocks())
+	ready, _ := m.completionMarkersForDelta(len(m.state.Transcript))
+	blocks = insertCompletionMarkers(blocks, ready)
+	blocks = insertQuestionPreviews(
+		blocks,
+		rebaseQuestionPreviews(m.optimisticQuestionBlocks(), m.scrollback.messages),
+	)
 
 	streamError := currentStreamError(m.streamErr)
 	if streamError != "" && streamError != m.scrollback.streamError {
@@ -420,19 +487,18 @@ func (m *Model) planModeNoticePermission() string {
 	return string(m.permissionMode)
 }
 
+// sliceMessageCandidates returns a read-only view of the candidate identities
+// covering [start, end). The timeline projection only reads them, so the view
+// shares the State backing array instead of copying it.
 func sliceMessageCandidates(
 	values []coding.CandidateIdentity,
 	start int,
 	end int,
 ) []coding.CandidateIdentity {
-	result := make([]coding.CandidateIdentity, max(0, end-start))
-	if start >= len(values) || len(result) == 0 {
-		return result
-	}
+	start = min(max(0, start), len(values))
+	end = min(max(start, end), len(values))
 
-	copy(result, values[start:min(end, len(values))])
-
-	return result
+	return values[start:end]
 }
 
 func (m *Model) holdCompletedSubagentTool(tool coding.ToolState) bool {
@@ -715,14 +781,127 @@ func (m *Model) takeSubagentTerminalBlocks() []timelineBlock {
 		blocks = append(blocks, timelineBlock{
 			kind:     blockSubagent,
 			subagent: &row,
-			tools:    []toolActivity{{childSessionID: value.ChildSessionID}},
+			tools:    []*toolActivity{{childSessionID: value.ChildSessionID}},
 		})
 	}
 
 	return blocks
 }
 
+// rebaseScrollbackWindow moves the append-only cursors when the live transcript
+// window releases its oldest messages. The printed prefix stays printed; the
+// cursors only need to address the new backing window.
+func (m *Model) rebaseScrollbackWindow() {
+	m.rebaseWindowBases(m.state.TranscriptBase(), m.state.ToolsBase())
+	m.pruneSubagentCursors()
+}
+
+// pruneSubagentCursors releases lifecycle bookkeeping for children the bounded
+// parent projection has already dropped. The two maps only suppress duplicate
+// rows for children the projection still carries.
+func (m *Model) pruneSubagentCursors() {
+	if len(m.scrollback.subagentStarted) == 0 && len(m.scrollback.subagentTerminal) == 0 {
+		return
+	}
+
+	live := make(map[string]struct{}, len(m.state.Subagents))
+	for _, child := range m.state.Subagents {
+		live[child.ChildSessionID] = struct{}{}
+	}
+	for childSessionID := range m.scrollback.subagentStarted {
+		if _, ok := live[childSessionID]; !ok {
+			delete(m.scrollback.subagentStarted, childSessionID)
+		}
+	}
+	for childSessionID := range m.scrollback.subagentTerminal {
+		if _, ok := live[childSessionID]; !ok {
+			delete(m.scrollback.subagentTerminal, childSessionID)
+		}
+	}
+}
+
+// rebaseWindowBases applies a window move to the inline cursors and the
+// position-addressed TUI bookkeeping.
+func (m *Model) rebaseWindowBases(transcriptBase, toolsBase int) {
+	if drop := transcriptBase - m.scrollback.transcriptBase; drop > 0 {
+		m.scrollback.messages = max(0, m.scrollback.messages-drop)
+		m.rebaseCompletionMarkersForWindow(drop)
+		m.rebaseQuestionPreviewsForWindow(drop)
+		if len(m.history.messages) > 0 {
+			// The loaded pages ended at the old window. Keep History contiguous by
+			// discarding them; the first request reloads the page immediately above
+			// the new window.
+			m.history = historyState{more: true}
+		} else {
+			m.history.more = true
+		}
+	}
+	m.scrollback.transcriptBase = transcriptBase
+
+	if drop := toolsBase - m.scrollback.toolsBase; drop > 0 {
+		m.scrollback.tools = max(0, m.scrollback.tools-drop)
+		m.pruneCommittedToolIDs()
+	}
+	m.scrollback.toolsBase = toolsBase
+}
+
+// rebaseCompletionMarkersForWindow drops markers whose anchor left the window and
+// moves the rest onto the retained transcript.
+func (m *Model) rebaseCompletionMarkersForWindow(drop int) {
+	if len(m.completionMarkers) == 0 {
+		return
+	}
+
+	kept := make([]completionMarker, 0, len(m.completionMarkers))
+	for _, marker := range m.completionMarkers {
+		marker.afterMessages -= drop
+		if marker.afterMessages <= 0 {
+			delete(m.scrollback.completions, marker.interactionID)
+
+			continue
+		}
+		kept = append(kept, marker)
+	}
+
+	m.completionMarkers = kept
+	// The shifted count is only the fallback; a marker whose message is still in
+	// the window re-resolves onto its own run or digest.
+	m.rebaseCompletionMarkers()
+}
+
+// rebaseQuestionPreviewsForWindow drops optimistic previews whose result can no
+// longer land in the retained transcript.
+func (m *Model) rebaseQuestionPreviewsForWindow(drop int) {
+	for toolCallID, preview := range m.questionPreviews {
+		preview.position -= drop
+		if preview.position <= 0 {
+			delete(m.questionPreviews, toolCallID)
+
+			continue
+		}
+		m.questionPreviews[toolCallID] = preview
+	}
+}
+
+// pruneCommittedToolIDs releases identities whose Tool projections left the
+// window, so the exclusion set stays proportional to the retained tools.
+func (m *Model) pruneCommittedToolIDs() {
+	if len(m.scrollback.toolIDs) == 0 {
+		return
+	}
+
+	retained := make(map[string]struct{}, len(m.state.Tools))
+	for _, tool := range m.state.Tools {
+		if _, committed := m.scrollback.toolIDs[tool.Call.ID]; committed {
+			retained[tool.Call.ID] = struct{}{}
+		}
+	}
+
+	m.scrollback.toolIDs = retained
+}
+
 func (m *Model) reconcileScrollback() {
+	m.rebaseScrollbackWindow()
 	if m.scrollback.messages > len(m.state.Transcript) ||
 		m.scrollback.tools > len(m.state.Tools) ||
 		m.scrollback.diagnostics > len(m.state.Diagnostics) {
@@ -755,6 +934,33 @@ func (m *Model) pendingCompletionMarkers() []completionMarker {
 	}
 
 	return pending
+}
+
+// completionMarkersForDelta rebases the pending markers onto one inline delta
+// and reports which of them the delta now covers. Native history is append-only,
+// so a marker whose answer is not inside the delta waits for the delta that
+// carries it instead of being printed above that answer.
+func (m *Model) completionMarkersForDelta(covered int) ([]completionMarker, []completionMarker) {
+	pending := m.pendingCompletionMarkers()
+	if len(pending) == 0 {
+		return nil, nil
+	}
+
+	base := m.scrollback.messages
+	ready := make([]completionMarker, 0, len(pending))
+	waiting := make([]completionMarker, 0, len(pending))
+
+	for _, marker := range pending {
+		marker.afterMessages -= base
+		if marker.afterMessages <= covered-base {
+			ready = append(ready, marker)
+
+			continue
+		}
+		waiting = append(waiting, marker)
+	}
+
+	return ready, waiting
 }
 
 func (m *Model) markCompletionCommitted(marker completionMarker) {

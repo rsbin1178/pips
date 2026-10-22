@@ -143,6 +143,48 @@ func TestJSONLPendingRoundTrip(t *testing.T) {
 	assert.JSONEq(t, `{"query":"main"}`, string(pending[0].Args))
 }
 
+func TestOpenJSONLAcceptsHeaderOnlyAndTrailingBlankLines(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	headerOnly := dir + "/header-only.jsonl"
+	store, err := harness.CreateJSONL(headerOnly, "header-only", nil)
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+
+	opened, err := harness.OpenJSONL(headerOnly)
+	require.NoError(t, err)
+	session, err := harness.NewSession(opened)
+	require.NoError(t, err)
+	assert.Empty(t, session.Entries())
+	require.NoError(t, opened.Close())
+
+	withMessage := dir + "/with-message.jsonl"
+	store, err = harness.CreateJSONL(withMessage, "with-message", nil)
+	require.NoError(t, err)
+	session, err = harness.NewSession(store)
+	require.NoError(t, err)
+	_, err = session.AppendMessage(ai.UserText("hello"), nil)
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+
+	file, err := os.OpenFile(withMessage, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // test-owned path
+	require.NoError(t, err)
+	_, err = file.WriteString("\n\n")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	opened, err = harness.OpenJSONL(withMessage)
+	require.NoError(t, err)
+	session, err = harness.NewSession(opened)
+	require.NoError(t, err)
+	entries := session.Entries()
+	require.Len(t, entries, 1, "blank lines carry no entry")
+	assert.Equal(t, ai.UserText("hello"), entries[0].Message)
+	require.NoError(t, opened.Close())
+}
+
 func TestOpenJSONLRejectsForeignFiles(t *testing.T) {
 	t.Parallel()
 

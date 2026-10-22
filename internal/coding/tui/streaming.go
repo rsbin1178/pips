@@ -35,12 +35,21 @@ func (s *streamProjection) reset() {
 	*s = streamProjection{}
 }
 
+// resetStreamingDraft drops the inline live projection and the renderer rows it
+// was assembled from. The settled block is printed from a full render, so the
+// frozen prefix and its reuse frame are stale once the stream ends.
+func (m *Model) resetStreamingDraft() {
+	m.streaming.reset()
+	m.markdown.releaseLiveState()
+}
+
 // syncStreamingDraft returns newly immutable rendered rows and whether they
 // continue an assistant block that already has rows in native scrollback.
 func (m *Model) syncStreamingDraft(identity, source string) (string, bool) {
 	stream := &m.streaming
 	if !stream.active || stream.identity != identity {
 		stream.reset()
+		m.markdown.releaseLiveState()
 		stream.active = true
 		stream.identity = identity
 		stream.width = m.width
@@ -98,6 +107,7 @@ func (m *Model) syncRetractableDraft(identity, source string) {
 	stream := &m.streaming
 	if !stream.active || stream.identity != identity {
 		stream.reset()
+		m.markdown.releaseLiveState()
 		stream.active = true
 		stream.identity = identity
 		stream.width = m.width
@@ -227,45 +237,47 @@ func (m *Model) renderStreamingLines(source string, width int) []string {
 	return strings.Split(rendered, "\n")
 }
 
-func (m *Model) streamingScrollbackWrites(blocks []timelineBlock) []scrollbackWrite {
+// streamingScrollbackSources splits the stable delta into lazy sources instead
+// of one joined rendering: committed block ranges become block pagers, and the
+// streaming holdback hands over the rows it promoted as a text pager. The
+// delta's rendered string therefore never exists as a whole.
+func (m *Model) streamingScrollbackSources(blocks []timelineBlock) []scrollbackSource {
 	source := visibleDraftText(m.state.Draft)
 	if source != "" {
-		writes := m.timelineScrollbackWrite(blocks)
+		sources := m.timelineScrollbackSources(blocks)
 
 		identity := m.state.DraftCandidate.Key()
 		if m.state.Interaction.Mode == coding.ModePlan {
 			m.syncRetractableDraft(identity, source)
 
-			return writes
+			return sources
 		}
 
 		promoted, continuation := m.syncStreamingDraft(identity, source)
 		if promoted != "" {
-			writes = append(writes, scrollbackWrite{
-				content: promoted, continuation: continuation,
-			})
+			sources = append(sources, newScrollbackTextPager(promoted, continuation))
 		}
 
-		return writes
+		return sources
 	}
 
 	if !m.streaming.active {
-		return m.timelineScrollbackWrite(blocks)
+		return m.timelineScrollbackSources(blocks)
 	}
 
 	if m.streaming.retractable && m.matchingStreamingAssistantIndex(blocks) < 0 {
-		writes := m.timelineScrollbackWrite(blocks)
-		m.streaming.reset()
+		sources := m.timelineScrollbackSources(blocks)
+		m.resetStreamingDraft()
 
-		return writes
+		return sources
 	}
 
-	writes := make([]scrollbackWrite, 0, 3)
+	sources := make([]scrollbackSource, 0, 3)
 
 	assistantIndex := m.matchingStreamingAssistantIndex(blocks)
 	if assistantIndex < 0 {
 		if m.hasPendingStreamingAssistant() {
-			return m.timelineScrollbackWrite(blocks)
+			return m.timelineScrollbackSources(blocks)
 		}
 
 		assistantIndex = m.streamingAssistantIndex(blocks)
@@ -273,18 +285,17 @@ func (m *Model) streamingScrollbackWrites(blocks []timelineBlock) []scrollbackWr
 
 	if assistantIndex < 0 {
 		if remaining := m.streamingRemaining(m.streaming.source); remaining != "" {
-			writes = append(writes, scrollbackWrite{
-				content: remaining, continuation: m.streaming.emitted > 0,
-			})
+			sources = append(sources,
+				newScrollbackTextPager(remaining, m.streaming.emitted > 0))
 		}
 
-		writes = append(writes, m.timelineScrollbackWrite(blocks)...)
-		m.streaming.reset()
+		sources = append(sources, m.timelineScrollbackSources(blocks)...)
+		m.resetStreamingDraft()
 
-		return writes
+		return sources
 	}
 
-	writes = append(writes, m.timelineScrollbackWrite(blocks[:assistantIndex])...)
+	sources = append(sources, m.timelineScrollbackSources(blocks[:assistantIndex])...)
 	assistant := blocks[assistantIndex]
 
 	rendered := renderTimelineBlock(
@@ -295,24 +306,25 @@ func (m *Model) streamingScrollbackWrites(blocks []timelineBlock) []scrollbackWr
 		m.options.NoColor,
 	)
 	if remaining := renderedRowsAfter(rendered, m.streaming.emitted); remaining != "" {
-		writes = append(writes, scrollbackWrite{
-			content: remaining, continuation: m.streaming.emitted > 0,
-		})
+		sources = append(sources,
+			newScrollbackTextPager(remaining, m.streaming.emitted > 0))
 	}
 
-	writes = append(writes, m.timelineScrollbackWrite(blocks[assistantIndex+1:])...)
-	m.streaming.reset()
+	sources = append(sources, m.timelineScrollbackSources(blocks[assistantIndex+1:])...)
+	m.resetStreamingDraft()
 
-	return writes
+	return sources
 }
 
-func (m *Model) timelineScrollbackWrite(blocks []timelineBlock) []scrollbackWrite {
-	content := m.renderTimelineBlocks(blocks)
-	if content == "" {
+// timelineScrollbackSources hands a block range over as a pager. The range is
+// rendered one block at a time when its pages are written, so the joined
+// rendering that the string path would build never exists.
+func (m *Model) timelineScrollbackSources(blocks []timelineBlock) []scrollbackSource {
+	if len(blocks) == 0 {
 		return nil
 	}
 
-	return []scrollbackWrite{{content: content}}
+	return []scrollbackSource{newScrollbackPager(blocks)}
 }
 
 func (m *Model) streamingAssistantIndex(blocks []timelineBlock) int {

@@ -32,6 +32,43 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestControllerRetainsReadOnlySnapshots(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t)
+	controller, err := newController(t.Context(), fixture.options, fixture.dependencies())
+	require.NoError(t, err)
+	require.NotEmpty(t, fixture.opener.runtimes)
+
+	runtime := fixture.opener.runtimes[0]
+	deep, readOnly := runtime.snapshotCounts()
+	assert.Zero(t, deep, "opening retains the Runtime projection without a deep copy")
+	assert.Equal(t, 1, readOnly)
+
+	// Snapshot is still the defensive copy: mutating it cannot reach lastState.
+	snapshot := controller.Snapshot()
+	deep, readOnly = runtime.snapshotCounts()
+	assert.Equal(t, 1, deep)
+	snapshot.Mode = coding.ModePlan
+	assert.Equal(t, coding.ModeAgent, controller.SnapshotReadOnly().Mode)
+
+	// One operation refreshes lastState from the read-only view, not a deep copy.
+	deepBefore, readOnlyBefore := runtime.snapshotCounts()
+	for range controller.Prompt(t.Context(), ai.UserText("probe")) {
+	}
+	deepAfter, readOnlyAfter := runtime.snapshotCounts()
+	assert.Equal(t, deepBefore, deepAfter)
+	assert.Greater(t, readOnlyAfter, readOnlyBefore)
+
+	require.NoError(t, controller.Close(t.Context()))
+	deepBefore, _ = runtime.snapshotCounts()
+	closed := controller.Snapshot()
+	closed.Mode = coding.ModePlan
+	assert.Equal(t, coding.ModeAgent, controller.SnapshotReadOnly().Mode)
+	deepAfter, _ = runtime.snapshotCounts()
+	assert.Equal(t, deepBefore, deepAfter, "a closed Controller clones lastState, not the Runtime")
+}
+
 func TestControllerModelOverrideAppliesToLaterSessions(t *testing.T) {
 	t.Parallel()
 
@@ -737,6 +774,8 @@ type fakeRuntime struct {
 	resolveAttachment func(context.Context, attachment.Reference) (attachment.Resolved, error)
 	closed            int
 	closeError        error
+	snapshots         int
+	readOnlySnapshots int
 }
 
 func (r *fakeRuntime) Prompt(
@@ -1019,7 +1058,21 @@ func (r *fakeRuntime) Snapshot() coding.State {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.snapshots++
+
 	return r.state.Clone()
+}
+
+// SnapshotReadOnly returns the fake runtime's immutable projection. The
+// Controller retains this form for lastState, so tests can tell a read-only
+// retention from a defensive deep copy.
+func (r *fakeRuntime) SnapshotReadOnly() coding.State {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.readOnlySnapshots++
+
+	return r.state
 }
 
 func (r *fakeRuntime) setState(update func(*coding.State)) {
@@ -1027,6 +1080,13 @@ func (r *fakeRuntime) setState(update func(*coding.State)) {
 	defer r.mu.Unlock()
 
 	update(&r.state)
+}
+
+func (r *fakeRuntime) snapshotCounts() (deep, readOnly int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.snapshots, r.readOnlySnapshots
 }
 
 func (r *fakeRuntime) Close(context.Context) error {

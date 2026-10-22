@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,41 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// stubWorkerEvents drives the Worker route's event consumer: a test queues
+// records, ends delivery by closing the channel, and observes Close.
+type stubWorkerEvents struct {
+	events chan coding.EventRecord
+	err    error
+	closed bool
+	once   sync.Once
+}
+
+func newStubWorkerEvents(buffer int) *stubWorkerEvents {
+	return &stubWorkerEvents{events: make(chan coding.EventRecord, buffer)}
+}
+
+func (s *stubWorkerEvents) Receive() (coding.EventRecord, bool) {
+	record, ok := <-s.events
+
+	return record, ok
+}
+
+func (s *stubWorkerEvents) Err() error { return s.err }
+
+func (s *stubWorkerEvents) Close() {
+	s.once.Do(func() {
+		s.closed = true
+		close(s.events)
+	})
+}
+
+func (s *stubWorkerEvents) push(record coding.EventRecord) { s.events <- record }
+
+func (s *stubWorkerEvents) end(err error) {
+	s.err = err
+	s.Close()
+}
 
 func TestAgentsRouteMergesSubagentsAndTeamWorkers(t *testing.T) {
 	t.Parallel()
@@ -203,14 +239,8 @@ func TestTeamWorkerRouteAppliesLiveDeltasAndRecoversGapWithLastGoodState(t *test
 		childSummary: child, childSessionID: child.childSessionID,
 	}
 
-	events := make(chan coding.EventRecord, 1)
-	closed := false
-	bridgeErr := error(nil)
-	bridge := &workerSubscriptionBridge{
-		events: events,
-		err:    func() error { return bridgeErr },
-		close:  func() { closed = true },
-	}
+	events := newStubWorkerEvents(1)
+	bridge := &workerSubscriptionBridge{events: events}
 	_, wait := model.applyTeamWorkerRouteData(teamWorkerRouteDataMsg{
 		generation: 7, target: child.worker.Target,
 		state: controller.workerState, hasState: true, bridge: bridge,
@@ -223,7 +253,7 @@ func TestTeamWorkerRouteAppliesLiveDeltasAndRecoversGapWithLastGoodState(t *test
 		Type:    coding.EventStatusChanged,
 		Payload: coding.StatusChanged{Phase: coding.PhasePaused},
 	}
-	events <- coding.EventRecord{Cursor: 1, Event: event}
+	events.push(coding.EventRecord{Cursor: 1, Event: event})
 	message, ok := wait().(teamWorkerRouteEventMsg)
 	require.True(t, ok)
 	_, next := model.Update(message)
@@ -231,13 +261,12 @@ func TestTeamWorkerRouteAppliesLiveDeltasAndRecoversGapWithLastGoodState(t *test
 	require.NotNil(t, model.route.childState)
 	assert.Equal(t, coding.PhasePaused, model.route.childState.Phase)
 
-	bridgeErr = coding.ErrEventGap
-	close(events)
+	events.end(coding.ErrEventGap)
 	closedMessage, ok := next().(teamWorkerRouteEventMsg)
 	require.True(t, ok)
 	_, refresh := model.Update(closedMessage)
 	require.NotNil(t, refresh)
-	assert.True(t, closed)
+	assert.True(t, events.closed)
 	assert.True(t, model.route.refreshing)
 	assert.Equal(t, coding.PhasePaused, model.route.childState.Phase)
 	assert.ErrorIs(t, model.route.refreshErr, coding.ErrEventGap)
@@ -253,8 +282,8 @@ func TestTeamWorkerRouteRejectsLateTargetAndClosesSubscription(t *testing.T) {
 		kind: routeChild, generation: 9, childKind: childTeamWorker,
 		childSummary: child, childSessionID: child.childSessionID,
 	}
-	closed := false
-	bridge := &workerSubscriptionBridge{close: func() { closed = true }}
+	closed := newStubWorkerEvents(1)
+	bridge := &workerSubscriptionBridge{events: closed}
 	stale := child.worker.Target
 	stale.OwnerGeneration++
 
@@ -263,7 +292,7 @@ func TestTeamWorkerRouteRejectsLateTargetAndClosesSubscription(t *testing.T) {
 		state: teamWorkerState(), hasState: true,
 	})
 
-	assert.True(t, closed)
+	assert.True(t, closed.closed)
 	assert.Nil(t, model.route.childState)
 	assert.Nil(t, model.route.workerBridge)
 }
@@ -277,8 +306,8 @@ func TestTeamWorkerRouteRapidSwitchClosesOldBridgeAndRejectsLateLoad(t *testing.
 	second.worker.Target.AttemptID = "attempt-2"
 	second.worker.ChildSessionID = "worker-session-2"
 	second.childSessionID = "worker-session-2"
-	closed := false
-	oldBridge := &workerSubscriptionBridge{close: func() { closed = true }}
+	closed := newStubWorkerEvents(1)
+	oldBridge := &workerSubscriptionBridge{events: closed}
 	model.route = routeState{
 		kind: routeChild, generation: 11, childKind: childTeamWorker,
 		childSummary: first, childSessionID: first.childSessionID,
@@ -287,17 +316,17 @@ func TestTeamWorkerRouteRapidSwitchClosesOldBridgeAndRejectsLateLoad(t *testing.
 
 	command := model.activateRoute(routeOpenRequest{kind: routeChild, child: second})
 	require.NotNil(t, command)
-	assert.True(t, closed)
+	assert.True(t, closed.closed)
 	assert.Equal(t, second.worker.Target, model.route.childSummary.worker.Target)
 	assert.Equal(t, "worker-session-2", model.route.childSessionID)
 
-	lateClosed := false
-	lateBridge := &workerSubscriptionBridge{close: func() { lateClosed = true }}
+	lateClosed := newStubWorkerEvents(1)
+	lateBridge := &workerSubscriptionBridge{events: lateClosed}
 	model.Update(teamWorkerRouteDataMsg{
 		generation: 11, target: first.worker.Target,
 		state: teamWorkerState(), hasState: true, bridge: lateBridge,
 	})
-	assert.True(t, lateClosed)
+	assert.True(t, lateClosed.closed)
 	assert.Equal(t, second.worker.Target, model.route.childSummary.worker.Target)
 	assert.Nil(t, model.route.childState)
 }
@@ -411,18 +440,18 @@ func TestTeamWorkerRouteClosesBridgeOnBackAndParentCatchUp(t *testing.T) {
 
 	model := readyModel(t, true)
 	child := onlyTeamWorkerChild(t, teamWorkerTestView())
-	closed := false
+	closed := newStubWorkerEvents(1)
 	model.route = routeState{
 		kind: routeChild, generation: 1, childKind: childTeamWorker,
 		childSummary: child, childSessionID: child.childSessionID,
 		children:     []childSummary{child},
-		workerBridge: &workerSubscriptionBridge{close: func() { closed = true }},
+		workerBridge: &workerSubscriptionBridge{events: closed},
 	}
 	model.state.Transcript = []ai.Message{ai.UserText("parent output while Worker is open")}
 	assert.Nil(t, model.commitStableTimeline())
 
 	_, command := model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	assert.True(t, closed)
+	assert.True(t, closed.closed)
 	assert.Equal(t, routeNone, model.route.kind)
 	printed := driveModelCommandsCapture(t, model, command)
 	assert.Contains(t, printed, "parent output while Worker is open")

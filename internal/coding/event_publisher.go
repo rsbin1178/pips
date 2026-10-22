@@ -146,11 +146,11 @@ func (p *eventPublisher) observe() (EventObservation, error) {
 	defer p.mu.Unlock()
 
 	p.runtime.mu.Lock()
-	state := p.runtime.state.Clone()
+	state := p.runtime.state.CloneReadOnly()
 	p.runtime.mu.Unlock()
 	children := make(map[string]State, len(p.runtime.children))
 	for childSessionID, child := range p.runtime.children {
-		children[childSessionID] = child.state.Clone()
+		children[childSessionID] = child.state.CloneReadOnly()
 	}
 
 	cursor := p.hub.currentCursor()

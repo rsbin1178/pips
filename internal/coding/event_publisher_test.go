@@ -252,12 +252,12 @@ func TestEventPublisherRejectedParentEventDoesNotConsumeSequence(t *testing.T) {
 
 	records := make([]EventRecord, 0, 3)
 	for range 3 {
-		select {
-		case record := <-observation.Subscription.Events():
-			records = append(records, record)
-		case <-time.After(time.Second):
+		record, ok := awaitRecord(t, observation.Subscription)
+		if !ok {
 			t.Fatal("timed out waiting for published event")
 		}
+
+		records = append(records, record)
 	}
 	require.Len(t, records, 3)
 	assert.Equal(t, before+1, records[2].Event.Sequence)

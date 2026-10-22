@@ -103,7 +103,7 @@ type timelineBlock struct {
 	status           string
 	position         int
 	rendered         bool
-	tools            []toolActivity
+	tools            []*toolActivity
 	workspaceChanges *coding.WorkspaceChanged
 	// subagent carries the lifecycle row for one spawn. It is set only on
 	// blockSubagent; the carried tools entry is what keeps the spawn's committed
@@ -150,10 +150,18 @@ type timelineRenderOptions struct {
 type completionMarker struct {
 	interactionID string
 	afterMessages int
+	// afterRunID names the run the interaction ended in. A run commits one
+	// assistant message per turn, so the last message it produced is the answer
+	// the marker follows. It is recorded from the event stream, which is what
+	// makes the anchor correct when the Runtime snapshot is already ahead or
+	// when two answers carry identical text.
+	afterRunID string
 	// afterDigest names the message the marker followed. A tool result can be
 	// inserted ahead of the last assistant message after the interaction ends,
-	// so a count alone would drift above the answer. The digest keeps the row
-	// anchored to that message across the insertion.
+	// and the durable path can replace the transcript without candidate
+	// identities, so this is the fallback anchor. It is resolved to the nearest
+	// occurrence from the last known position, because a digest alone cannot
+	// tell two identical messages apart.
 	afterDigest    uint64
 	outcome        coding.InteractionOutcome
 	stop           agent.StopReason
@@ -188,7 +196,7 @@ type committedProjection struct {
 // projectTimelineActivities composes the pure projection: the committed prefix
 // followed by the volatile tail. The incremental frame path reuses the prefix and
 // rebuilds only the tail, and must produce exactly this list.
-func projectTimelineActivities(state coding.State, activities []toolActivity) []timelineBlock {
+func projectTimelineActivities(state coding.State, activities []*toolActivity) []timelineBlock {
 	committed := projectCommittedBlocks(state, activities)
 
 	return appendTimelineTail(
@@ -268,7 +276,7 @@ func appendCommittedMessageBlocks(
 // between them.
 //
 //nolint:gocyclo,cyclop // The already projected Tools merge with messages in durable order.
-func projectCommittedBlocks(state coding.State, activities []toolActivity) committedProjection {
+func projectCommittedBlocks(state coding.State, activities []*toolActivity) committedProjection {
 	blocks := make([]timelineBlock, 0, len(state.Transcript)+len(state.Tools)+4)
 	divider, boundary, hasDivider := projectCompactionDivider(state)
 	dividerInserted := false
@@ -370,7 +378,7 @@ func projectCommittedRange(
 	covered int,
 	synthetic map[int]struct{},
 	candidates []coding.CandidateIdentity,
-	activities []toolActivity,
+	activities []*toolActivity,
 ) ([]timelineBlock, int) {
 	blocks := make([]timelineBlock, 0, len(state.Transcript)-covered+len(activities))
 	cutoff := 0
@@ -411,7 +419,7 @@ func projectCommittedRange(
 // activity goes through here on a full projection.
 func appendCommittedActivityBlock(
 	state coding.State,
-	activity toolActivity,
+	activity *toolActivity,
 	blocks []timelineBlock,
 ) ([]timelineBlock, int) {
 	block, handled, visible := projectProtocolToolActivity(activity)
@@ -497,7 +505,7 @@ func appendQuestionBatchBlock(blocks []timelineBlock, block timelineBlock) []tim
 	return blocks
 }
 
-func appendQuestionFirst(tools []toolActivity) []toolActivity {
+func appendQuestionFirst(tools []*toolActivity) []*toolActivity {
 	for index, activity := range tools {
 		if activity.name == question.ToolName || activity.name == question.TextToolName {
 			if index == 0 {
@@ -573,7 +581,7 @@ func sameBatchFailure(left, right timelineBlock) bool {
 // projectVolatileBlocks projects everything that can change while the transcript
 // stays put: tool activity still running, the live draft, and the session-level
 // notices that trail the timeline.
-func projectVolatileBlocks(state coding.State, tail []toolActivity) []timelineBlock {
+func projectVolatileBlocks(state coding.State, tail []*toolActivity) []timelineBlock {
 	blocks := make([]timelineBlock, 0, len(tail)+len(state.Diagnostics)+4)
 	for _, activity := range tail {
 		if block, handled, visible := projectProtocolToolActivity(activity); handled {
@@ -879,7 +887,7 @@ var diagnosticTitles = map[string]string{
 	"hooks\x00pending_trust":                  "Hooks are waiting for workspace trust",
 }
 
-func projectProtocolToolActivity(activity toolActivity) (timelineBlock, bool, bool) {
+func projectProtocolToolActivity(activity *toolActivity) (timelineBlock, bool, bool) {
 	switch activity.name {
 	case planmode.EnterToolName, planmode.ExitToolName:
 		block, visible := projectPlanModeToolActivity(activity)
@@ -896,7 +904,7 @@ func projectProtocolToolActivity(activity toolActivity) (timelineBlock, bool, bo
 
 // projectPlanModeToolActivity hides the model-facing plan tool result behind
 // one semantic decision block. The enter call keeps its tool activity row.
-func projectPlanModeToolActivity(activity toolActivity) (timelineBlock, bool) {
+func projectPlanModeToolActivity(activity *toolActivity) (timelineBlock, bool) {
 	if activity.name != planmode.ExitToolName || activity.state == toolStateRunning ||
 		activity.state == toolStateInterrupted {
 		return projectToolActivity(activity), true
@@ -926,12 +934,12 @@ func planModeDecisionTitle(result string) (string, bool) {
 }
 
 func projectSubagentToolActivity(
-	activity toolActivity,
+	activity *toolActivity,
 	live []coding.SubagentState,
 ) timelineBlock {
 	value, found := matchingSubagent(activity, live)
 	if !found {
-		value, found = projectDurableSubagent(activity)
+		value, found = projectDurableSubagent(*activity)
 	}
 	if !found {
 		return projectPendingSubagentLifecycle(activity)
@@ -944,7 +952,7 @@ func projectSubagentToolActivity(
 // reached the parent projection yet, such as a child still queued behind the
 // concurrency limit. The row is built from the call itself so a spawn always
 // reads as a lifecycle line rather than as a generic Tool card.
-func projectPendingSubagentLifecycle(activity toolActivity) timelineBlock {
+func projectPendingSubagentLifecycle(activity *toolActivity) timelineBlock {
 	arguments := decodeToolArguments(activity.arguments)
 	row := subagentLifecycleRow{
 		callID:      activity.id,
@@ -955,7 +963,7 @@ func projectPendingSubagentLifecycle(activity toolActivity) timelineBlock {
 
 	return timelineBlock{
 		kind: blockSubagent, id: activity.id, position: activity.position,
-		tools: []toolActivity{activity}, subagent: &row,
+		tools: []*toolActivity{activity}, subagent: &row,
 	}
 }
 
@@ -981,10 +989,10 @@ func subagentStateFromToolState(state toolActivityState) subagent.State {
 // Tool identities, click-through to the child session, and the Tool detail path
 // keep working; only the rendering differs.
 func projectSubagentLifecycle(
-	activity toolActivity,
+	activity *toolActivity,
 	value coding.SubagentState,
 ) timelineBlock {
-	enriched := enrichSubagentToolActivity(activity, value)
+	enriched := enrichSubagentToolActivity(*activity, value)
 	row := subagentLifecycleRow{
 		childSessionID: value.ChildSessionID,
 		callID:         activity.id,
@@ -1001,12 +1009,12 @@ func projectSubagentLifecycle(
 
 	return timelineBlock{
 		kind: blockSubagent, id: activity.id, position: activity.position,
-		tools: []toolActivity{enriched}, subagent: &row,
+		tools: []*toolActivity{&enriched}, subagent: &row,
 	}
 }
 
 func matchingSubagent(
-	activity toolActivity,
+	activity *toolActivity,
 	values []coding.SubagentState,
 ) (coding.SubagentState, bool) {
 	for _, value := range values {
@@ -1046,14 +1054,14 @@ func isSubagentToolName(name string) bool {
 	return name == subagent.ToolName
 }
 
-func projectToolActivity(activity toolActivity) timelineBlock {
+func projectToolActivity(activity *toolActivity) timelineBlock {
 	return timelineBlock{
 		kind: blockTool, id: activity.id, position: activity.position,
-		tools: []toolActivity{activity},
+		tools: []*toolActivity{activity},
 	}
 }
 
-func projectQuestionToolActivity(activity toolActivity) (timelineBlock, bool) {
+func projectQuestionToolActivity(activity *toolActivity) (timelineBlock, bool) {
 	if activity.name != question.ToolName && activity.name != question.TextToolName {
 		return timelineBlock{}, false
 	}
@@ -1069,7 +1077,7 @@ func projectQuestionToolActivity(activity toolActivity) (timelineBlock, bool) {
 
 	block := timelineBlock{
 		kind: blockQuestion, id: activity.id, position: activity.position,
-		tools: []toolActivity{activity},
+		tools: []*toolActivity{activity},
 	}
 	if (activity.state == toolStateFailed || activity.state == toolStateInterrupted) &&
 		activity.result == question.RejectionToolResult {
@@ -1090,10 +1098,10 @@ func projectQuestionToolActivity(activity toolActivity) (timelineBlock, bool) {
 		return block, true
 	}
 
-	return projectAnsweredQuestionActivity(block, activity), true
+	return projectAnsweredQuestionActivity(block, *activity), true
 }
 
-func freeformQuestionPrompt(activity toolActivity) string {
+func freeformQuestionPrompt(activity *toolActivity) string {
 	var arguments struct {
 		Question string `json:"question"`
 	}
@@ -1119,7 +1127,7 @@ func projectAnsweredQuestionActivity(
 	if resultOK && result.Chat != "" {
 		if isFreeformQuestionActivity(activity) {
 			block.title = questionAnsweredSingleTitle
-			if prompt := freeformQuestionPrompt(activity); prompt != "" {
+			if prompt := freeformQuestionPrompt(&activity); prompt != "" {
 				block.body = prompt + " → " + oneLineToolText(result.Chat)
 			} else {
 				block.body = result.Chat
@@ -1438,7 +1446,7 @@ func quotedSubagentDescription(description string, maximum int) string {
 // subagentLifecycleDescription is the spawn's short label: the call's own
 // `description` argument when the transcript still has it, otherwise the task
 // preview the parent projection carries.
-func subagentLifecycleDescription(activity toolActivity, value coding.SubagentState) string {
+func subagentLifecycleDescription(activity *toolActivity, value coding.SubagentState) string {
 	if description := oneLineSubagentTask(
 		toolArgumentString(decodeToolArguments(activity.arguments), "description"),
 	); description != "" {
@@ -2221,7 +2229,9 @@ func markdownBlockBodyRows(block timelineBlock, markdown *markdownRenderer, widt
 		return rowSegments{}, false
 	}
 
-	rows, err := markdown.renderLiveRows(kindName(block.kind), block.body, max(1, width), inset, theme, noColor)
+	rows, err := markdown.renderLiveRows(
+		kindName(block.kind), block.body, max(1, width), inset, theme, noColor, true,
+	)
 	if err != nil {
 		return rowSegments{}, false
 	}
@@ -2320,8 +2330,14 @@ func liveEntryRows(
 	return rows, true
 }
 
-// rowSegmentsBlank reports whether every row of both segments is blank.
+// rowSegmentsBlank reports whether every row of both segments is blank. A
+// windowed segment has omitted rows that may carry content, so it is never
+// treated as blank.
 func rowSegmentsBlank(rows rowSegments) bool {
+	if rows.base > 0 {
+		return false
+	}
+
 	for _, row := range rows.frozen {
 		if strings.TrimSpace(row) != "" {
 			return false

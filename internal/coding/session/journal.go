@@ -313,16 +313,112 @@ func decodeJournalLine(line []byte, complete bool) (JournalRecord, bool, error) 
 }
 
 // journalTailSequence returns the last valid sequence in an existing journal.
+//
+// OpenJournal only needs that one value to continue the append sequence. Reading
+// every record here made opening a long session allocate a slice containing the
+// whole journal, including every payload, even though only the tail was read.
+// The scan below reads the last complete line instead, so startup memory is
+// bounded by that line rather than by the journal size.
+//
+// A trailing line without a newline belongs to an interrupted append. It is
+// ignored here and truncated by repairJournalTail before the next write.
+// ReadJournal remains the validating reader for callers that inspect the whole
+// history; this path validates the record the append sequence continues from.
 func journalTailSequence(path string) (uint64, error) {
-	records, err := ReadJournal(path, 0)
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("coding session: open event journal: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	info, err := file.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("coding session: inspect event journal: %w", err)
+	}
+
+	line, ok, err := lastCompleteJournalLine(file, info.Size())
 	if err != nil {
 		return 0, err
 	}
-	if len(records) == 0 {
+	if !ok {
 		return 0, nil
 	}
 
-	return records[len(records)-1].Seq, nil
+	record, decoded, err := decodeJournalLine(append(line, '\n'), true)
+	if err != nil {
+		return 0, err
+	}
+	if !decoded {
+		return 0, nil
+	}
+
+	return record.Seq, nil
+}
+
+// lastCompleteJournalLine returns the last non-empty newline-terminated line.
+// Bytes after the final newline are a torn append and are skipped. Blank lines
+// carry no record and are skipped as well.
+func lastCompleteJournalLine(file *os.File, size int64) ([]byte, bool, error) {
+	if size <= 0 {
+		return nil, false, nil
+	}
+
+	end, err := previousJournalNewline(file, size)
+	if err != nil {
+		return nil, false, err
+	}
+
+	for end >= 0 {
+		start, err := previousJournalNewline(file, end)
+		if err != nil {
+			return nil, false, err
+		}
+
+		length := end - start - 1
+		if length > 0 {
+			if length > maxJournalLineBytes {
+				return nil, false, fmt.Errorf(
+					"%w: journal line exceeds %d bytes", ErrJournalCorrupt, maxJournalLineBytes,
+				)
+			}
+
+			line := make([]byte, int(length))
+			if _, err := file.ReadAt(line, start+1); err != nil {
+				return nil, false, fmt.Errorf("coding session: read event journal tail: %w", err)
+			}
+
+			return line, true, nil
+		}
+
+		end = start
+	}
+
+	return nil, false, nil
+}
+
+// previousJournalNewline returns the position of the last newline before
+// `before`, or -1 when the scanned prefix contains none.
+func previousJournalNewline(file *os.File, before int64) (int64, error) {
+	const window = 64 << 10
+
+	for end := before; end > 0; {
+		start := max(int64(0), end-window)
+		buffer := make([]byte, end-start)
+		if _, err := file.ReadAt(buffer, start); err != nil {
+			return -1, fmt.Errorf("coding session: read event journal tail: %w", err)
+		}
+
+		if index := bytes.LastIndexByte(buffer, '\n'); index >= 0 {
+			return start + int64(index), nil
+		}
+
+		end = start
+	}
+
+	return -1, nil
 }
 
 func dirOf(path string) string {

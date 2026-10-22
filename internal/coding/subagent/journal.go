@@ -626,7 +626,7 @@ func reconcileDescendants(
 	if err != nil {
 		return err
 	}
-	parentRecords, err := recordsByChild(parent.Session().Entries())
+	parentRecords, err := recordsByChild(parent.Session().EntriesView())
 	if err != nil {
 		return err
 	}
@@ -749,7 +749,7 @@ func reconcileChild(
 }
 
 func authoritativeChildRecords(child *session.Handle) ([]record, error) {
-	entries := child.Session().Entries()
+	entries := child.Session().EntriesView()
 
 	allRecords, err := records(entries)
 	if err != nil {

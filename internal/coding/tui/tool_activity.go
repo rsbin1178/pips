@@ -105,11 +105,18 @@ type toolActivityRecord struct {
 	update         []ai.Part
 	result         ai.ToolResultPart
 	hasResult      bool
-	// described reports that the per-tool description cache holds this record's
-	// current activity. Describing a record materialises its visible result text,
-	// so the append path only pays for the records a scan or the live overlay
-	// touched again; see [describeToolActivities].
+	// activity is this record's described card, owned once and shared by every
+	// timeline block and cache that names the call. described marks it current;
+	// describing a record materialises its visible result text, so the append path
+	// only pays for the records a scan or the live overlay touched again.
+	activity  *toolActivity
 	described bool
+}
+
+// invalidate drops the description that no longer matches the record.
+func (r *toolActivityRecord) invalidate() {
+	r.described = false
+	r.activity = nil
 }
 
 type durableSubagentArgs struct {
@@ -136,7 +143,7 @@ type durableSubagentResult struct {
 func projectToolActivities(
 	state coding.State,
 	excluded map[string]struct{},
-) []toolActivity {
+) []*toolActivity {
 	return projectToolActivitiesCached(state, excluded, nil)
 }
 
@@ -200,7 +207,7 @@ func (s *toolScanState) scanTranscript(messages ai.Messages, excluded map[string
 				if record.position == 0 {
 					record.position = position
 				}
-				record.described = false
+				record.invalidate()
 			case ai.ToolResultPart:
 				record := s.recordFor(value.ToolCallID, excluded)
 				if record == nil {
@@ -216,7 +223,7 @@ func (s *toolScanState) scanTranscript(messages ai.Messages, excluded map[string
 				record.hasResult = true
 				record.position = position
 				record.resultPosition = position
-				record.described = false
+				record.invalidate()
 			}
 		}
 	}
@@ -247,7 +254,7 @@ func (s *toolScanState) overlayLive(
 		if record.described &&
 			(record.call.Name != live.Call.Name ||
 				!bytes.Equal(record.call.Arguments, live.Call.Arguments)) {
-			record.described = false
+			record.invalidate()
 		}
 
 		record.call = live.Call
@@ -261,12 +268,12 @@ func (s *toolScanState) overlayLive(
 			record.hasResult = true
 			if record.resultPosition == 0 {
 				record.position = transcriptLen + 1
-				record.described = false
+				record.invalidate()
 			}
 		}
 		if record.position == 0 {
 			record.position = transcriptLen + 1
-			record.described = false
+			record.invalidate()
 		}
 	}
 }
@@ -274,8 +281,8 @@ func (s *toolScanState) overlayLive(
 // describeToolActivities turns the scan state into the ordered activity list the
 // timeline projection consumes. A record keeps its description until a scan or the
 // live overlay touches it again, so an append only re-describes what it changed.
-func describeToolActivities(scan *toolScanState, cache *toolProjectionCache) []toolActivity {
-	activities := make([]toolActivity, 0, len(scan.ordered))
+func describeToolActivities(scan *toolScanState, cache *toolProjectionCache) []*toolActivity {
+	activities := make([]*toolActivity, 0, len(scan.ordered))
 	for _, record := range scan.ordered {
 		// A transcript ToolCall without a result is not yet stable and may be
 		// followed immediately by ToolStarted. Wait for live state so the call
@@ -287,23 +294,22 @@ func describeToolActivities(scan *toolScanState, cache *toolProjectionCache) []t
 			continue
 		}
 
-		if record.described {
-			if cached, ok := cache.cached(record.call.ID); ok {
-				activities = append(activities, cached)
+		if record.activity != nil {
+			activities = append(activities, record.activity)
 
-				continue
-			}
+			continue
 		}
 
-		activities = append(activities, cache.describe(*record))
+		record.activity = cache.describe(*record)
 		record.described = true
+		activities = append(activities, record.activity)
 	}
 
 	// The TUI suppresses todo_write calls from the scrollback and lets the
 	// dedicated todo surface carry the state. The transient spinner still comes
 	// from runningToolActivities, a completed call leaves no card, and a failure
 	// stays visible as an error card.
-	activities = slices.DeleteFunc(activities, func(activity toolActivity) bool {
+	activities = slices.DeleteFunc(activities, func(activity *toolActivity) bool {
 		return activity.class == toolClassTaskList &&
 			activity.state != toolStateFailed &&
 			activity.state != toolStateInterrupted
@@ -324,7 +330,7 @@ func projectToolActivitiesCached(
 	state coding.State,
 	excluded map[string]struct{},
 	cache *toolProjectionCache,
-) []toolActivity {
+) []*toolActivity {
 	var scan toolScanState
 
 	scan.reset(len(state.Tools))
@@ -1101,7 +1107,7 @@ func renderExpandedToolActivityBlock(
 
 func expandedToolActivityRows(
 	class toolActivityClass,
-	activities []toolActivity,
+	activities []*toolActivity,
 	width int,
 ) []expandedToolRow {
 	rows := make([]expandedToolRow, 0, len(activities)*2)
@@ -1121,12 +1127,12 @@ func expandedToolActivityRows(
 
 			rows = append(rows, expandedToolRow{
 				prefix: branch,
-				text:   expandedToolCallLabel(activity),
+				text:   expandedToolCallLabel(*activity),
 				state:  activity.state,
 			})
 			appendExpandedToolOutput(
 				&rows,
-				activity,
+				*activity,
 				outputBranch,
 				outputContinuation,
 				width,
@@ -1135,14 +1141,14 @@ func expandedToolActivityRows(
 	case toolClassGeneric:
 		activity := activities[0]
 		rows = append(rows, expandedToolRow{
-			prefix: "  └ ", text: expandedToolCallLabel(activity), state: activity.state,
+			prefix: "  └ ", text: expandedToolCallLabel(*activity), state: activity.state,
 		})
-		appendExpandedToolOutput(&rows, activity, "      └ ", "        ", width)
+		appendExpandedToolOutput(&rows, *activity, "      └ ", "        ", width)
 	case toolClassPlan, toolClassSubagent, toolClassTaskList:
 		activity := activities[0]
-		appendExpandedToolOutput(&rows, activity, "  └ ", "    ", width)
+		appendExpandedToolOutput(&rows, *activity, "  └ ", "    ", width)
 	case toolClassShell, toolClassPatch:
-		appendExpandedToolOutput(&rows, activities[0], "  └ ", "    ", width)
+		appendExpandedToolOutput(&rows, *activities[0], "  └ ", "    ", width)
 	}
 
 	return rows
@@ -1323,7 +1329,7 @@ func renderToolActivityBlockWithLimit(
 func toolActivityRowColor(
 	class toolActivityClass,
 	index int,
-	activities []toolActivity,
+	activities []*toolActivity,
 	exploreLimit int,
 	palette colorPalette,
 ) color.Color {
@@ -1338,7 +1344,7 @@ func toolActivityRowColor(
 	return toolStateColor(activities[index].state, palette)
 }
 
-func patchRowColor(index int, activities []toolActivity, palette colorPalette) color.Color {
+func patchRowColor(index int, activities []*toolActivity, palette colorPalette) color.Color {
 	if len(activities) == 0 || index >= len(activities[0].preview) {
 		return palette.muted
 	}
@@ -1371,7 +1377,7 @@ func toolStateColor(state toolActivityState, palette colorPalette) color.Color {
 	}
 }
 
-func combinedToolState(activities []toolActivity) toolActivityState {
+func combinedToolState(activities []*toolActivity) toolActivityState {
 	state := toolStateSucceeded
 	for _, activity := range activities {
 		switch activity.state {
@@ -1394,7 +1400,7 @@ func combinedToolState(activities []toolActivity) toolActivityState {
 func toolActivityHeading(
 	class toolActivityClass,
 	state toolActivityState,
-	activities []toolActivity,
+	activities []*toolActivity,
 ) (string, string, string) {
 	glyph := toolActivityGlyph(state)
 	activity := activities[0]
@@ -1439,7 +1445,7 @@ func toolActivityHeading(
 			return glyph, "Updating workspace", ""
 		}
 		if state == toolStateSucceeded {
-			if verb, subject, ok := singlePatchChange(activity); ok {
+			if verb, subject, ok := singlePatchChange(*activity); ok {
 				return glyph, verb, subject
 			}
 		}
@@ -1467,7 +1473,7 @@ func toolActivityHeading(
 			case toolStateRunning:
 				label = strings.Replace(label, "Loaded", "Loading", 1)
 			case toolStateFailed, toolStateInterrupted:
-				label += " · " + toolActivityReason(activity)
+				label += " · " + toolActivityReason(*activity)
 			case toolStateSucceeded:
 			}
 
@@ -1491,7 +1497,7 @@ func toolActivityHeading(
 		return glyph, verb, ""
 	case toolClassPlan:
 		if state == toolStateFailed || state == toolStateInterrupted {
-			return glyph, activity.action + " · " + toolActivityReason(activity), activity.subject
+			return glyph, activity.action + " · " + toolActivityReason(*activity), activity.subject
 		}
 
 		return glyph, activity.action, activity.subject
@@ -1559,7 +1565,7 @@ func renderToolHeading(
 // prefix and kept the first render's colour escapes inside the text.
 func toolActivityRows(
 	class toolActivityClass,
-	activities []toolActivity,
+	activities []*toolActivity,
 	exploreLimit int,
 ) []string {
 	if class == toolClassExplore {
@@ -1586,7 +1592,7 @@ func toolActivityRows(
 	}
 }
 
-func exploreToolRows(activities []toolActivity, exploreLimit int) []string {
+func exploreToolRows(activities []*toolActivity, exploreLimit int) []string {
 	visible := len(activities)
 	if exploreLimit > 0 {
 		visible = min(visible, exploreLimit)
@@ -1595,7 +1601,7 @@ func exploreToolRows(activities []toolActivity, exploreLimit int) []string {
 	for _, activity := range activities[:visible] {
 		row := strings.TrimSpace(activity.action + " " + activity.subject)
 		if activity.state == toolStateFailed || activity.state == toolStateInterrupted {
-			row += " · " + toolActivityReason(activity)
+			row += " · " + toolActivityReason(*activity)
 		}
 		rows = append(rows, row)
 	}

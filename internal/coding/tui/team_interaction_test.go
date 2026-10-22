@@ -33,16 +33,16 @@ func TestTeamInteractionQueueOrdersSourcesAndDispatchesExactQuestion(t *testing.
 		now,
 	)
 	model := readyModelWithController(t, controller, true)
-	closed := false
+	closed := newStubWorkerEvents(1)
 	model.route = routeState{
 		kind: routeChild, childKind: childTeamWorker,
-		workerBridge: &workerSubscriptionBridge{close: func() { closed = true }},
+		workerBridge: &workerSubscriptionBridge{events: closed},
 	}
 	model.storeTeamProjectionView(view)
 
 	driveModelCommands(t, model, model.reconcileTeamInteractionView(view))
 
-	assert.True(t, closed)
+	assert.True(t, closed.closed)
 	assert.Equal(t, routeNone, model.route.kind)
 	require.Len(t, model.teamInteractions.entries, 2)
 	assert.Equal(t, teamInteractionQuestion, model.teamInteractions.entries[0].key.kind)

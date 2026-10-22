@@ -21,18 +21,23 @@ var (
 // Reader provides copied image bytes from the host clipboard.
 type Reader struct {
 	initialize func() error
-	read       func() []byte
+	read       func(context.Context) ([]byte, error)
 }
 
 // New returns the production desktop clipboard reader. Initialization remains
 // lazy until the first ReadImage call.
 func New() *Reader {
-	return newReader(desktop.Init, func() []byte {
-		return desktop.Read(desktop.FmtImage)
+	return newReader(desktop.Init, func(ctx context.Context) ([]byte, error) {
+		data, err := desktop.Read(ctx, desktop.FmtImage)
+		if errors.Is(err, desktop.ErrNoData) {
+			return nil, nil
+		}
+
+		return data, err
 	})
 }
 
-func newReader(initialize func() error, read func() []byte) *Reader {
+func newReader(initialize func() error, read func(context.Context) ([]byte, error)) *Reader {
 	return &Reader{initialize: initialize, read: read}
 }
 
@@ -62,7 +67,14 @@ func (r *Reader) ReadImage(ctx context.Context) (data []byte, returnErr error) {
 		return nil, err
 	}
 
-	data = r.read()
+	data, readErr := r.read(ctx)
+	if readErr != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		return nil, fmt.Errorf("%w: read: %w", ErrUnavailable, readErr)
+	}
 
 	if err := ctx.Err(); err != nil {
 		return nil, err

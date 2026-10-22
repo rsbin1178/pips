@@ -112,15 +112,6 @@ func (m *Model) commitNewSessionOutput() tea.Cmd {
 }
 
 func (m *Model) commitBannerOutput(banner string) tea.Cmd {
-	parts := make([]string, 0, 2)
-	if banner != "" {
-		parts = append(parts, banner)
-	}
-
-	if stable := m.takeStableTimeline(); stable != "" {
-		parts = append(parts, stable)
-	}
-
 	// Fullscreen has no native history, so the banner becomes the first managed
 	// record instead of a terminal write. The managed renderer insets a transcript
 	// entry for it; inline mode prints the text itself, so it insets it here.
@@ -131,17 +122,14 @@ func (m *Model) commitBannerOutput(banner string) tea.Cmd {
 		return nil
 	}
 
+	blocks := m.takeStableTimelineBlocks()
 	m.rerenderTranscript(false)
 
-	if len(parts) == 0 {
-		return nil
-	}
-
 	if banner != "" {
-		parts[0] = insetRows(banner, timelineInset(m.width))
+		banner = insetRows(banner, timelineInset(m.width))
 	}
 
-	return m.printScrollback(strings.Join(parts, "\n\n"))
+	return m.printScrollbackBlocks(blocks, banner)
 }
 
 func (m *Model) takeStartupBanner() string {

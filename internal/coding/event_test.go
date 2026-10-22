@@ -566,7 +566,8 @@ func eventCases() []eventCase {
 						Current: true, OnActivePath: true,
 					}},
 				},
-				Transcript: []ai.Message{ai.UserText("continue")},
+				Transcript:     []ai.Message{ai.UserText("continue")},
+				TranscriptBase: 42,
 			},
 		)},
 		{name: "session navigated", event: newSessionEvent(

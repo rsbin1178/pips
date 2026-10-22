@@ -1730,7 +1730,7 @@ func (m *Model) activateSubagentRoute(request routeOpenRequest) tea.Cmd {
 	// just asked to see a running child is looking.
 	m.childScroll.gotoBottom()
 	if child, ok := m.childStates[request.childSessionID]; ok {
-		state := child.Clone()
+		state := child.CloneReadOnly()
 		m.route.childState = &state
 	}
 	m.composer.Blur()

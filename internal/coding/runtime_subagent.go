@@ -15,6 +15,16 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
 
+const (
+	// maxRetainedFinishedChildProjections bounds the recently finished child
+	// states kept for immediate inspection. A finished child's durable Session is
+	// authoritative; this cache only preserves the live Runs and Changes
+	// projections that the disk fallback cannot reconstruct. Older finished
+	// children are dropped and reopened through InspectSubagentState.
+	maxRetainedFinishedChildProjections = 8
+)
+
+// childProjection is one live child Session projection.
 type childProjection struct {
 	state         State
 	writer        *eventWriter
@@ -218,8 +228,12 @@ func (r *Runtime) openChildProjection(
 	publisher := r.publisher
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
-	if _, exists := r.children[event.ChildSessionID]; exists {
-		return fmt.Errorf("%w: child projection already exists", ErrEventProtocol)
+	if existing, exists := r.children[event.ChildSessionID]; exists {
+		if !existing.finished {
+			return fmt.Errorf("%w: child projection already exists", ErrEventProtocol)
+		}
+		delete(r.children, event.ChildSessionID)
+		r.releaseFinishedChildProjection(event.ChildSessionID)
 	}
 
 	writer, err := newEventWriter(event.ChildSessionID, time.Now)
@@ -453,8 +467,37 @@ func (r *Runtime) finishChildProjection(ctx context.Context, event subagent.Even
 		return err
 	}
 	child.finished = true
+	// The child's own Session is closed before this terminal event reaches the
+	// observer, so the durable transcript is complete. Keep only a bounded tail of
+	// finished projections for immediate inspection; the disk fallback serves the
+	// rest.
+	r.retainFinishedChildProjection(event.ChildSessionID)
 
 	return nil
+}
+
+// retainFinishedChildProjection moves one finished child into the bounded
+// inspection cache and releases the oldest entry when the cache is full. The
+// caller holds publisher.mu.
+func (r *Runtime) retainFinishedChildProjection(childSessionID string) {
+	r.finishedChildren = append(r.finishedChildren, childSessionID)
+	for len(r.finishedChildren) > maxRetainedFinishedChildProjections {
+		delete(r.children, r.finishedChildren[0])
+		r.finishedChildren = r.finishedChildren[1:]
+	}
+}
+
+// releaseFinishedChildProjection removes a child from the finished cache. It is
+// used when a Session is opened again under the same identity.
+func (r *Runtime) releaseFinishedChildProjection(childSessionID string) {
+	for index, value := range r.finishedChildren {
+		if value != childSessionID {
+			continue
+		}
+		r.finishedChildren = append(r.finishedChildren[:index], r.finishedChildren[index+1:]...)
+
+		return
+	}
 }
 
 func childEventTime(value time.Time) time.Time {
@@ -519,8 +562,10 @@ func (r *Runtime) InspectSubagent(
 }
 
 // InspectSubagentState returns the ordinary Coding State used to render a
-// child Session. Live children retain their complete event projection;
-// terminal children reopened from disk fall back to their durable transcript.
+// child Session. Live children retain their complete event projection and the
+// returned State shares its immutable payload with that projection, so callers
+// must only read it; terminal children reopened from disk fall back to their
+// durable transcript.
 func (r *Runtime) InspectSubagentState(
 	ctx context.Context,
 	childSessionID string,
@@ -534,7 +579,7 @@ func (r *Runtime) InspectSubagentState(
 
 	r.publisher.mu.Lock()
 	if child, ok := r.children[childSessionID]; ok {
-		state := child.state.Clone()
+		state := child.state.CloneReadOnly()
 		r.publisher.mu.Unlock()
 
 		return state, nil

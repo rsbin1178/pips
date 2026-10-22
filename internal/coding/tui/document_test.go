@@ -40,7 +40,7 @@ func TestConversationMarkdownRendersEveryBlockKind(t *testing.T) {
 	blocks := []timelineBlock{
 		{kind: blockUser, body: "Explain the reducer."},
 		{kind: blockAssistant, body: "It is a state fold."},
-		{kind: blockTool, tools: []toolActivity{{
+		{kind: blockTool, tools: []*toolActivity{{
 			name: "Read", invocation: "Read internal/coding/reducer.go",
 			state: toolStateSucceeded, body: "package coding",
 		}}},
@@ -105,7 +105,7 @@ func TestConversationMarkdownFencesToolOutputSafely(t *testing.T) {
 	body := "```go\nfmt.Println(\"hi\")\n```"
 	document := conversationMarkdown([]timelineBlock{{
 		kind: blockTool,
-		tools: []toolActivity{{
+		tools: []*toolActivity{{
 			name: "Bash", invocation: "Bash go test", state: toolStateSucceeded, body: body,
 		}},
 	}})
@@ -118,7 +118,7 @@ func TestConversationMarkdownLabelsOnlyNotableToolStates(t *testing.T) {
 
 	document := conversationMarkdown([]timelineBlock{{
 		kind: blockTool,
-		tools: []toolActivity{
+		tools: []*toolActivity{
 			{name: "Read", invocation: "Read a.go", state: toolStateSucceeded},
 			{name: "Write", invocation: "Write a.go", state: toolStateFailed},
 			{name: "Bash", invocation: "Bash sleep 1", state: toolStateRunning},
@@ -138,7 +138,7 @@ func TestConversationMarkdownKeepsInvocationsWithBackticksIntact(t *testing.T) {
 
 	document := conversationMarkdown([]timelineBlock{{
 		kind: blockTool,
-		tools: []toolActivity{{
+		tools: []*toolActivity{{
 			name: "Bash", invocation: "Bash echo `date`", state: toolStateSucceeded,
 		}},
 	}})

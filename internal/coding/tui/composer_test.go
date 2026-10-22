@@ -471,7 +471,7 @@ func TestReadyTemporaryInputSurfacesRestoreProtectedSnapshot(t *testing.T) {
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	assert.Equal(t, original, model.composer.Snapshot())
 
-	detail := newToolDetailView(timelineBlock{kind: blockTool, tools: []toolActivity{{
+	detail := newToolDetailView(timelineBlock{kind: blockTool, tools: []*toolActivity{{
 		id: "tool-1", name: "read", class: toolClassExplore,
 	}}})
 	model.openToolDetailRoute(detail)

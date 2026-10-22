@@ -90,7 +90,7 @@ func (m *Manager) walkOwnedDescendants(
 	if err != nil {
 		return err
 	}
-	latest, err := latestByChild(parent.Session().Entries())
+	latest, err := latestByChild(parent.Session().EntriesView())
 	if err != nil {
 		return err
 	}
@@ -230,7 +230,7 @@ func (m *Manager) inspectChild(
 	parent := selected.parent
 	childMeta := child.Metadata()
 
-	childLatest, err := latestByChild(child.Session().Entries())
+	childLatest, err := latestByChild(child.Session().EntriesView())
 	if err != nil {
 		return Detail{}, err
 	}

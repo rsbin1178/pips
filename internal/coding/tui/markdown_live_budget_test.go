@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,18 +24,18 @@ func liveFrameProbeBody() string {
 	return body.String()
 }
 
-// TestLiveFrameStandsForItsOwnCooldown pins the bound on what one un-freezable
-// live tail may cost per frame. A frame whose render is expensive stands for a
-// cooldown proportional to that cost, so a streaming block cannot own the event
-// loop; the renderer pays for the tail again once the cooldown lapses.
-func TestLiveFrameStandsForItsOwnCooldown(t *testing.T) {
+// TestLargeLiveTailIsHandedToTheBackgroundRenderer pins the bound on what one
+// un-freezable live tail may cost per frame: above liveFrameBytes the event loop
+// serves the frame it already has and requests the current version, so a
+// streaming block cannot own the event loop.
+func TestLargeLiveTailIsHandedToTheBackgroundRenderer(t *testing.T) {
 	t.Parallel()
 
 	renderer := newMarkdownRenderer(4)
 	body := liveFrameProbeBody()
 	require.GreaterOrEqual(t, len(body), liveFrameBytes)
 
-	first, err := renderer.renderLiveRows("draft", body, 80, 0, themeDark, false)
+	first, err := renderer.renderLiveRows("draft", body, 80, 0, themeDark, false, true)
 	require.NoError(t, err)
 	require.NotEmpty(t, first.all())
 	frame := renderer.liveFrames["draft"]
@@ -44,43 +45,60 @@ func TestLiveFrameStandsForItsOwnCooldown(t *testing.T) {
 	rendered := renderer.renderedBytes
 
 	// A strictly longer body that extends the frame's own content is served from
-	// the frame while the cooldown holds.
+	// the frame, the version is handed to the background renderer, and the slot is
+	// marked stale so a pause in the stream cannot leave the tail missing.
 	grown := body + "value700 := 700\n"
-	second, err := renderer.renderLiveRows("draft", grown, 80, 0, themeDark, false)
+	second, err := renderer.renderLiveRows("draft", grown, 80, 0, themeDark, false, true)
 	require.NoError(t, err)
-	assert.Equal(t, first.all(), second.all(), "the frame stands for its cooldown")
-	assert.Equal(t, rendered, renderer.renderedBytes, "the second frame paid for no render")
+	assert.Equal(t, first.all(), second.all(), "the frame on screen stands")
+	assert.Equal(t, rendered, renderer.renderedBytes, "the event loop paid for no render")
 
-	// Once the cooldown has lapsed the renderer pays for the tail again, and the
-	// frame it produces is the current content's.
-	renderer.liveFrames["draft"] = liveFrame{
-		content: body, rows: first, width: 80, inset: 0,
-		theme: themeFingerprint(themeDark.fingerprint), cost: frame.cost,
-	}
-	expired := renderer.liveFrames["draft"]
-	expired.rendered = frame.rendered.Add(-frame.cooldown() - 1)
-	renderer.liveFrames["draft"] = expired
+	miss, ok := renderer.takeLiveMiss()
+	require.True(t, ok)
+	assert.Equal(t, grown, miss.content)
+	_, stale := renderer.liveCatchUpDelay()
+	assert.True(t, stale, "a served frame schedules a catch-up")
 
-	third, err := renderer.renderLiveRows("draft", grown, 80, 0, themeDark, false)
+	// The background renderer's result is exact: the next frame pays nothing and
+	// the slot stops being stale.
+	rows, err := miss.render(newMarkdownRenderer(1))
 	require.NoError(t, err)
-	assert.Greater(t, renderer.renderedBytes, rendered, "the lapsed cooldown pays for the tail again")
-	assert.Equal(t, wholeRenderRows(t, grown), third.all(),
-		"and the frame it produces is the current content's, exactly")
+	require.True(t, renderer.installExactRows(miss, rows, time.Millisecond))
 
-	// A body that has stopped growing is exact once its own frame's cooldown lapses,
-	// and stays exact: this is the half that keeps a turn's last rows from staying one
-	// render behind for good.
-	final := grown + "trailing := 1\n"
-	if _, err := renderer.renderLiveRows("draft", final, 80, 0, themeDark, false); err != nil {
+	exact, err := renderer.renderLiveRows("draft", grown, 80, 0, themeDark, false, true)
+	require.NoError(t, err)
+	assert.Equal(t, wholeRenderRows(t, grown), exact.all(), "the installed frame is exact")
+	assert.Equal(t, rendered, renderer.renderedBytes, "an installed version costs no render")
+	_, stale = renderer.liveCatchUpDelay()
+	assert.False(t, stale, "an exact slot schedules nothing")
+}
+
+// TestStaleLiveFrameIsForcedExactByTheCatchUp pins the fallback: when no
+// background result is outstanding the catch-up render pays for the tail, so a
+// body that stopped growing still reaches its exact frame.
+func TestStaleLiveFrameIsForcedExactByTheCatchUp(t *testing.T) {
+	t.Parallel()
+
+	renderer := newMarkdownRenderer(4)
+	body := liveFrameProbeBody()
+	if _, err := renderer.renderLiveRows("draft", body, 80, 0, themeDark, false, true); err != nil {
 		t.Fatal(err)
 	}
-	settled := renderer.liveFrames["draft"]
-	settled.rendered = settled.rendered.Add(-settled.cooldown() - 1)
-	renderer.liveFrames["draft"] = settled
 
-	exact, err := renderer.renderLiveRows("draft", final, 80, 0, themeDark, false)
+	grown := body + "trailing := 1\n"
+	if _, err := renderer.renderLiveRows("draft", grown, 80, 0, themeDark, false, true); err != nil {
+		t.Fatal(err)
+	}
+	_, stale := renderer.liveCatchUpDelay()
+	require.True(t, stale)
+
+	renderer.forceExact = true
+	forced, err := renderer.renderLiveRows("draft", grown, 80, 0, themeDark, false, true)
 	require.NoError(t, err)
-	assert.Equal(t, wholeRenderRows(t, final), exact.all(), "a settled body is exact")
+	assert.Equal(t, wholeRenderRows(t, grown), forced.all(), "the catch-up frame is the current content's")
+	_, stale = renderer.liveCatchUpDelay()
+	assert.False(t, stale)
+	assert.False(t, renderer.forceExact, "the force is consumed by one frame")
 }
 
 // wholeRenderRows is the rows a renderer that holds no frame for the body produces,
@@ -88,16 +106,15 @@ func TestLiveFrameStandsForItsOwnCooldown(t *testing.T) {
 func wholeRenderRows(t *testing.T, body string) []string {
 	t.Helper()
 
-	rows, err := newMarkdownRenderer(1).renderLiveRows("draft", body, 80, 0, themeDark, false)
+	rows, err := newMarkdownRenderer(1).renderLiveRows("draft", body, 80, 0, themeDark, false, true)
 	require.NoError(t, err)
 
 	return rows.all()
 }
 
-// TestLiveFrameRendersWhenItCannotStand pins the invalidation: a frame only
-// stands for a strictly longer document that extends it, at the same geometry,
-// theme and colour mode. Each case must both pay for a render and produce the
-// current content's frame.
+// TestLiveFrameRendersWhenItCannotStand pins the invalidation: a frame only stands
+// for a strictly longer document that extends it, at the same geometry, theme and
+// colour mode. Each case must produce the current content's frame.
 func TestLiveFrameRendersWhenItCannotStand(t *testing.T) {
 	t.Parallel()
 
@@ -107,25 +124,25 @@ func TestLiveFrameRendersWhenItCannotStand(t *testing.T) {
 
 	cases := map[string]func(*markdownRenderer) (rowSegments, error){
 		"a replaced body": func(r *markdownRenderer) (rowSegments, error) {
-			return r.renderLiveRows("draft", replaced, 80, 0, themeDark, false)
+			return r.renderLiveRows("draft", replaced, 80, 0, themeDark, false, true)
 		},
 		"a rewound body": func(r *markdownRenderer) (rowSegments, error) {
-			return r.renderLiveRows("draft", body[:len(body)/2], 80, 0, themeDark, false)
+			return r.renderLiveRows("draft", body[:len(body)/2], 80, 0, themeDark, false, true)
 		},
 		"another width": func(r *markdownRenderer) (rowSegments, error) {
-			return r.renderLiveRows("draft", grown, 100, 0, themeDark, false)
+			return r.renderLiveRows("draft", grown, 100, 0, themeDark, false, true)
 		},
 		"another inset": func(r *markdownRenderer) (rowSegments, error) {
-			return r.renderLiveRows("draft", grown, 80, 2, themeDark, false)
+			return r.renderLiveRows("draft", grown, 80, 2, themeDark, false, true)
 		},
 		"another theme": func(r *markdownRenderer) (rowSegments, error) {
-			return r.renderLiveRows("draft", grown, 80, 0, themeLight, false)
+			return r.renderLiveRows("draft", grown, 80, 0, themeLight, false, true)
 		},
 		"colour mode": func(r *markdownRenderer) (rowSegments, error) {
-			return r.renderLiveRows("draft", grown, 80, 0, themeDark, true)
+			return r.renderLiveRows("draft", grown, 80, 0, themeDark, true, true)
 		},
 		"another slot": func(r *markdownRenderer) (rowSegments, error) {
-			return r.renderLiveRows("other", grown, 80, 0, themeDark, false)
+			return r.renderLiveRows("other", grown, 80, 0, themeDark, false, true)
 		},
 	}
 
@@ -134,7 +151,7 @@ func TestLiveFrameRendersWhenItCannotStand(t *testing.T) {
 			t.Parallel()
 
 			renderer := newMarkdownRenderer(4)
-			_, err := renderer.renderLiveRows("draft", body, 80, 0, themeDark, false)
+			_, err := renderer.renderLiveRows("draft", body, 80, 0, themeDark, false, true)
 			require.NoError(t, err)
 
 			rendered := renderer.renderedBytes
@@ -149,33 +166,6 @@ func TestLiveFrameRendersWhenItCannotStand(t *testing.T) {
 	}
 }
 
-// TestLiveFrameNeedsAStrictExtension pins the two conditions a frame's content
-// must meet: the new body has to be longer, and it has to start with the frame's
-// own body.
-func TestLiveFrameNeedsAStrictExtension(t *testing.T) {
-	t.Parallel()
-
-	renderer := newMarkdownRenderer(4)
-	body := liveFrameProbeBody()
-	_, err := renderer.renderLiveRows("draft", body, 80, 0, themeDark, false)
-	require.NoError(t, err)
-
-	_, unchanged := renderer.reuseLiveFrame("draft", body, 80, 0, themeDark, false)
-	assert.False(t, unchanged, "an unchanged body is not served from the frame")
-
-	_, shorter := renderer.reuseLiveFrame("draft", body[:len(body)/2], 80, 0, themeDark, false)
-	assert.False(t, shorter, "a shorter body is not served from the frame")
-
-	_, unrelated := renderer.reuseLiveFrame("draft", "different\n"+body, 80, 0, themeDark, false)
-	assert.False(t, unrelated, "a body that does not extend the frame's is not served from it")
-
-	_, extended := renderer.reuseLiveFrame("draft", body+"value700 := 700\n", 80, 0, themeDark, false)
-	assert.True(t, extended, "a strictly longer body that extends the frame's is served from it")
-
-	_, unnamed := renderer.reuseLiveFrame("", body+"value700 := 700\n", 80, 0, themeDark, false)
-	assert.False(t, unnamed, "a frame with no slot is never reused")
-}
-
 // TestLiveFrameReuseIsBounded keeps the reuse map from pinning a long session's
 // settled slots.
 func TestLiveFrameReuseIsBounded(t *testing.T) {
@@ -185,7 +175,7 @@ func TestLiveFrameReuseIsBounded(t *testing.T) {
 	body := liveFrameProbeBody()
 
 	for slot := range maxLiveFrames + 3 {
-		_, err := renderer.renderLiveRows(fmt.Sprintf("slot-%d", slot), body, 80, 0, themeDark, false)
+		_, err := renderer.renderLiveRows(fmt.Sprintf("slot-%d", slot), body, 80, 0, themeDark, false, true)
 		require.NoError(t, err)
 	}
 
@@ -198,24 +188,22 @@ func TestLiveFrameReuseIsBounded(t *testing.T) {
 // promises. A frame the renderer stands on is the whole render of the content it
 // was rendered from — never an old prefix spliced onto a new tail — so the reader
 // sees a frame that is one render behind rather than a frame that never existed.
-// The frame is NOT a valid frame for the newer content once the structure changed
-// (here a fence that closes, prose, and a fence that reopens), which is why the
-// settled frame is the one that has to be exact; TestLiveFrameNeedsAStrictExtension
-// and TestSmallLiveBodiesRenderExactlyEveryFrame pin that half.
+// TestStructuralChangeRendersTheCurrentContent pins the other half: a cheap
+// incremental seam produces the current content's frame immediately.
 func TestReusedLiveFrameIsAWholeRenderOfItsOwnContent(t *testing.T) {
 	t.Parallel()
 
 	renderer := newMarkdownRenderer(4)
 	body := liveFrameProbeBody()
-	first, err := renderer.renderLiveRows("draft", body, 80, 0, themeDark, false)
+	first, err := renderer.renderLiveRows("draft", body, 80, 0, themeDark, false, true)
 	require.NoError(t, err)
 
-	grown := body + "```\n\nprose after the fence.\n\n```go\nreopened := 1\n"
-	second, err := renderer.renderLiveRows("draft", grown, 80, 0, themeDark, false)
+	grown := body + "value700 := 700\n"
+	second, err := renderer.renderLiveRows("draft", grown, 80, 0, themeDark, false, true)
 	require.NoError(t, err)
 	require.Equal(t, first.all(), second.all(), "the frame stands")
 
-	fresh, err := newMarkdownRenderer(4).renderLiveRows("draft", body, 80, 0, themeDark, false)
+	fresh, err := newMarkdownRenderer(4).renderLiveRows("draft", body, 80, 0, themeDark, false, true)
 	require.NoError(t, err)
 	assert.Equal(t, fresh.all(), second.all(),
 		"the frame is the old content's whole render, not a spliced mix")
@@ -224,6 +212,69 @@ func TestReusedLiveFrameIsAWholeRenderOfItsOwnContent(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, whole, strings.Join(second.all(), "\n"),
 		"the frame is one render behind the content it was asked for")
+}
+
+// TestStructuralChangeRendersTheCurrentContent pins a small structural change
+// after an already-frozen large prefix. Closing and reopening a short fence is
+// still cheap, so its current rows must appear without waiting for the worker.
+func TestStructuralChangeRendersTheCurrentContent(t *testing.T) {
+	t.Parallel()
+
+	renderer := newMarkdownRenderer(4)
+	body := strings.Repeat("An ordinary settled paragraph.\n\n", 600) + "```go\ninitial := 1\n"
+	require.Greater(t, len(body), liveFrameBytes)
+	if _, err := renderer.renderLiveRows("draft", body, 80, 0, themeDark, false, true); err != nil {
+		t.Fatal(err)
+	}
+	rendered := renderer.renderedBytes
+
+	grown := body + "```\n\nprose after the fence.\n\n```go\nreopened := 1\n"
+	second, err := renderer.renderLiveRows("draft", grown, 80, 0, themeDark, false, true)
+	require.NoError(t, err)
+
+	assert.Equal(t, wholeRenderRows(t, grown), second.all(),
+		"a cheap structural change is rendered immediately")
+	assert.Less(t, renderer.renderedBytes-rendered, liveFrameBytes,
+		"the frozen prefix does not participate in the render")
+	_, missing := renderer.takeLiveMiss()
+	assert.False(t, missing)
+}
+
+// A newly freezable boundary can still require rendering a large region. It
+// belongs on the bounded worker, and its exact result must paint after a pause.
+func TestLargeStructuralChangeDefersUntilExactBackgroundResult(t *testing.T) {
+	t.Parallel()
+
+	renderer := newMarkdownRenderer(4)
+	body := liveFrameProbeBody()
+	first, err := renderer.renderLiveRows("draft", body, 80, 0, themeDark, false, true)
+	require.NoError(t, err)
+	rendered := renderer.renderedBytes
+	grown := body + "```\n\nprose after the fence.\n\n```go\nreopened := 1\n"
+	second, err := renderer.renderLiveRows("draft", grown, 80, 0, themeDark, false, true)
+	require.NoError(t, err)
+	assert.Equal(t, rendered, renderer.renderedBytes, "a large newly frozen region cannot block the event loop")
+	assert.Equal(t, first.all(), second.all())
+	miss, ok := renderer.takeLiveMiss()
+	require.True(t, ok)
+	assert.Equal(t, grown, miss.content)
+
+	worker := newLiveRenderWorker()
+	t.Cleanup(worker.shutdown)
+	worker.submit(liveRenderRequest{epoch: 1, miss: miss})
+	messages := make(chan any, 1)
+	go func() { messages <- worker.wait()() }()
+	require.Eventually(t, func() bool { return len(messages) > 0 }, 30*time.Second, 10*time.Millisecond)
+	ready, ok := (<-messages).(liveRenderReadyMsg)
+	require.True(t, ok)
+	require.NoError(t, ready.result.err)
+	require.True(t, renderer.installExactRows(miss, ready.result.rows, ready.result.cost))
+	final, err := renderer.renderLiveRows("draft", grown, 80, 0, themeDark, false, true)
+	require.NoError(t, err)
+	assert.Equal(t, wholeRenderRows(t, grown), final.all(), "a paused stream reaches the exact whole-render rows")
+	assert.Equal(t, rendered, renderer.renderedBytes, "publishing the exact result requires no synchronous render")
+	_, stale := renderer.liveCatchUpDelay()
+	assert.False(t, stale)
 }
 
 // TestSmallLiveBodiesRenderExactlyEveryFrame pins the other side of the bound: a
@@ -248,4 +299,6 @@ func TestSmallLiveBodiesRenderExactlyEveryFrame(t *testing.T) {
 	assert.Less(t, len(document), liveFrameBytes)
 	assert.False(t, streaming.liveFrames["draft"].reusable(),
 		"a body this small is never served from a previous frame")
+	_, stale := streaming.liveCatchUpDelay()
+	assert.False(t, stale)
 }

@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 	"strings"
@@ -60,14 +61,25 @@ func TestTranscriptModeHandsTheConversationToTheTerminal(t *testing.T) {
 func TestTranscriptPagesAreBounded(t *testing.T) {
 	t.Parallel()
 
-	model := fullscreenModel(t, stubController{state: readyState()}, true)
-	rows := make([]string, transcriptPageRows*2+50)
-	for index := range rows {
-		rows[index] = fmt.Sprintf("ROW-%04d", index)
+	state := readyState()
+	for index := 0; index < transcriptPageRows*2+50; index++ {
+		state.Transcript = append(state.Transcript, ai.UserText(fmt.Sprintf("ROW-%04d", index)))
 	}
-	model.transcriptMode = transcriptModeState{active: true, sequence: 3, rows: rows}
+	model := fullscreenModel(t, stubController{state: state}, true)
+	model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	model.rerenderTranscript(true)
 
-	seen := 0
+	expected := model.transcript.flatten()
+	require.Greater(t, len(expected), transcriptPageRows*2, "the fixture spans several pages")
+
+	document := model.transcript.snapshotDocument()
+	require.Equal(t, len(expected), document.rowCount())
+	for _, record := range document.store.records {
+		assert.False(t, record.loaded, "the snapshot keeps no rendered rows")
+	}
+	model.transcriptMode = transcriptModeState{active: true, sequence: 3, document: document}
+
+	var written []string
 	for {
 		command := model.transcriptPageCmd()
 		if command == nil {
@@ -79,10 +91,9 @@ func TestTranscriptPagesAreBounded(t *testing.T) {
 
 		lines := strings.Split(body, "\n")
 		assert.LessOrEqual(t, len(lines), transcriptPageRows)
-		require.Equal(t, fmt.Sprintf("ROW-%04d", seen), lines[0], "pages are contiguous")
-		seen += len(lines)
+		written = append(written, lines...)
 	}
-	assert.Equal(t, len(rows), seen, "every row is written")
+	assert.Equal(t, expected, written, "every row is written exactly once, in order")
 
 	model.transcriptMode = transcriptModeState{sequence: 4}
 	assert.Nil(t, model.updateTranscriptPage(transcriptPageMsg{sequence: 3}),
@@ -214,6 +225,38 @@ func TestTranscriptExitRowsOnlyForTheFullscreenTranscript(t *testing.T) {
 		assert.True(t, model.transcriptHanded)
 		assert.Nil(t, model.transcriptExitRows())
 	})
+}
+
+// TestTranscriptExitHandoffPagesWithoutWholeSnapshot pins the exit counterpart:
+// the handoff keeps record metadata, renders one page at a time, and writes the
+// same document the whole flatten would.
+func TestTranscriptExitHandoffPagesWithoutWholeSnapshot(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	for index := 0; index < 300; index++ {
+		state.Transcript = append(state.Transcript, ai.UserText(fmt.Sprintf("EXIT-ROW-%04d", index)))
+	}
+
+	model := fullscreenModel(t, stubController{state: state}, true)
+	model.options.ExitOutput = config.ExitOutputTranscript
+	model.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+	model.rerenderTranscript(true)
+
+	expected := strings.Join(model.transcript.flatten(), "\n") + "\n"
+	document := model.transcriptExitDocument()
+	require.NotNil(t, document)
+	for _, record := range document.store.records {
+		assert.False(t, record.loaded, "the handoff starts with no rendered rows")
+	}
+
+	var output bytes.Buffer
+	require.NoError(t, writeExitTranscript(&output, document))
+	assert.Equal(t, expected, output.String())
+
+	for _, record := range document.store.records {
+		assert.False(t, record.loaded, "the handoff releases each page")
+	}
 }
 
 // transcriptScreenProbe enters the escape hatch from Init and reports when the

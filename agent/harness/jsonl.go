@@ -126,56 +126,71 @@ func OpenJSONL(path string) (*JSONLStore, error) {
 		return nil, fmt.Errorf("harness: %s: session file exceeds %d bytes", path, maxSessionFileSize)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(file, maxSessionFileSize+1))
+	reader := bufio.NewReaderSize(file, 4<<10)
+	headerLine, consumed, complete, err := readBoundedJSONLLine(
+		reader, maxSessionLineSize, maxSessionFileSize,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("harness: read session file: %w", err)
 	}
-	if len(data) > maxSessionFileSize {
+	if !complete {
 		return nil, fmt.Errorf("harness: %s: session file exceeds %d bytes", path, maxSessionFileSize)
 	}
-
-	lines := bytes.Split(bytes.TrimRight(data, "\n"), []byte{'\n'})
-	if len(lines) == 0 || len(lines[0]) == 0 {
+	if len(headerLine) == 0 {
 		return nil, fmt.Errorf("harness: %s: empty session file", path)
-	}
-	if len(lines)-1 > maxSessionEntries {
-		return nil, fmt.Errorf("harness: %s: session exceeds %d entries", path, maxSessionEntries)
 	}
 
 	var header jsonlHeader
-	if err := decodeStrictLine(lines[0], &header); err != nil {
+	if err := decodeStrictLine(headerLine, &header); err != nil {
 		return nil, fmt.Errorf("harness: %s: invalid session header: %w", path, err)
 	}
 	if err := validateHeader(path, header); err != nil {
 		return nil, err
 	}
 
-	entries := make([]Entry, 0, len(lines)-1)
+	entries := make([]Entry, 0, 256)
+	lineNumber := 1
 
-	for i, line := range lines[1:] {
+	for int64(consumed) < info.Size() {
+		line, read, lineComplete, readErr := readBoundedJSONLLine(
+			reader, maxSessionLineSize, maxSessionFileSize,
+		)
+		consumed += read
+		lineNumber++
+		if readErr != nil {
+			return nil, fmt.Errorf("harness: %s: line %d: %w", path, lineNumber, readErr)
+		}
+		if !lineComplete {
+			return nil, fmt.Errorf("harness: %s: session file exceeds %d bytes", path, maxSessionFileSize)
+		}
 		if len(line) == 0 {
 			continue
 		}
-		if len(line) > maxSessionLineSize {
-			return nil, fmt.Errorf("harness: %s: line %d exceeds %d bytes", path, i+2, maxSessionLineSize)
+		if len(entries) >= maxSessionEntries {
+			return nil, fmt.Errorf("harness: %s: session exceeds %d entries", path, maxSessionEntries)
 		}
 
 		var env entryJSON
 		if err := decodeStrictLine(line, &env); err != nil {
-			return nil, fmt.Errorf("harness: %s: line %d: %w", path, i+2, err)
+			return nil, fmt.Errorf("harness: %s: line %d: %w", path, lineNumber, err)
 		}
 
 		entry, err := fromEnvelope(env)
 		if err != nil {
-			return nil, fmt.Errorf("harness: %s: line %d: %w", path, i+2, err)
+			return nil, fmt.Errorf("harness: %s: line %d: %w", path, lineNumber, err)
 		}
 
 		entries = append(entries, entry)
 	}
 
 	store := &JSONLStore{
-		meta:     SessionMetadata{ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: mapsClone(header.Extra)},
-		entries:  cloneEntries(entries),
+		meta: SessionMetadata{
+			ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: mapsClone(header.Extra),
+		},
+		// Decoding creates independent entries, so the store can own this slice
+		// directly. Cloning it here doubled every message during open, before the
+		// coding Bootstrap cloned its retained window a second time.
+		entries:  entries,
 		file:     file,
 		identity: info,
 	}
@@ -217,6 +232,16 @@ func (s *JSONLStore) Entries() ([]Entry, error) {
 	defer s.mu.Unlock()
 
 	return cloneEntries(s.entries), nil
+}
+
+// EntryView implements [StoreView]. The returned slice is read-only and is the
+// same history [JSONLStore.Len] counts, so a Session over this store keeps one
+// copy of the conversation rather than two.
+func (s *JSONLStore) EntryView() []Entry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.entries
 }
 
 // Len returns the number of stored entries without copying them.

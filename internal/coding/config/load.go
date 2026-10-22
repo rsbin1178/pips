@@ -209,6 +209,8 @@ type fileTUI struct {
 	Mouse              *bool     `toml:"mouse"`
 	ExitOutput         *string   `toml:"exit_output"`
 	ShowThinkingBlocks *bool     `toml:"show_thinking_blocks"`
+	TranscriptMessages *int      `toml:"transcript_messages"`
+	TranscriptBytes    *int      `toml:"transcript_bytes"`
 }
 
 type fileSandboxWorkspaceWrite struct {
@@ -844,6 +846,24 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		}
 		layer.patch.Mouse = value.TUI.Mouse
 		layer.patch.ShowThinking = value.TUI.ShowThinkingBlocks
+		if value.TUI.TranscriptMessages != nil &&
+			(*value.TUI.TranscriptMessages < MinTranscriptMessages ||
+				*value.TUI.TranscriptMessages > MaxTranscriptMessages) {
+			return fileLayer{}, fmt.Errorf(
+				"%w: tui transcript_messages must be between %d and %d",
+				ErrInvalid, MinTranscriptMessages, MaxTranscriptMessages,
+			)
+		}
+		layer.patch.TranscriptMessages = value.TUI.TranscriptMessages
+		if value.TUI.TranscriptBytes != nil &&
+			(*value.TUI.TranscriptBytes < MinTranscriptBytes ||
+				*value.TUI.TranscriptBytes > MaxTranscriptBytes) {
+			return fileLayer{}, fmt.Errorf(
+				"%w: tui transcript_bytes must be between %d and %d",
+				ErrInvalid, MinTranscriptBytes, MaxTranscriptBytes,
+			)
+		}
+		layer.patch.TranscriptBytes = value.TUI.TranscriptBytes
 		if value.TUI.ExitOutput != nil {
 			policy, err := ParseExitOutput(*value.TUI.ExitOutput)
 			if err != nil {

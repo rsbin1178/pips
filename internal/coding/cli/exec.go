@@ -198,7 +198,7 @@ func runExecOperation(
 		return coding.State{}, 0, errors.New("coding cli: runtime did not settle before prompt")
 	}
 
-	baseline := len(state.Transcript)
+	baseline := state.TranscriptBase() + len(state.Transcript)
 
 	var events iter.Seq2[coding.Event, error]
 
@@ -231,6 +231,11 @@ func runExecOperation(
 	if err := validateSuccessfulInteraction(finalState); err != nil {
 		return coding.State{}, 0, err
 	}
+
+	// The baseline is an absolute conversation position so a live transcript
+	// trim during a long goal run cannot make it look like a new message.
+	baseline -= finalState.TranscriptBase()
+	baseline = min(max(0, baseline), len(finalState.Transcript))
 
 	return finalState, baseline, nil
 }

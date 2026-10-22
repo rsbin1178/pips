@@ -26,7 +26,7 @@ const (
 // reports true and has no older page, in which case the first history read simply
 // returns nothing.
 func TranscriptWindowMayBeTruncated(state State) bool {
-	return len(state.Transcript) >= maxEventItems
+	return state.transcriptBase > 0 || len(state.Transcript) >= maxEventItems
 }
 
 // HistoryRequest asks for conversation messages older than the caller's window.

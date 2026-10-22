@@ -422,7 +422,7 @@ func TestReadyRecordsCompletionMarkerOnceAndClearsInvalidAnchors(t *testing.T) {
 	require.Len(t, model.completionMarkers, maxCompletionMarkers)
 	assert.Equal(t, "interaction-1", model.completionMarkers[0].interactionID)
 
-	detail := newToolDetailView(timelineBlock{kind: blockTool, tools: []toolActivity{{
+	detail := newToolDetailView(timelineBlock{kind: blockTool, tools: []*toolActivity{{
 		id: "tool-1", name: "read", class: toolClassExplore,
 	}}})
 	driveModelCommands(t, model, model.openToolDetailRoute(detail))
@@ -770,6 +770,9 @@ func readyModelWithController(
 		},
 	})
 	model.Update(tea.WindowSizeMsg{Width: defaultWidth, Height: defaultHeight})
+	// A model that streams a large tail starts the background renderer; the
+	// cleanup stops it so a test run leaves no goroutine behind.
+	t.Cleanup(model.shutdownLiveRender)
 	_, command := model.Update(bootstrapResult{controller: controller})
 	if model.starting {
 		driveModelCommands(t, model, command)
@@ -1004,6 +1007,7 @@ func fullscreenModel(t *testing.T, controller Controller, noColor bool) *Model {
 		},
 	})
 	model.Update(tea.WindowSizeMsg{Width: defaultWidth, Height: defaultHeight})
+	t.Cleanup(model.shutdownLiveRender)
 	_, command := model.Update(bootstrapResult{controller: controller})
 	if model.starting {
 		driveModelCommands(t, model, command)
