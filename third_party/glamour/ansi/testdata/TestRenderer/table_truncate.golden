@@ -1,4 +1,0 @@
-                                                                                
- Name    │ Description                              │ Type │ Required │ Default 
-─────────┼──────────────────────────────────────────┼──────┼──────────┼─────────
- command │ A command to be executed inside the con… │ yes  │ hello    │ yep     

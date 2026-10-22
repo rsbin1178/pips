@@ -1,1 +1,0 @@
-:octopus: :zap: :cat: = :heart:
