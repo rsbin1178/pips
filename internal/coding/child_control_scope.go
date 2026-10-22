@@ -763,11 +763,7 @@ func (s *childControlScope) historyCatalog(ambient []catalog.Descriptor) (*catal
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			snapshot, err := s.child.SnapshotContext()
-			if err != nil {
-				return nil, err
-			}
-			return store.Bind(compaction.ArchiveIDs(snapshot.Entries))
+			return store.Bind(compaction.ArchiveIDs(s.child.Path()))
 		})
 		return catalog.New(catalog.Entry{
 			Tool: history, Source: descriptor.Source, Risk: descriptor.Risk, Tags: slices.Clone(descriptor.Tags),

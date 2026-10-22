@@ -196,7 +196,7 @@ func startSubscription(controller Controller) subscriptionStartedMsg {
 
 func (b *subscriptionBridge) wait() tea.Cmd {
 	return func() tea.Msg {
-		record, ok := <-b.subscription.Events()
+		record, ok := b.subscription.Receive()
 		var err error
 		if !ok {
 			err = b.subscription.Err()
@@ -207,7 +207,8 @@ func (b *subscriptionBridge) wait() tea.Cmd {
 }
 
 // drainBatch collects the records already queued behind the delivered one. It
-// returns as soon as the queue is empty, so a drain never blocks the event loop.
+// returns as soon as the queue is empty, so a drain never blocks the event loop;
+// the deadline only bounds a producer that keeps the queue non-empty.
 func (b *subscriptionBridge) drainBatch(max int, budget time.Duration) []coding.EventRecord {
 	if b == nil || b.subscription == nil || max <= 0 {
 		return nil
@@ -221,16 +222,12 @@ func (b *subscriptionBridge) drainBatch(max int, budget time.Duration) []coding.
 			break
 		}
 
-		select {
-		case record, ok := <-b.subscription.Events():
-			if !ok {
-				return records
-			}
-
-			records = append(records, record)
-		default:
+		record, ok := b.subscription.TryReceive()
+		if !ok {
 			return records
 		}
+
+		records = append(records, record)
 	}
 
 	return records

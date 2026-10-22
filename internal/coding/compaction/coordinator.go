@@ -15,10 +15,12 @@ import (
 // ErrNoReduction prevents a checkpoint that would not create useful headroom.
 var ErrNoReduction = errors.New("coding compaction: replacement does not reduce context below the threshold")
 
-// Plan is a detached snapshot. The owner must bind its preview to the source
-// leaf and policy and retain its structural lease through Execute.
+// Plan is a leaf-bound snapshot. Its entries and messages are read-only views:
+// compaction runs under the Runtime structural lease, so no writer can change
+// the branch while the plan is executed. The owner must bind its preview to the
+// source leaf and policy and retain that lease through Execute.
 type Plan struct {
-	Snapshot     harness.SessionContextSnapshot
+	Snapshot     harness.SessionContextView
 	Anchor       ai.Message
 	FixedTokens  int
 	TokensBefore int
@@ -33,7 +35,7 @@ func Capture(value *harness.Session, fixedTokens *int, synthetic func(ai.Message
 		return nil, ErrInvalid
 	}
 
-	snapshot, err := value.SnapshotContext()
+	snapshot, err := value.ContextView()
 	if err != nil {
 		return nil, err
 	}

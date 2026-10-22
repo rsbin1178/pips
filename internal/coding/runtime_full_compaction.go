@@ -66,15 +66,15 @@ func (r *Runtime) recordContextRequest(request *ai.Request) {
 }
 
 func (r *Runtime) contextTokens() int {
-	snapshot, err := r.session.SnapshotContext()
+	view, err := r.session.ContextView()
 	if err != nil {
 		return int(^uint(0) >> 1)
 	}
 
-	return r.contextTokensForSnapshot(snapshot)
+	return r.contextTokensForSnapshot(view)
 }
 
-func (r *Runtime) contextTokensForSnapshot(snapshot harness.SessionContextSnapshot) int {
+func (r *Runtime) contextTokensForSnapshot(snapshot harness.SessionContextView) int {
 	estimate := harness.EstimateContextUsage(snapshot.Entries)
 
 	r.mu.Lock()

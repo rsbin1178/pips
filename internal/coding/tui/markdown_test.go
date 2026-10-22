@@ -176,6 +176,23 @@ func TestMarkdownCacheBoundsRenderedBytes(t *testing.T) {
 	assert.NotContains(t, renderer.live, "draft")
 }
 
+func TestMarkdownCacheSkipsSingleEntriesAboveTheEntryBound(t *testing.T) {
+	t.Parallel()
+
+	renderer := newMarkdownRenderer(8)
+	key := markdownKey{hash: "oversized", width: 40, theme: themeFingerprint(themeDark.fingerprint)}
+
+	renderer.insert(markdownEntry{key: key, value: strings.Repeat("x", markdownEntryBytes+1)})
+	assert.Empty(t, renderer.entries, "an oversized rendered document is not cached")
+	assert.Zero(t, renderer.bytes)
+
+	small := key
+	small.hash = "small"
+	renderer.insert(markdownEntry{key: small, value: "ok"})
+	assert.Len(t, renderer.entries, 1)
+	assert.Equal(t, len("ok"), renderer.bytes)
+}
+
 func TestMarkdownEngineReuseMatchesFreshRenderer(t *testing.T) {
 	t.Parallel()
 

@@ -65,15 +65,16 @@ func (s *Session) Tree(limits TreeLimits) (TreeSnapshot, error) {
 	for _, entry := range path {
 		onPath[entry.ID] = struct{}{}
 	}
-	labels := labelsFromEntries(s.entries)
-	depths := make(map[string]int, len(s.entries))
+	entries := s.entriesLocked()
+	labels := labelsFromEntries(entries)
+	depths := make(map[string]int, len(entries))
 	snapshot := TreeSnapshot{
 		SessionID: s.store.Metadata().ID,
-		Name:      nameFromEntries(s.entries),
+		Name:      nameFromEntries(entries),
 		LeafID:    s.leaf,
 	}
 
-	for _, entry := range s.entries {
+	for _, entry := range entries {
 		if entry.Kind == KindLeaf {
 			continue
 		}

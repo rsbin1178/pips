@@ -192,12 +192,15 @@ type Controller struct {
 	runtime           runtimeInstance
 	sessionID         string
 	runtimeGeneration uint64
-	lastState         coding.State
-	overridden        bool
-	mode              coding.OperatingMode
-	baseMode          coding.OperatingMode
-	modeOverride      bool
-	active            int
+	// lastState is the detached projection kept after Runtime close or
+	// replacement. It is a read-only view while the Runtime owns immutable
+	// state; Snapshot clones it on demand for callers that need a mutable copy.
+	lastState    coding.State
+	overridden   bool
+	mode         coding.OperatingMode
+	baseMode     coding.OperatingMode
+	modeOverride bool
+	active       int
 
 	replacing   bool
 	replaceDone chan struct{}
@@ -601,6 +604,53 @@ func (c *Controller) Snapshot() coding.State {
 	return runtime.Snapshot()
 }
 
+// SnapshotReadOnly returns the current projection as a read-only view. The
+// Runtime shares immutable state with it, so the caller must not mutate the
+// result; use Snapshot when the caller retains it for mutation.
+func (c *Controller) SnapshotReadOnly() coding.State {
+	if c == nil {
+		return coding.State{}
+	}
+
+	c.mu.Lock()
+	runtime := c.runtime
+	c.mu.Unlock()
+
+	if runtime == nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		return c.lastState
+	}
+
+	if view, ok := runtime.(interface {
+		SnapshotReadOnly() coding.State
+	}); ok {
+		return view.SnapshotReadOnly()
+	}
+
+	// A Runtime implementation that does not offer the read-only view keeps the
+	// deep defensive contract.
+	return runtime.Snapshot()
+}
+
+// snapshotForRetention is the projection the Controller keeps as lastState. The
+// Runtime's copy-on-write state is immutable while retained, so a read-only
+// view is enough; Snapshot remains the deep copy for callers that retain a
+// mutable value.
+func snapshotForRetention(runtime runtimeInstance) coding.State {
+	if runtime == nil {
+		return coding.State{}
+	}
+	if view, ok := runtime.(interface {
+		SnapshotReadOnly() coding.State
+	}); ok {
+		return view.SnapshotReadOnly()
+	}
+
+	return runtime.Snapshot()
+}
+
 // ObserveEvents atomically attaches to the current Runtime's event stream.
 // The short Controller lease prevents replacement between selecting the
 // Runtime and creating its snapshot-backed subscription.
@@ -700,7 +750,7 @@ func (c *Controller) SetMode(ctx context.Context, mode coding.OperatingMode) err
 	c.mode = mode
 	c.modeOverride = mode != c.baseMode
 	c.effective.Mode = mode
-	c.lastState = runtime.Snapshot()
+	c.lastState = snapshotForRetention(runtime)
 	c.mu.Unlock()
 
 	return nil
@@ -1296,12 +1346,12 @@ func (c *Controller) Close(ctx context.Context) error {
 		default:
 			c.closing = true
 			runtime := c.runtime
-			lastState := c.lastState.Clone()
+			lastState := c.lastState
 			c.runtime = nil
 			c.mu.Unlock()
 
 			if runtime != nil {
-				lastState = runtime.Snapshot()
+				lastState = snapshotForRetention(runtime)
 			}
 			err := closeRuntime(closeCtx, runtime)
 
@@ -1345,7 +1395,7 @@ func (c *Controller) syncRuntimeState(runtime runtimeInstance) {
 	if c == nil || runtime == nil {
 		return
 	}
-	snapshot := runtime.Snapshot()
+	snapshot := snapshotForRetention(runtime)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1587,7 +1637,7 @@ func (c *Controller) beginReplacement(ctx context.Context) (replacement, error) 
 
 		return replacement{}, err
 	}
-	current.state = current.runtime.Snapshot()
+	current.state = snapshotForRetention(current.runtime)
 
 	return current, nil
 }
@@ -1645,7 +1695,7 @@ func (c *Controller) finishReplacement(next replacement) {
 	c.resolved = next.resolved.Clone()
 	c.model = next.model
 	c.sessionID = next.sessionID
-	c.lastState = next.state.Clone()
+	c.lastState = next.state
 	c.overridden = next.overridden
 	if next.generation != 0 {
 		c.runtimeGeneration = next.generation
@@ -1722,7 +1772,7 @@ func openRuntime(
 		return nil, coding.State{}, fmt.Errorf("%w: opener returned a nil runtime", ErrInvalid)
 	}
 
-	state := runtime.Snapshot()
+	state := snapshotForRetention(runtime)
 	if !state.SessionOpen || state.SessionID == "" ||
 		state.Provider != options.Resolved.Ref.Provider ||
 		state.ModelID != options.Resolved.Ref.Model || state.Mode != options.Config.Mode {

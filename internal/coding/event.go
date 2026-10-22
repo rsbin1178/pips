@@ -178,10 +178,14 @@ type SessionClosed struct {
 // projection. It is live-only: the transcript is authoritative, so the event
 // is never written to the durable journal.
 type SessionTreeChanged struct {
-	Tree          SessionTree       `json:"tree"`
-	Transcript    ai.Messages       `json:"transcript"`
-	ContextTokens int               `json:"context_tokens"`
-	Tasks         tasklist.Snapshot `json:"tasks"`
+	Tree       SessionTree `json:"tree"`
+	Transcript ai.Messages `json:"transcript"`
+	// TranscriptBase is the absolute conversation index of Transcript[0]. It is
+	// non-zero when the bounded projection starts below the durable first
+	// message, so a frontend can page the messages above it.
+	TranscriptBase int               `json:"transcript_base,omitempty"`
+	ContextTokens  int               `json:"context_tokens"`
+	Tasks          tasklist.Snapshot `json:"tasks"`
 	// Compaction carries the boundary the bounded transcript belongs to. A zero
 	// value means the active branch has no full checkpoint.
 	Compaction CompactionState `json:"compaction,omitzero"`
@@ -1144,6 +1148,10 @@ func validateSessionTreeChangedPayload(value SessionTreeChanged) error {
 
 	if len(value.Transcript) > maxEventItems {
 		return errors.New("session transcript has too many messages")
+	}
+
+	if value.TranscriptBase < 0 {
+		return errors.New("session transcript base must not be negative")
 	}
 
 	if value.ContextTokens < 0 {

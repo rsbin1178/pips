@@ -364,6 +364,7 @@ func Run(ctx context.Context, options Options) (returnErr error) {
 		returnErr = errors.Join(returnErr, model.stopStream(cleanupCtx))
 		model.stopTeamWorkerRouteSubscription()
 		model.stopSubscription()
+		model.shutdownLiveRender()
 		cleanupCancel()
 		owned.Lock()
 		controller := owned.controller
@@ -387,7 +388,7 @@ func Run(ctx context.Context, options Options) (returnErr error) {
 	if normal {
 		returnErr = errors.Join(
 			returnErr,
-			writeExitTranscript(options.Output, finalModel.transcriptExitRows()),
+			writeExitTranscript(options.Output, finalModel.transcriptExitDocument()),
 		)
 	}
 	returnErr = finishRunExit(returnErr, normal, options.OnExit, exitInfo)

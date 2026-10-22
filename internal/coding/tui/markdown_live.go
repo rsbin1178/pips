@@ -37,18 +37,32 @@ import (
 type rowSegments struct {
 	frozen []string
 	tail   []string
+	// base is the number of logical rows omitted before frozen[0]. A live
+	// record or an oversized settled record keeps only a window of its rows;
+	// base lets row lookups and anchors keep addressing the whole record.
+	base int
+	// detached reports that the rows do not alias one larger rendered document,
+	// because they were produced row by row (a live body applies its inset per
+	// row). Such a window needs no copy to release the render it came from.
+	detached bool
 }
 
-// count is the number of rows both segments hold.
+// count is the number of rows both segments hold, including the omitted prefix.
 func (s rowSegments) count() int {
+	return s.base + len(s.frozen) + len(s.tail)
+}
+
+// residentCount is the number of rows actually held in memory.
+func (s rowSegments) residentCount() int {
 	return len(s.frozen) + len(s.tail)
 }
 
-// appendWindow appends rows [from, to) to dst and returns the extended slice. It
-// appends the segment subslices directly, so a window that straddles the seam
-// needs no intermediate slice: the only growth is the caller's own destination.
+// appendWindow appends logical rows [from, to) to dst and returns the extended
+// slice. The range is record-relative, not resident-relative. It appends the
+// segment subslices directly, so a window that straddles the seam needs no
+// intermediate slice: the only growth is the caller's own destination.
 func (s rowSegments) appendWindow(dst []string, from, to int) []string {
-	from, to = max(0, from), min(to, s.count())
+	from, to = max(0, from-s.base), min(to-s.base, s.residentCount())
 	if from >= to {
 		return dst
 	}
@@ -66,13 +80,62 @@ func (s rowSegments) appendWindow(dst []string, from, to int) []string {
 	return append(dst, s.tail[:to-len(s.frozen)]...)
 }
 
-// all returns the rows as one slice, for callers that hand the document on.
+// window returns logical rows [from, to) as a newly allocated resident window.
+// The copy releases the rows outside the window; base records where the window
+// starts so callers can still address the record's full row space.
+func (s rowSegments) window(from, to int) rowSegments {
+	from = max(max(0, from), s.base)
+	to = min(to, s.count())
+	if from >= to {
+		return rowSegments{base: from}
+	}
+
+	rows := s.appendWindow(make([]string, 0, to-from), from, to)
+	rows, detached := detachRetainedRows(rows, to-from, s.count(), s.detached)
+
+	return rowSegments{
+		frozen:   rows,
+		base:     from,
+		detached: detached,
+	}
+}
+
+// detachedRowFraction is the share of a record's rows above which a retained
+// window may keep the render's backing string. Rows are substrings of one
+// rendered document, so keeping a handful of them keeps the whole document
+// alive; below the share the window is copied and the dropped bytes can be
+// collected. A window that keeps a proportional slice stays zero-copy, so an
+// ordinary frame never copies rows it is about to show.
+const detachedRowFraction = 4
+
+// detachRetainedRows copies a window that keeps less than 1/detachedRowFraction
+// of the record it came from, and reports whether the rows are now independent
+// of that record's render. A proportional window, or one whose rows were already
+// produced individually, is returned as is.
+func detachRetainedRows(rows []string, kept, total int, detached bool) ([]string, bool) {
+	if detached {
+		return rows, true
+	}
+	if kept <= 0 || total <= 0 || kept*detachedRowFraction >= total {
+		return rows, false
+	}
+
+	for index := range rows {
+		rows[index] = strings.Clone(rows[index])
+	}
+
+	return rows, true
+}
+
+// all returns the resident rows as one slice, for callers that hand the
+// document on. A windowed segment must be materialized in full before calling
+// this when every logical row is required.
 func (s rowSegments) all() []string {
 	if len(s.tail) == 0 {
 		return s.frozen
 	}
 
-	rows := make([]string, 0, s.count())
+	rows := make([]string, 0, s.residentCount())
 	rows = append(rows, s.frozen...)
 	rows = append(rows, s.tail...)
 
@@ -89,6 +152,10 @@ type liveFrozen struct {
 	source string
 	// rows are source's rendered rows, with the frame inset already applied.
 	rows []string
+	// rowsBase is the number of frozen rows dropped from the front so a managed
+	// live block keeps a bounded tail. The source prefix still covers them, so a
+	// scroll back can re-render the full body on demand.
+	rowsBase int
 	// block is the last frozen block of source, and blockRows how many rows it
 	// renders to. Both are the context the next extension renders against.
 	block     string
@@ -114,14 +181,28 @@ func (r *markdownRenderer) markdownFrozenRows(
 	width, inset int,
 	theme colorTheme,
 	noColor bool,
-) ([]string, bool) {
+	window bool,
+) ([]string, int, bool) {
 	fingerprint := themeFingerprint(theme.fingerprint)
 
-	frozen, exists := r.frozen[slot]
+	states := r.frozen
+	if window {
+		states = r.frozenRows
+	}
+	if states == nil {
+		states = make(map[string]*liveFrozen)
+		if window {
+			r.frozenRows = states
+		} else {
+			r.frozen = states
+		}
+	}
+
+	frozen, exists := states[slot]
 	if !exists || frozen.width != width || frozen.inset != inset ||
 		frozen.theme != fingerprint || frozen.noColor != noColor {
 		frozen = &liveFrozen{width: width, inset: inset, theme: fingerprint, noColor: noColor}
-		r.frozen[slot] = frozen
+		states[slot] = frozen
 	}
 
 	covered := len(frozen.source)
@@ -141,28 +222,51 @@ func (r *markdownRenderer) markdownFrozenRows(
 
 		extended, err := r.renderUncached(document, width, theme, noColor)
 		if err != nil {
-			return nil, false
+			return nil, 0, false
 		}
 
 		tail, found := markdownRowsAfter(extended, frozen.blockRows)
 		if !found {
-			return nil, false
+			return nil, 0, false
 		}
 
 		frozen.rows = append(frozen.rows, insetRowSlice(splitTranscriptRows(tail), inset)...)
 		frozen.source = content[:prefixEnd]
+		if window {
+			frozen.trim(maxLiveResidentRows)
+		}
 	}
 
 	if frozen.block != block {
 		rendered, err := r.render(block, width, theme, noColor)
 		if err != nil {
-			return nil, false
+			return nil, 0, false
 		}
 
 		frozen.block, frozen.blockRows = block, markdownRowCount(rendered)
 	}
 
-	return frozen.rows, true
+	return frozen.rows, frozen.rowsBase, true
+}
+
+// trim drops rows from the front of a managed live prefix. The caller still has
+// frozen.source, so a scroll back can re-render the omitted prefix exactly.
+//
+// The retained rows are copied when the trim keeps a small share of them: each
+// frozen region's rows are substrings of that region's own render, so a handful
+// of retained rows would otherwise pin the whole render for the session.
+func (f *liveFrozen) trim(limit int) {
+	if limit < 0 || len(f.rows) <= limit {
+		return
+	}
+
+	total := len(f.rows)
+	drop := total - limit
+	f.rows = append([]string(nil), f.rows[drop:]...)
+	// An inset is applied per row as it is frozen, so those rows already own their
+	// bytes; an inset of zero leaves them aliasing the frozen render.
+	f.rows, _ = detachRetainedRows(f.rows, limit, total, f.inset > 0)
+	f.rowsBase += drop
 }
 
 // markdownRowCount counts the rows of a rendered document.

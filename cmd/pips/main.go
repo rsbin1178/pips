@@ -13,6 +13,7 @@ import (
 
 	term "github.com/charmbracelet/x/term"
 	"github.com/rsbin1178/pips/internal/coding/cli"
+	"github.com/rsbin1178/pips/internal/coding/heapprofile"
 	"github.com/rsbin1178/pips/internal/coding/paths"
 )
 
@@ -47,6 +48,11 @@ func runAfterSignalSetup(
 	if ready != nil {
 		ready()
 	}
+
+	// PIPS_HEAP_PROFILE opts into a heap capture on SIGUSR2 and at exit. It is a
+	// debug hook for a long-running TUI, not a normal process responsibility.
+	stopHeapProfile := heapprofile.Start()
+	defer stopHeapProfile()
 
 	sigpipe := make(chan os.Signal, 1)
 

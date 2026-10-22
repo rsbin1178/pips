@@ -76,6 +76,62 @@ func TestJournalReopenContinuesTheSequence(t *testing.T) {
 	assert.Equal(t, []uint64{1, 2}, []uint64{records[0].Seq, records[1].Seq})
 }
 
+func TestJournalTailSequenceSkipsBlankLinesAndRejectsCorruptTail(t *testing.T) {
+	t.Parallel()
+
+	path := journalPath(t)
+	journal, err := OpenJournal(path, "s-journal")
+	require.NoError(t, err)
+	require.NoError(t, journal.Append(JournalRecord{Type: "committed"}))
+	require.NoError(t, journal.Close())
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // test-owned path
+	require.NoError(t, err)
+	_, err = file.WriteString("\n\n")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	resumed, err := OpenJournal(path, "s-journal")
+	require.NoError(t, err, "blank trailing lines carry no record")
+	assert.Equal(t, uint64(1), resumed.Sequence())
+	require.NoError(t, resumed.Close())
+
+	file, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // test-owned path
+	require.NoError(t, err)
+	_, err = file.WriteString("not json\n")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	_, err = OpenJournal(path, "s-journal")
+	require.ErrorIs(t, err, ErrJournalCorrupt,
+		"a complete but malformed tail is corruption, not a torn append")
+}
+
+func TestJournalReopenReadsLargeLastRecord(t *testing.T) {
+	t.Parallel()
+
+	path := journalPath(t)
+	journal, err := OpenJournal(path, "s-journal")
+	require.NoError(t, err)
+
+	large := JournalRecord{
+		Type:    "large-tail",
+		Payload: json.RawMessage(`{"text":"` + strings.Repeat("x", 5<<20) + `"}`),
+	}
+	require.NoError(t, journal.Append(JournalRecord{Type: "first"}, large))
+	require.NoError(t, journal.Close())
+
+	resumed, err := OpenJournal(path, "s-journal")
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), resumed.Sequence())
+	require.NoError(t, resumed.Close())
+
+	records, err := ReadJournal(path, 0)
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	assert.Equal(t, "large-tail", records[1].Type)
+}
+
 func TestJournalRejectsAnotherSessionsRecord(t *testing.T) {
 	t.Parallel()
 

@@ -102,6 +102,39 @@ func TestRuntimePromptStreamsAndPersistsOneInteraction(t *testing.T) {
 	require.NoError(t, runtime.Close(t.Context()))
 }
 
+func TestRuntimeSnapshotReadOnlySharesImmutableProjection(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestRuntime(t, newRuntimeModel(
+		runtimeTextResponse("done"),
+		runtimeTextResponse("done again"),
+	))
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("first")))
+	view := runtime.SnapshotReadOnly()
+
+	runtime.mu.Lock()
+	live := runtime.state
+	runtime.mu.Unlock()
+
+	require.Len(t, view.Transcript, 2)
+	require.Len(t, live.Transcript, 2)
+	assert.Same(t, &live.Transcript[0], &view.Transcript[0],
+		"the read-only view shares the committed transcript instead of copying it")
+
+	deep := runtime.Snapshot()
+	require.Len(t, deep.Transcript, 2)
+	assert.NotSame(t, &deep.Transcript[0], &view.Transcript[0],
+		"the defensive Snapshot keeps its own backing array")
+
+	viewSequence := view.Sequence
+
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("second")))
+	assert.Len(t, view.Transcript, 2, "a later append does not reach the retained view")
+	assert.Equal(t, "first", runtimeMessageText(view.Transcript[0]))
+	assert.Equal(t, viewSequence, view.Sequence)
+	assert.Greater(t, runtime.SnapshotReadOnly().Sequence, viewSequence)
+}
+
 func TestEffectiveCompactionSettingsUseOneResolvedPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -225,12 +258,9 @@ func TestRuntimeObservationMatchesOperationIterator(t *testing.T) {
 	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("hello")))
 	records := make([]EventRecord, 0, len(events))
 	for range events {
-		select {
-		case record := <-observation.Subscription.Events():
-			records = append(records, record)
-		case <-time.After(time.Second):
-			require.FailNow(t, "timed out waiting for observed event")
-		}
+		record, ok := awaitRecord(t, observation.Subscription)
+		require.True(t, ok)
+		records = append(records, record)
 	}
 
 	require.Len(t, records, len(events))
@@ -257,8 +287,10 @@ func TestRuntimeSlowObservationDoesNotStopPrompt(t *testing.T) {
 	assert.Contains(t, eventTypes(events), EventInteractionCompleted)
 	assert.Equal(t, InteractionSucceeded, runtime.Snapshot().Interaction.Outcome)
 
-	for range observation.Subscription.Events() {
-		continue
+	for {
+		if _, ok := awaitRecord(t, observation.Subscription); !ok {
+			break
+		}
 	}
 	assert.ErrorIs(t, observation.Subscription.Err(), ErrEventGap)
 }
@@ -285,7 +317,12 @@ func TestRuntimeClosePublishesTerminalEventsBeforeClosingSubscription(t *testing
 
 	require.NoError(t, runtime.Close(t.Context()))
 	var types []EventType
-	for record := range observation.Subscription.Events() {
+	for {
+		record, ok := awaitRecord(t, observation.Subscription)
+		if !ok {
+			break
+		}
+
 		types = append(types, record.Event.Type)
 	}
 
@@ -700,13 +737,9 @@ func receiveRuntimeRecords(
 
 	records := make([]EventRecord, 0, count)
 	for range count {
-		select {
-		case record, ok := <-subscription.Events():
-			require.True(t, ok)
-			records = append(records, record)
-		case <-time.After(time.Second):
-			require.FailNow(t, "timed out waiting for Runtime event record")
-		}
+		record, ok := awaitRecord(t, subscription)
+		require.True(t, ok)
+		records = append(records, record)
 	}
 
 	return records

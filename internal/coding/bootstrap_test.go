@@ -77,6 +77,8 @@ func TestBootstrapTaskProgressSurvivesBoundedTranscriptTail(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, result.State.Transcript, maxEventItems)
+	assert.Equal(t, 2, result.State.TranscriptBase(),
+		"the bounded window accounts for the two messages above it")
 	assert.Equal(t, 1, result.State.Tasks.InProgress)
 	assert.Equal(t, 1, result.State.Tasks.Total)
 }

@@ -76,6 +76,8 @@ const (
 	FieldMouse              Field = "tui.mouse"
 	FieldExitOutput         Field = "tui.exit_output"
 	FieldShowThinkingBlocks Field = "tui.show_thinking_blocks"
+	FieldTranscriptMessages Field = "tui.transcript_messages"
+	FieldTranscriptBytes    Field = "tui.transcript_bytes"
 	FieldSandbox            Field = "sandbox"
 	FieldSandboxNetwork     Field = "sandbox_workspace_write.network"
 	FieldApproval           Field = "approval"
@@ -108,6 +110,8 @@ var fields = []Field{
 	FieldMouse,
 	FieldExitOutput,
 	FieldShowThinkingBlocks,
+	FieldTranscriptMessages,
+	FieldTranscriptBytes,
 	FieldSandbox,
 	FieldSandboxNetwork,
 	FieldApproval,
@@ -162,6 +166,14 @@ type TUIConfig struct {
 	// blocks in the fullscreen viewport. The provider's opaque reasoning
 	// signature is never rendered either way.
 	ShowThinkingBlocks bool
+	// TranscriptMessages bounds the live State.Transcript window. Older
+	// messages stay in the durable Session and are paged back by History. Zero
+	// selects DefaultTranscriptMessages for programmatic Config literals.
+	TranscriptMessages int
+	// TranscriptBytes bounds the live State.Transcript and State.Tools payload
+	// in bytes, so a window of a few very large messages cannot pin hundreds of
+	// megabytes. Zero selects DefaultTranscriptBytes.
+	TranscriptBytes int
 }
 
 // DefaultCostCurrency is the currency a cost table without an explicit one
@@ -237,6 +249,25 @@ const DefaultExitOutput = ExitOutputResumeHint
 // Thinking blocks, matching the reference agents. [tui] show_thinking_blocks =
 // false hides them without disabling the Thinking… activity indicator.
 const DefaultShowThinkingBlocks = true
+
+const (
+	// DefaultTranscriptMessages bounds the live transcript window by default.
+	DefaultTranscriptMessages = 4096
+	// MinTranscriptMessages keeps the window large enough for History paging
+	// and the TUI reading window to remain useful.
+	MinTranscriptMessages = 256
+	// MaxTranscriptMessages matches the event protocol's item bound; a larger
+	// configured window would be rejected on bootstrap.
+	MaxTranscriptMessages = 4096
+	// DefaultTranscriptBytes bounds the live transcript and Tool payload by
+	// default. It is large enough for an ordinary working set and small enough
+	// that a handful of oversized messages cannot pin unbounded memory.
+	DefaultTranscriptBytes = 32 << 20
+	// MinTranscriptBytes keeps the byte window above one large tool result.
+	MinTranscriptBytes = 1 << 20
+	// MaxTranscriptBytes bounds the configured byte window.
+	MaxTranscriptBytes = 256 << 20
+)
 
 // SandboxMode selects the application sandbox boundary.
 type SandboxMode string
@@ -837,6 +868,8 @@ type Patch struct {
 	Mouse                 *bool
 	ExitOutput            *string
 	ShowThinking          *bool
+	TranscriptMessages    *int
+	TranscriptBytes       *int
 	Sandbox               *SandboxMode
 	Approval              *ApprovalMode
 }
@@ -864,6 +897,8 @@ func Defaults() Config {
 			ExitOutput: DefaultExitOutput,
 
 			ShowThinkingBlocks: DefaultShowThinkingBlocks,
+			TranscriptMessages: DefaultTranscriptMessages,
+			TranscriptBytes:    DefaultTranscriptBytes,
 		},
 		Cost: CostConfig{
 			Currency: DefaultCostCurrency,
@@ -1039,6 +1074,20 @@ func (c Config) ValidateRuntime() error {
 		if err := statusline.Validate(c.TUI.StatusLine); err != nil {
 			return fmt.Errorf("%w: %w", ErrInvalid, err)
 		}
+	}
+	if c.TUI.TranscriptMessages != 0 &&
+		(c.TUI.TranscriptMessages < MinTranscriptMessages || c.TUI.TranscriptMessages > MaxTranscriptMessages) {
+		return fmt.Errorf(
+			"%w: tui transcript_messages must be between %d and %d",
+			ErrInvalid, MinTranscriptMessages, MaxTranscriptMessages,
+		)
+	}
+	if c.TUI.TranscriptBytes != 0 &&
+		(c.TUI.TranscriptBytes < MinTranscriptBytes || c.TUI.TranscriptBytes > MaxTranscriptBytes) {
+		return fmt.Errorf(
+			"%w: tui transcript_bytes must be between %d and %d",
+			ErrInvalid, MinTranscriptBytes, MaxTranscriptBytes,
+		)
 	}
 	if err := validateApproval(c.Approval); err != nil {
 		return err
@@ -1446,6 +1495,14 @@ func apply(value Config, patch Patch, source Source) Config {
 	if patch.ShowThinking != nil {
 		value.TUI.ShowThinkingBlocks = *patch.ShowThinking
 		value.sources[FieldShowThinkingBlocks] = source
+	}
+	if patch.TranscriptMessages != nil {
+		value.TUI.TranscriptMessages = *patch.TranscriptMessages
+		value.sources[FieldTranscriptMessages] = source
+	}
+	if patch.TranscriptBytes != nil {
+		value.TUI.TranscriptBytes = *patch.TranscriptBytes
+		value.sources[FieldTranscriptBytes] = source
 	}
 	if patch.Sandbox != nil {
 		value.Sandbox = *patch.Sandbox

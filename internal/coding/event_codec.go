@@ -313,11 +313,12 @@ func validateNestedPayloadJSON(eventType EventType, data []byte) error {
 	switch eventType {
 	case EventSessionTreeChanged:
 		var payload struct {
-			Tree          SessionTree       `json:"tree"`
-			Transcript    []json.RawMessage `json:"transcript"`
-			ContextTokens int               `json:"context_tokens"`
-			Tasks         tasklist.Snapshot `json:"tasks"`
-			Compaction    CompactionState   `json:"compaction,omitzero"`
+			Tree           SessionTree       `json:"tree"`
+			Transcript     []json.RawMessage `json:"transcript"`
+			TranscriptBase int               `json:"transcript_base,omitempty"`
+			ContextTokens  int               `json:"context_tokens"`
+			Tasks          tasklist.Snapshot `json:"tasks"`
+			Compaction     CompactionState   `json:"compaction,omitzero"`
 		}
 		if err := strictDecode(data, &payload); err != nil {
 			return err

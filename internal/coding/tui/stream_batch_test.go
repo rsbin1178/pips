@@ -20,6 +20,26 @@ type runtimeStateController struct {
 
 func (c runtimeStateController) Snapshot() coding.State { return c.state.Clone() }
 
+// readOnlyRuntimeStateController records which snapshot capability the model
+// uses. SnapshotReadOnly shares the state the way a live Runtime does.
+type readOnlyRuntimeStateController struct {
+	*runtimeStateController
+	snapshots int
+	views     int
+}
+
+func (c *readOnlyRuntimeStateController) Snapshot() coding.State {
+	c.snapshots++
+
+	return c.runtimeStateController.Snapshot()
+}
+
+func (c *readOnlyRuntimeStateController) SnapshotReadOnly() coding.State {
+	c.views++
+
+	return c.state
+}
+
 // streamTestDelta builds one parent-Session reasoning delta.
 func streamTestDelta(sequence uint64) coding.Event {
 	return coding.Event{
@@ -98,6 +118,87 @@ func TestSubscribedFrameAdoptsRuntimeState(t *testing.T) {
 	}
 }
 
+// TestSubscribedFrameUsesReadOnlySnapshot pins the streaming memory contract:
+// a Controller that offers the read-only projection must be asked for it
+// instead of paying for a deep defensive Snapshot on every frame.
+func TestSubscribedFrameUsesReadOnlySnapshot(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Sequence = 3
+	state.Phase = coding.PhaseRunning
+	state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
+	state.Runs = []coding.RunState{{ID: "run-1", Active: true, TurnOpen: true, Turn: 1}}
+
+	controller := &readOnlyRuntimeStateController{
+		runtimeStateController: &runtimeStateController{stubController: stubController{state: state}},
+	}
+	model := readyModelWithController(t, controller, true)
+	model.subscription = &subscriptionBridge{}
+	model.subscriptionMode = true
+	model.runtimeState = true
+	model.observedSequence = 2
+	controller.snapshots = 0
+	controller.views = 0
+
+	_, _ = model.Update(subscriptionEventMsg{
+		bridge: model.subscription, ok: true,
+		record: coding.EventRecord{Event: streamTestDelta(3)},
+	})
+	_, _ = model.Update(renderTickMsg{})
+
+	require.NoError(t, model.streamErr)
+	assert.Equal(t, 1, controller.views, "the frame takes the read-only projection")
+	assert.Zero(t, controller.snapshots, "the frame does not deep-clone the conversation")
+	assert.Equal(t, uint64(3), model.state.Sequence)
+}
+
+// TestSubscribedCommitUsesReadOnlySnapshot pins the durable counterpart of the
+// streaming frame: a committed message also adopts the Runtime's read-only
+// projection instead of cloning the whole conversation.
+func TestSubscribedCommitUsesReadOnlySnapshot(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Sequence = 4
+	state.Phase = coding.PhaseRunning
+	state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
+	state.Runs = []coding.RunState{{ID: "run-1", Active: true, TurnOpen: true, Turn: 1}}
+	state.Transcript = []ai.Message{ai.UserText("hello")}
+
+	committed := state.Clone()
+	committed.Sequence = 5
+	committed.Transcript = append(committed.Transcript, ai.AssistantText("world"))
+
+	controller := &readOnlyRuntimeStateController{
+		runtimeStateController: &runtimeStateController{stubController: stubController{state: committed}},
+	}
+	model := readyModelWithController(t, controller, true)
+	model.subscription = &subscriptionBridge{}
+	model.subscriptionMode = true
+	model.runtimeState = true
+	model.observedSequence = 4
+	model.state = state
+	controller.snapshots = 0
+	controller.views = 0
+
+	event := coding.Event{
+		Schema: coding.EventSchema, Sequence: 5, Time: time.Unix(1, 0).UTC(),
+		SessionID: "session-1", InteractionID: "interaction-1", RunID: "run-1",
+		Type:    coding.EventMessageCommitted,
+		Payload: coding.MessageCommitted{Message: ai.AssistantText("world")},
+	}
+	_, _ = model.Update(subscriptionEventMsg{
+		bridge: model.subscription, ok: true,
+		record: coding.EventRecord{Event: event},
+	})
+
+	require.NoError(t, model.streamErr)
+	assert.GreaterOrEqual(t, controller.views, 1, "the commit takes the read-only projection")
+	assert.Zero(t, controller.snapshots, "a stable commit does not deep-clone the conversation")
+	assert.Equal(t, uint64(5), model.state.Sequence)
+}
+
 // TestSubscribedRuntimeFramesTrackTheRuntimeState drives the production
 // subscription wiring against a real Runtime: every drained frame must leave the
 // TUI at the Runtime's committed state even though the TUI never runs the
@@ -133,22 +234,15 @@ func TestSubscribedRuntimeFramesTrackTheRuntimeState(t *testing.T) {
 
 	frames := 0
 	for {
-		select {
-		case record, ok := <-started.bridge.subscription.Events():
-			if !ok {
-				t.Fatal("subscription closed before the scripted interaction was delivered")
-			}
-
-			_, _ = model.Update(subscriptionEventMsg{
-				bridge: started.bridge, ok: true, record: record,
-			})
-			frames++
-
-			continue
-		default:
+		record, ok := started.bridge.subscription.TryReceive()
+		if !ok {
+			break
 		}
 
-		break
+		_, _ = model.Update(subscriptionEventMsg{
+			bridge: started.bridge, ok: true, record: record,
+		})
+		frames++
 	}
 
 	require.NoError(t, model.streamErr)

@@ -396,7 +396,7 @@ type timelineFrameCache struct {
 	stamp          projectionStamp
 	valid          bool
 	entries        []transcriptEntry
-	tailActivities []toolActivity
+	tailActivities []*toolActivity
 	// markerSplit is how many completion markers the cached prefix already
 	// carries; the rest belong to the volatile tail.
 	markerSplit int
@@ -405,6 +405,11 @@ type timelineFrameCache struct {
 	// It is an absolute index because entries can grow after the fold, and the
 	// store reuses everything before the record it names.
 	mergedEntry int
+	// previewSplit is where the last frame inserted an optimistic question
+	// preview into the cached prefix, or -1. The store's records from there on
+	// are that frame's order, so the next frame rebuilds them before it can
+	// reuse the cached prefix again.
+	previewSplit int
 	// covered is how many transcript messages the committed blocks were projected
 	// from, and cutoff the highest conversation position they commit.
 	covered int
@@ -483,12 +488,12 @@ func (m *Model) viewportProjection() frameProjection {
 	// committed one. The merged card replaces both entries, so the store rebuilds
 	// from the seam.
 	merged := len(prefix) > 0 && len(tail) > 0 &&
-		isExploreBlock(prefix[len(prefix)-1].block) && isLoneExploreBlock(tail[0].block)
+		isExploreBlock(*prefix[len(prefix)-1].block) && isLoneExploreBlock(*tail[0].block)
 	if merged {
-		card := prefix[len(prefix)-1].block
+		card := *prefix[len(prefix)-1].block
 		card.tools = append(slices.Clone(card.tools), tail[0].block.tools...)
 		card.id = tail[0].block.id
-		tail[0] = m.entryFor(card)
+		tail[0] = m.entryFor(&card)
 		prefix = prefix[:len(prefix)-1]
 	}
 
@@ -502,6 +507,19 @@ func (m *Model) viewportProjection() frameProjection {
 		cache.mergedEntry = -1
 	}
 
+	// Optimistic question previews belong at their conversation position, which
+	// can be inside the cached prefix: the Runtime publishes the ask_user result
+	// after the resumed answer has already committed. Inserting them into the
+	// volatile tail would paint the answer above its own question card. Apply
+	// them to the combined frame and let the store rebuild from the first
+	// insertion.
+	wasPreviewSplit := cache.previewSplit
+	previewSplit := -1
+	if previews := m.optimisticQuestionBlocks(); len(previews) > 0 {
+		prefix, tail, previewSplit = m.splitQuestionPreviews(prefix, tail, previews)
+	}
+	cache.previewSplit = previewSplit
+
 	if reused {
 		// A cache hit keeps the whole prefix; an extension keeps everything before
 		// the appended entries.
@@ -511,6 +529,15 @@ func (m *Model) viewportProjection() frameProjection {
 		}
 		if wasMergedEntry >= 0 {
 			stable = min(stable, wasMergedEntry)
+		}
+		// A preview the previous frame inserted into the prefix reordered the
+		// store's records after that index, so they are rebuilt before the cache
+		// prefix is trusted again.
+		if wasPreviewSplit >= 0 {
+			stable = min(stable, wasPreviewSplit)
+		}
+		if previewSplit >= 0 {
+			stable = min(stable, previewSplit)
 		}
 
 		switch {
@@ -537,6 +564,63 @@ func (m *Model) viewportProjection() frameProjection {
 	return frameProjection{prefixEntries: entries}
 }
 
+// splitQuestionPreviews inserts optimistic question cards into the combined
+// committed prefix and volatile tail, and reports where the store must rebuild.
+// A preview that lands in the prefix moves that part of the cache into the tail;
+// one that lands only in the tail leaves the cached prefix reusable. previewSplit
+// is -1 when the prefix is untouched.
+//
+// Only the entries from the first insertion onward are materialised: every block
+// before that point is settled and precedes every preview, so the insertion
+// helper reproduces the same order when it scans that sub-slice alone.
+func (m *Model) splitQuestionPreviews(
+	prefix, tail []transcriptEntry,
+	previews []timelineBlock,
+) ([]transcriptEntry, []transcriptEntry, int) {
+	total := len(prefix) + len(tail)
+	first := total
+	for _, preview := range slices.Backward(previews) {
+		at := total
+		for index := 0; index < len(prefix); index++ {
+			if questionPreviewPrecedes(*prefix[index].block, preview) {
+				at = index
+
+				break
+			}
+		}
+		if at == total {
+			for index := 0; index < len(tail); index++ {
+				if questionPreviewPrecedes(*tail[index].block, preview) {
+					at = len(prefix) + index
+
+					break
+				}
+			}
+		}
+		first = min(first, at)
+	}
+
+	blocks := make([]timelineBlock, 0, total-first+len(previews))
+	for index := first; index < len(prefix); index++ {
+		blocks = append(blocks, *prefix[index].block)
+	}
+	for index := range tail {
+		blocks = append(blocks, *tail[index].block)
+	}
+	inserted := insertQuestionPreviews(blocks, previews)
+
+	entries := make([]transcriptEntry, 0, len(inserted))
+	for index := range inserted {
+		entries = append(entries, m.entryFor(&inserted[index]))
+	}
+
+	if first >= len(prefix) {
+		return prefix, entries, -1
+	}
+
+	return prefix[:first], entries, first
+}
+
 // rebuildFrameCache re-projects the committed prefix and stores it with the stamp
 // it was built for.
 func (m *Model) rebuildFrameCache(stamp projectionStamp) {
@@ -556,8 +640,8 @@ func (m *Model) rebuildFrameCache(stamp projectionStamp) {
 	}
 
 	entries := make([]transcriptEntry, 0, len(blocks))
-	for _, block := range blocks {
-		entries = append(entries, m.entryFor(block))
+	for index := range blocks {
+		entries = append(entries, m.entryFor(&blocks[index]))
 	}
 
 	var lastCommitted timelineBlock
@@ -572,6 +656,7 @@ func (m *Model) rebuildFrameCache(stamp projectionStamp) {
 		tailActivities:     m.toolActivities[committed.tailStart:],
 		markerSplit:        split,
 		mergedEntry:        -1,
+		previewSplit:       -1,
 		covered:            len(m.state.Transcript),
 		cutoff:             committed.cutoff,
 		candidateCount:     len(m.state.MessageCandidates),
@@ -684,7 +769,7 @@ func toolRecordCommitted(record *toolActivityRecord, covered int) bool {
 // committed. The list is ordered by position, and a position past the last
 // transcript message can only belong to the live overlay, which the volatile tail
 // keeps.
-func committedActivityEnd(activities []toolActivity, messages int) int {
+func committedActivityEnd(activities []*toolActivity, messages int) int {
 	for index := range activities {
 		if activities[index].position > messages {
 			return index
@@ -760,8 +845,8 @@ func (m *Model) appendFrameCache(
 	// Appended messages carry no tool parts, so no appended block can be an
 	// exploration card and the committed blocks need no grouping across the seam.
 	entries := make([]transcriptEntry, 0, len(blocks))
-	for _, block := range blocks {
-		entries = append(entries, m.entryFor(block))
+	for index := range blocks {
+		entries = append(entries, m.entryFor(&blocks[index]))
 	}
 
 	// A live activity's conversation position is the end of the transcript, so
@@ -844,7 +929,7 @@ func (m *Model) appendToolFrameCache(
 		card := cache.lastCommitted
 		card.tools = append(slices.Clone(card.tools), grouped[0].tools...)
 		card.id = grouped[0].id
-		cache.entries[cache.lastCommittedEntry] = m.entryFor(card)
+		cache.entries[cache.lastCommittedEntry] = m.entryFor(&card)
 		lastCommitted = card
 		from = cache.lastCommittedEntry
 		grouped = grouped[1:]
@@ -860,8 +945,8 @@ func (m *Model) appendToolFrameCache(
 	}
 
 	entries := make([]transcriptEntry, 0, len(visible))
-	for _, block := range visible {
-		entries = append(entries, m.entryFor(block))
+	for index := range visible {
+		entries = append(entries, m.entryFor(&visible[index]))
 	}
 
 	if len(grouped) > 0 {
@@ -886,10 +971,9 @@ func (m *Model) appendToolFrameCache(
 
 // volatileTimelineBlocks projects the live tail: the activity still running, the
 // growing draft, the stream error and the notices that trail the conversation.
-func (m *Model) volatileTimelineBlocks(activities []toolActivity, markerSplit int) []timelineBlock {
+func (m *Model) volatileTimelineBlocks(activities []*toolActivity, markerSplit int) []timelineBlock {
 	blocks := projectVolatileBlocks(m.state, activities)
 	blocks = insertCompletionMarkers(blocks, m.completionMarkers[markerSplit:])
-	blocks = insertQuestionPreviews(blocks, m.optimisticQuestionBlocks())
 
 	if !m.showThinkingBlocks() {
 		blocks = withoutThinkingBlocks(blocks)
@@ -905,10 +989,10 @@ func (m *Model) volatileTimelineBlocks(activities []toolActivity, markerSplit in
 }
 
 // entryFor names one projected block for the transcript store.
-func (m *Model) entryFor(block timelineBlock) transcriptEntry {
+func (m *Model) entryFor(block *timelineBlock) transcriptEntry {
 	return transcriptEntry{
-		id:    m.blockIdentity(block),
-		live:  blockIsUnsettled(block),
+		id:    m.blockIdentity(*block),
+		live:  blockIsUnsettled(*block),
 		block: block,
 	}
 }
@@ -917,8 +1001,8 @@ func (m *Model) entryFor(block timelineBlock) transcriptEntry {
 // across frames; the store copies what it keeps.
 func (m *Model) frameEntriesFor(blocks []timelineBlock) []transcriptEntry {
 	entries := m.frameEntries[:0]
-	for _, block := range blocks {
-		entries = append(entries, m.entryFor(block))
+	for index := range blocks {
+		entries = append(entries, m.entryFor(&blocks[index]))
 	}
 
 	m.frameEntries = entries

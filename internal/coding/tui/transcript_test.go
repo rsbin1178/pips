@@ -24,6 +24,37 @@ func rows(count int) []string {
 	return values
 }
 
+func TestRenderFullMatchesTheSettledShape(t *testing.T) {
+	t.Parallel()
+
+	store := transcriptStore{
+		width: 80, theme: themeDark, noColor: false, markdown: newMarkdownRenderer(8),
+	}
+	body := strings.Repeat("A paragraph with ordinary words and enough length to wrap.\n\n", 20)
+
+	draft := timelineBlock{kind: blockDraft, id: "draft", body: body}
+	settled := timelineBlock{kind: blockAssistant, id: "assistant", body: body}
+	assert.Equal(t,
+		splitTranscriptRows(renderTimelineEntry(
+			settled, store.markdown, store.width, store.theme, store.noColor, timelineRenderOptions{},
+		)),
+		store.renderFull(draft).all(),
+		"a full draft render matches the settled assistant shape",
+	)
+
+	reasoning := strings.Repeat("A reasoning line with enough length to wrap.\n", 40)
+	liveThinking := timelineBlock{kind: blockThinking, id: draftThinkingID, body: reasoning}
+	settledThinking := timelineBlock{kind: blockThinking, id: "thinking", body: reasoning}
+	assert.Equal(t,
+		splitTranscriptRows(renderTimelineEntry(
+			settledThinking, store.markdown, store.width, store.theme, store.noColor,
+			timelineRenderOptions{},
+		)),
+		store.renderFull(liveThinking).all(),
+		"a full live-thinking render matches the settled thinking shape",
+	)
+}
+
 func TestScrollRegionFollowsUntilTheReaderScrolls(t *testing.T) {
 	t.Parallel()
 
@@ -335,8 +366,8 @@ func TestFullscreenStartupPutsTheBannerInTheTranscript(t *testing.T) {
 func buildRevisionProbe(store *transcriptStore, live string) {
 	store.build(40, themeDark, themeFingerprint(themeDark.fingerprint), false, newMarkdownRenderer(8),
 		[]transcriptEntry{
-			{id: "settled", block: timelineBlock{kind: blockAssistant, id: "settled", body: "settled paragraph"}},
-			{id: "draft", live: true, block: timelineBlock{kind: blockDraft, id: "draft", body: live}},
+			{id: "settled", block: &timelineBlock{kind: blockAssistant, id: "settled", body: "settled paragraph"}},
+			{id: "draft", live: true, block: &timelineBlock{kind: blockDraft, id: "draft", body: live}},
 		})
 }
 

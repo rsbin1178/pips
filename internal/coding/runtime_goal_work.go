@@ -71,7 +71,7 @@ func (worker *runtimeGoalWorker) Run(ctx context.Context, request continuation.W
 			operation.messages = []ai.Message{ai.UserText(text)}
 		}
 	}
-	before := len(r.session.Entries())
+	before := len(r.session.EntriesView())
 	work := continuation.WorkResult{Progress: continuation.ProgressUnknown}
 	runIDs := make(map[string]string)
 	var runErr error
@@ -143,7 +143,7 @@ func (worker *runtimeGoalWorker) Run(ctx context.Context, request continuation.W
 func collectGoalEvidence(r *Runtime, from int, runIDs map[string]string) goalflow.Evidence {
 	evidence := goalflow.Evidence{Records: []goalflow.Record{}}
 	calls := make(map[string]ai.ToolCallPart)
-	for index, entry := range r.session.Entries() {
+	for index, entry := range r.session.EntriesView() {
 		switch message := entry.Message.(type) {
 		case ai.AssistantMessage:
 			for _, part := range message.Parts {

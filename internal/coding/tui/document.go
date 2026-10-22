@@ -125,7 +125,7 @@ func markdownSection(heading, body string) string {
 func markdownToolSection(block timelineBlock) string {
 	entries := make([]string, 0, len(block.tools))
 	for _, activity := range block.tools {
-		if entry := markdownToolCall(activity); entry != "" {
+		if entry := markdownToolCall(*activity); entry != "" {
 			entries = append(entries, entry)
 		}
 	}

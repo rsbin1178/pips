@@ -137,7 +137,10 @@ func (r *Runtime) openGoalControl(ctx context.Context) error {
 		return err
 	}
 	r.state.Goal = projected
-	r.state.SyntheticMessages = append(r.state.SyntheticMessages, goalSyntheticMessageIndexes(r.state.Transcript, string(control.id))...)
+	r.state.SyntheticMessages = appendShared(
+		r.state.SyntheticMessages,
+		goalSyntheticMessageIndexes(r.state.Transcript, string(control.id))...,
+	)
 	return nil
 }
 

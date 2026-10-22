@@ -19,43 +19,109 @@ import (
 // [Session.Context] reconstructs the model-visible view of it (applying
 // compaction and branch summaries).
 //
+// A Session over a [StoreView] keeps no copy of the entry history: the store
+// stays its single in-memory owner. [Session.Context] and [Session.Path] then
+// return read-only views backed by that history, so the caller must not modify
+// them. [Session.Entry], [Session.Entries], [Session.pathFrom] and
+// [Session.SnapshotContext] remain defensive copies.
+//
 // A Session is safe for concurrent use and must be the store's only writer.
 type Session struct {
-	mu      sync.Mutex
-	store   Store
+	mu sync.Mutex
+
+	store Store
+	// entries owns the history when the store cannot expose a view. view is
+	// non-nil when the store owns it, and entries stays nil.
 	entries []Entry
-	byID    map[string]int
-	leaf    string // "" = root
+	view    StoreView
+
+	byID map[string]int
+	leaf string // "" = root
+	// branched reports that the append order is not one linear branch, so the
+	// path must be reconstructed and memoized instead of aliasing the store.
+	branched bool
 	// writeErr fences every writer after an uncertain checkpoint append, including
 	// completion journals and navigation. Only a fresh validated Session can resume.
 	writeErr error
+
+	// path and context are memoized read-only projections of the active branch.
+	// Appends extend them; navigation and replacement entries invalidate them.
+	path    pathCache
+	context contextCache
+}
+
+type pathCache struct {
+	valid   bool
+	leaf    string
+	entries []Entry
+}
+
+type contextCache struct {
+	valid bool
+	value Context
 }
 
 // NewSession loads (or starts) a session over the given store.
 func NewSession(store Store) (*Session, error) {
-	entries, err := store.Entries()
-	if err != nil {
-		return nil, err
+	s := &Session{store: store}
+
+	var entries []Entry
+	if view, ok := store.(StoreView); ok {
+		s.view = view
+		entries = view.EntryView()
+	} else {
+		owned, err := store.Entries()
+		if err != nil {
+			return nil, err
+		}
+
+		// A defensive store already returned entries this Session owns.
+		s.entries = owned
+		entries = owned
 	}
-	entries = cloneEntries(entries)
+
 	if err := validateEntries(entries); err != nil {
 		return nil, err
 	}
 
-	s := &Session{store: store, entries: entries, byID: make(map[string]int, len(entries))}
+	s.byID = make(map[string]int, len(entries))
+	s.replayLocked(entries)
 
-	// Replay: every appended entry becomes the leaf; leaf entries re-point it.
+	return s, nil
+}
+
+// replayLocked rebuilds the index and leaf from the store's append order.
+func (s *Session) replayLocked(entries []Entry) {
+	tip := ""
+
 	for i, e := range entries {
 		s.byID[e.ID] = i
 
 		if e.Kind == KindLeaf {
+			s.branched = true
 			s.leaf = e.LeafID
-		} else {
-			s.leaf = e.ID
+			tip = e.LeafID
+
+			continue
 		}
+
+		if e.ParentID != tip {
+			s.branched = true
+		}
+
+		s.leaf = e.ID
+		tip = e.ID
+	}
+}
+
+// entriesLocked returns the one entry history this Session reads. The caller
+// must not modify it; the session lock is held.
+func (s *Session) entriesLocked() []Entry {
+	if s.view != nil {
+		return s.view.EntryView()
 	}
 
-	return s, nil
+	return s.entries
 }
 
 // Metadata identifies the underlying stored session.
@@ -71,12 +137,23 @@ func (s *Session) LeafID() string {
 	return s.leaf
 }
 
-// Entries returns all entries in append order.
+// Entries returns a defensive copy of all entries in append order. Use
+// [Session.EntriesView] for a read-only view that does not copy the history.
 func (s *Session) Entries() []Entry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return cloneEntries(s.entries)
+	return cloneEntries(s.entriesLocked())
+}
+
+// EntriesView returns the store's entry history without copying it when the
+// store supports [StoreView]. The caller must not modify the slice or its
+// entries, which remain owned by the store.
+func (s *Session) EntriesView() []Entry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.entriesLocked()
 }
 
 // Entry returns the entry with the given ID.
@@ -89,18 +166,42 @@ func (s *Session) Entry(id string) (Entry, bool) {
 		return Entry{}, false
 	}
 
-	return cloneEntry(s.entries[idx]), true
+	return cloneEntry(s.entriesLocked()[idx]), true
 }
 
 // Path returns the active branch in conversation order: the entries from the
-// root down to the current leaf.
+// root down to the current leaf. The result is a read-only view, memoized
+// until the branch grows or navigates; the caller must not modify it. Use
+// [Session.pathFrom] or [Session.Entries] when an independent copy is needed.
 func (s *Session) Path() []Entry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	path, _ := s.pathLocked(s.leaf)
+	path, _ := s.activePathLocked()
 
-	return cloneEntries(path)
+	return path
+}
+
+// activePathLocked returns the active branch without copying it. A linear
+// session's branch is exactly the store's single entry history, so it aliases
+// that slice. A branched session memoizes its reconstructed path.
+func (s *Session) activePathLocked() ([]Entry, error) {
+	if !s.branched {
+		return s.entriesLocked(), nil
+	}
+
+	if s.path.valid && s.path.leaf == s.leaf {
+		return s.path.entries, nil
+	}
+
+	path, err := s.pathLocked(s.leaf)
+	if err != nil {
+		return nil, err
+	}
+
+	s.path = pathCache{valid: true, leaf: s.leaf, entries: path}
+
+	return path, nil
 }
 
 // pathFrom returns the branch ending at the given entry.
@@ -114,7 +215,8 @@ func (s *Session) pathFrom(id string) ([]Entry, error) {
 }
 
 func (s *Session) pathLocked(id string) ([]Entry, error) {
-	var path []Entry
+	entries := s.entriesLocked()
+	path := make([]Entry, 0, min(len(entries), 64))
 
 	for id != "" {
 		idx, ok := s.byID[id]
@@ -122,8 +224,8 @@ func (s *Session) pathLocked(id string) ([]Entry, error) {
 			return nil, fmt.Errorf("%w: %s", ErrEntryNotFound, id)
 		}
 
-		path = append(path, s.entries[idx])
-		id = s.entries[idx].ParentID
+		path = append(path, entries[idx])
+		id = entries[idx].ParentID
 	}
 
 	slices.Reverse(path)
@@ -155,6 +257,8 @@ func (s *Session) appendUnderLocked(parentID string, e Entry) (string, error) {
 		return "", fmt.Errorf("%w: %w", ErrInvalidEntry, err)
 	}
 
+	oldLeaf := s.leaf
+
 	if err := s.store.Append(e); err != nil {
 		if e.Kind == KindContextCheckpoint && !errors.Is(err, ErrStoreAppendNotAttempted) {
 			s.writeErr = fmt.Errorf("harness: checkpoint write durability uncertain; session writes fenced: %w", err)
@@ -163,9 +267,22 @@ func (s *Session) appendUnderLocked(parentID string, e Entry) (string, error) {
 		return "", err
 	}
 
-	e = cloneEntry(e)
-	s.byID[e.ID] = len(s.entries)
-	s.entries = append(s.entries, e)
+	var index int
+
+	if s.view != nil {
+		entries := s.view.EntryView()
+		index = len(entries) - 1
+		if index >= 0 {
+			e = entries[index]
+		}
+	} else {
+		e = cloneEntry(e)
+		s.entries = append(s.entries, e)
+		index = len(s.entries) - 1
+	}
+
+	s.byID[e.ID] = index
+	s.extendProjectionsLocked(e, parentID, oldLeaf)
 
 	if e.Kind == KindLeaf {
 		s.leaf = e.LeafID
@@ -174,6 +291,60 @@ func (s *Session) appendUnderLocked(parentID string, e Entry) (string, error) {
 	}
 
 	return e.ID, nil
+}
+
+// extendProjectionsLocked keeps the memoized path and context valid across an
+// append. Both are only extended when the entry grows the same branch; a
+// replacement entry, a branch summary under another parent, or a navigation
+// invalidates them so the next read rebuilds from the authoritative entries.
+func (s *Session) extendProjectionsLocked(entry Entry, parentID, oldLeaf string) {
+	if entry.Kind == KindLeaf || parentID != oldLeaf {
+		s.branched = true
+		s.path.valid = false
+		s.path.entries = nil
+		s.context.valid = false
+
+		return
+	}
+
+	if s.path.valid && s.path.leaf == oldLeaf {
+		s.path.entries = append(s.path.entries, entry)
+		s.path.leaf = entry.ID
+	} else {
+		s.path.valid = false
+		s.path.entries = nil
+	}
+
+	if !s.context.valid {
+		return
+	}
+
+	switch entry.Kind {
+	case KindMessage:
+		s.context.value.Messages = append(s.context.value.Messages, entry.Message)
+	case KindBranchSummary:
+		s.context.value.Messages = append(
+			s.context.value.Messages, ai.UserText(BranchSummaryPrefix+entry.Summary),
+		)
+	case KindModelChange:
+		s.context.value.Provider, s.context.value.ModelID = entry.Provider, entry.ModelID
+	case KindContextCheckpoint:
+		// A checkpoint replaces its ancestors; keep only its seed. Copy the
+		// header so a later append never writes into the checkpoint's slice.
+		var messages ai.Messages
+		if entry.Checkpoint != nil {
+			messages = slices.Clone(entry.Checkpoint.Messages)
+		}
+		s.context.value.Messages = messages
+	case KindCompaction:
+		// A legacy compaction keeps a tail of its ancestors; rebuilding is
+		// cheap here and happens once per compaction.
+		s.context.valid = false
+	case KindCustom, KindLabel, KindName:
+		// Bookkeeping only.
+	default:
+		s.context.valid = false
+	}
 }
 
 // AppendMessage appends a conversation message, with optional usage
@@ -210,7 +381,7 @@ func (s *Session) AppendCompaction(summary, firstKeptID string, tokensBefore int
 		return "", fmt.Errorf("%w: compaction boundary %s is not on the active path", ErrInvalidEntry, firstKeptID)
 	}
 
-	if !isCompactionBoundary(firstKeptID, s.leaf, s.byID, s.entries) {
+	if !isCompactionBoundary(firstKeptID, s.leaf, s.byID, s.entriesLocked()) {
 		return "", fmt.Errorf("%w: compaction boundary %s crosses a full checkpoint", ErrInvalidEntry, firstKeptID)
 	}
 
@@ -246,7 +417,7 @@ func (s *Session) Labels() map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return labelsFromEntries(s.entries)
+	return labelsFromEntries(s.entriesLocked())
 }
 
 // SetName records the session's human-readable name.
@@ -260,7 +431,7 @@ func (s *Session) Name() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return nameFromEntries(s.entries)
+	return nameFromEntries(s.entriesLocked())
 }
 
 // MoveTo re-points the leaf to the given entry ("" for the root), branching
@@ -298,7 +469,9 @@ func (s *Session) MoveTo(entryID, summary string) error {
 }
 
 func (s *Session) ancestorLocked(ancestor, leaf string) bool {
-	for remaining := len(s.entries) + 1; leaf != "" && remaining > 0; remaining-- {
+	entries := s.entriesLocked()
+
+	for remaining := len(entries) + 1; leaf != "" && remaining > 0; remaining-- {
 		if leaf == ancestor {
 			return true
 		}
@@ -306,7 +479,7 @@ func (s *Session) ancestorLocked(ancestor, leaf string) bool {
 		if !ok {
 			return false
 		}
-		leaf = s.entries[index].ParentID
+		leaf = entries[index].ParentID
 	}
 
 	return false
@@ -328,6 +501,8 @@ func (s *Session) CommonAncestor(a, b string) (string, error) {
 		onA[e.ID] = true
 	}
 
+	entries := s.entriesLocked()
+
 	for id := b; id != ""; {
 		idx, ok := s.byID[id]
 		if !ok {
@@ -338,7 +513,7 @@ func (s *Session) CommonAncestor(a, b string) (string, error) {
 			return id, nil
 		}
 
-		id = s.entries[idx].ParentID
+		id = entries[idx].ParentID
 	}
 
 	return "", nil
@@ -365,23 +540,63 @@ const (
 // A full checkpoint replaces its ancestors with its seed. A legacy compaction
 // replaces context before its first-kept entry with its summary. Branch summaries
 // render as summary messages; bookkeeping entries are skipped.
+//
+// The returned Messages slice is a read-only view of the branch, memoized until
+// the branch grows or navigates; callers must not modify it. Use
+// [Session.SnapshotContext] when detached entries and messages are required.
 func (s *Session) Context() (Context, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	path, err := s.pathLocked(s.leaf)
+	path, err := s.activePathLocked()
 	if err != nil {
 		return Context{}, err
 	}
 
-	return contextFromPath(path), nil
+	return s.contextLocked(path), nil
+}
+
+// SessionContextView binds the raw branch and reconstructed context to one leaf
+// without copying either. Both fields are read-only views owned by the Session
+// (or its store) and remain valid for the entries they cover after appends.
+type SessionContextView struct {
+	LeafID  string
+	Entries []Entry
+	Context Context
+}
+
+// ContextView returns a leaf-bound read-only snapshot for callers that only
+// read, such as context accounting and a compaction capture that runs under the
+// structural lease. It allocates nothing once the branch projections are warm.
+func (s *Session) ContextView() (SessionContextView, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path, err := s.activePathLocked()
+	if err != nil {
+		return SessionContextView{}, err
+	}
+
+	return SessionContextView{
+		LeafID: s.leaf, Entries: path, Context: s.contextLocked(path),
+	}, nil
+}
+
+func (s *Session) contextLocked(path []Entry) Context {
+	if s.context.valid {
+		return s.context.value
+	}
+
+	s.context = contextCache{valid: true, value: contextFromPath(path)}
+
+	return s.context.value
 }
 
 func contextFromPath(path []Entry) Context {
-	var out Context
+	out := Context{Messages: make(ai.Messages, 0, len(path))}
 	for _, entry := range contextEntries(path) {
 		for _, message := range entryContextMessages(entry) {
-			out.Messages = append(out.Messages, cloneMessage(message))
+			out.Messages = append(out.Messages, message)
 		}
 	}
 	for _, entry := range path {
@@ -390,6 +605,18 @@ func contextFromPath(path []Entry) Context {
 		}
 	}
 	return out
+}
+
+// cloneContext returns a context whose message slice and parts are independent
+// from the entries it was built from.
+func cloneContext(value Context) Context {
+	messages := make(ai.Messages, len(value.Messages))
+	for index, message := range value.Messages {
+		messages[index] = cloneMessage(message)
+	}
+	value.Messages = messages
+
+	return value
 }
 
 // Pending returns the unanswered tool calls on the active branch in call

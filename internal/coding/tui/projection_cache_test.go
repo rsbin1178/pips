@@ -24,10 +24,10 @@ func viewportProjectionBlocks(model *Model) []timelineBlock {
 func viewportProjectionFrameBlocks(frame frameProjection) []timelineBlock {
 	blocks := make([]timelineBlock, 0, len(frame.prefixEntries)+len(frame.tailEntries))
 	for _, entry := range frame.prefixEntries {
-		blocks = append(blocks, entry.block)
+		blocks = append(blocks, *entry.block)
 	}
 	for _, entry := range frame.tailEntries {
-		blocks = append(blocks, entry.block)
+		blocks = append(blocks, *entry.block)
 	}
 
 	return blocks
@@ -642,7 +642,7 @@ func TestProjectionCacheFallsBackWhenTheTranscriptWindowSlides(t *testing.T) {
 func storeBlocks(store *transcriptStore) []timelineBlock {
 	blocks := make([]timelineBlock, 0, len(store.records))
 	for index := range store.records {
-		blocks = append(blocks, store.records[index].block)
+		blocks = append(blocks, *store.records[index].block)
 	}
 
 	return blocks

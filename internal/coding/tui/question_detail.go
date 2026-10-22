@@ -26,8 +26,8 @@ func newQuestionDetailView(block timelineBlock) toolDetailView {
 	}
 
 	rows := questionDetailHeaderRows(block)
-	spec, specOK := questionDetailSpec(activity)
-	result, _ := questionDetailResultFromActivity(activity)
+	spec, specOK := questionDetailSpec(*activity)
+	result, _ := questionDetailResultFromActivity(*activity)
 
 	if result.Chat != "" {
 		rows = append(rows, detailSection("Discussion"))
@@ -37,10 +37,10 @@ func newQuestionDetailView(block timelineBlock) toolDetailView {
 	switch {
 	case specOK:
 		rows = append(rows, questionDetailSpecRows(spec, result)...)
-	case isFreeformQuestionActivity(activity):
-		rows = append(rows, questionDetailTextRows(activity)...)
+	case isFreeformQuestionActivity(*activity):
+		rows = append(rows, questionDetailTextRows(*activity)...)
 	default:
-		rows = append(rows, questionDetailFallbackRows(block, activity)...)
+		rows = append(rows, questionDetailFallbackRows(block, *activity)...)
 	}
 
 	view.rows = clampDetailRows(rows, maximumToolDetailBytes)

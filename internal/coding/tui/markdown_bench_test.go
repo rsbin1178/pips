@@ -110,7 +110,7 @@ func BenchmarkLiveMarkdownRowsFrame(b *testing.B) {
 			for index := 0; b.Loop(); index++ {
 				body := base + fmt.Sprintf("frame %07d keeps streaming.\n\n", index)
 
-				rows, err := renderer.renderLiveRows("draft", body, 100, 0, themeDark, false)
+				rows, err := renderer.renderLiveRows("draft", body, 100, 0, themeDark, false, false)
 				if err != nil {
 					b.Fatal(err)
 				}

@@ -203,6 +203,19 @@ func (s *deferredStore) Entries() ([]harness.Entry, error) {
 	return s.store.Entries()
 }
 
+// EntryView implements [harness.StoreView] so the Harness Session shares this
+// store's single entry history instead of loading a second copy.
+func (s *deferredStore) EntryView() []harness.Entry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.store == nil {
+		return nil
+	}
+
+	return s.store.EntryView()
+}
+
 func (s *deferredStore) Record() MetadataRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
