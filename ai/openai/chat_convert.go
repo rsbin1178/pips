@@ -590,6 +590,10 @@ func responseFromChat(body chatResponse, raw []byte, provider ai.Provider) (*ai.
 	}
 
 	choice := body.Choices[0]
+	meta := &ai.Response{Provider: provider, ID: body.ID, Model: body.Model, FinishReason: finishReasonFromChat(choice.FinishReason), Usage: usageFromChat(body.Usage)}
+	if cause := chatRejection(choice); cause != nil {
+		return meta, ai.NewResponseError(cause, meta, choice.FinishReason != "")
+	}
 	msg := ai.AssistantMessage{}
 
 	switch {
@@ -647,7 +651,7 @@ func finishReasonFromChat(reason string) ai.FinishReason {
 		return ai.FinishLength
 	case "tool_calls", typeFunctionCall:
 		return ai.FinishToolCalls
-	case "content_filter":
+	case string(ai.FinishContentFilter):
 		return ai.FinishContentFilter
 	case "":
 		return ""
@@ -702,4 +706,25 @@ func chatCachedTokens(u *chatUsage) int {
 	}
 
 	return u.PromptCacheHitTokens
+}
+
+func chatRejection(choice chatChoice) error {
+	if choice.FinishReason == string(ai.FinishContentFilter) {
+		return ai.ErrContentFiltered
+	}
+	if choice.Message.Refusal != "" {
+		return ai.ErrRefused
+	}
+	if choice.FinishReason == "" {
+		return ai.ErrIncompleteStream
+	}
+	if choice.FinishReason == string(ai.FinishLength) {
+		return nil
+	}
+	for _, call := range choice.Message.ToolCalls {
+		if call.ID == "" || call.Function.Name == "" || !json.Valid([]byte(call.Function.Arguments)) {
+			return ai.ErrIncompleteStream
+		}
+	}
+	return nil
 }

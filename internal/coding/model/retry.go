@@ -70,5 +70,5 @@ func withCodingRetry(
 	)
 	retryOptions = append(retryOptions, options...)
 
-	return ai.Chain(model, retry.New(retryOptions...))
+	return ai.Chain(RequireOutput(model), retry.New(retryOptions...))
 }

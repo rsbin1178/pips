@@ -639,8 +639,8 @@ type State struct {
 	LastError        *RuntimeError                   `json:"last_error,omitempty"`
 	Tree             SessionTree                     `json:"tree"`
 	Compaction       CompactionState                 `json:"compaction"`
-	// Retry is the live retry notice for the run in flight; the next event of
-	// any other kind clears it, because any of them ends the wait.
+	// Retry is the live retry notice for the run in flight. Its accompanying
+	// response diagnostic preserves the wait; the next attempt's events clear it.
 	Retry         RetryState        `json:"retry,omitzero"`
 	ContextTokens int               `json:"context_tokens"`
 	Tasks         tasklist.Snapshot `json:"tasks"`
@@ -772,9 +772,12 @@ func (state State) Clone() State {
 	}
 
 	cloned.Diagnostics = slices.Clone(state.Diagnostics)
+	for index := range cloned.Diagnostics {
+		cloned.Diagnostics[index].Response = cloneModelResponseFailure(cloned.Diagnostics[index].Response)
+	}
 	cloned.Tree = state.Tree.Clone()
 	if state.LastError != nil {
-		lastError := *state.LastError
+		lastError := cloneRuntimeError(*state.LastError)
 		cloned.LastError = &lastError
 	}
 
@@ -905,9 +908,12 @@ func (state *State) reduce(event Event) error {
 		return protocolError("session changed from %q to %q", state.SessionID, event.SessionID)
 	}
 
-	// A retry notice stands only until the next event: whatever follows ends
-	// the wait it announced.
-	if event.Type != EventModelRetry {
+	// The diagnostic accompanying a retry describes the failed attempt; the
+	// next attempt's output or lifecycle event ends the announced wait.
+	diagnostic, retryDiagnostic := event.Payload.(IntegrationDiagnostic)
+	preservesRetry := retryDiagnostic && diagnostic.Component == "model" &&
+		diagnostic.Response != nil && diagnostic.Response.Attempt > 0
+	if event.Type != EventModelRetry && !preservesRetry {
 		state.Retry = RetryState{}
 	}
 
@@ -1540,6 +1546,7 @@ func (state *State) apply(event Event) error {
 
 		state.Phase = payload.Phase
 	case IntegrationDiagnostic:
+		payload.Response = cloneModelResponseFailure(payload.Response)
 		state.Diagnostics = appendShared(state.Diagnostics, payload)
 		if len(state.Diagnostics) > maxRecentDiagnostics {
 			state.Diagnostics = appendShared(
@@ -1547,7 +1554,7 @@ func (state *State) apply(event Event) error {
 			)
 		}
 	case RuntimeError:
-		lastError := payload
+		lastError := cloneRuntimeError(payload)
 
 		state.LastError = &lastError
 		if payload.Fatal {

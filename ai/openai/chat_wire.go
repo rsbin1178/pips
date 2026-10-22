@@ -135,6 +135,7 @@ type chatChoice struct {
 }
 
 type chatChoiceMessage struct {
+	Refusal          string            `json:"refusal,omitempty"`
 	Role             string            `json:"role,omitempty"`
 	Content          *json.RawMessage  `json:"content"`
 	ToolCalls        []chatToolCall    `json:"tool_calls,omitempty"`

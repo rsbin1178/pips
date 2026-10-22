@@ -13,6 +13,11 @@ Provider 非 2xx 响应通常返回 `*ai.Error`，并包装一个跨 Provider se
 | `ai.ErrRateLimited` | HTTP 429 | 是 |
 | `ai.ErrOverloaded` | HTTP 408、5xx、Anthropic 529 | 是 |
 | `ai.ErrInvalidRequest` | 其他 4xx，例如 400/404/422 | 否 |
+| `ai.ErrIncompleteStream` | 缺少可靠终止标记的响应流 | 是 |
+| `ai.ErrEmptyResponse` | 应用要求答案，但模型没有交付正文或工具调用 | 是 |
+| `ai.ErrContentFiltered` / `ai.ErrRefused` | 明确过滤或拒绝 | 否 |
+| `ai.ErrResponseTruncated` | 输出限额耗尽且没有可交付答案 | 否 |
+| `ai.ErrResponseFailed` | Provider 明确报告生成失败 | 是，仍受输出状态和预算限制 |
 
 先用 `errors.Is` 做可移植分支，再用 `errors.As` 读取诊断字段：
 
@@ -82,7 +87,11 @@ model := ai.Chain(base, retry.New(
 - Sleep 响应 `context` 取消与截止时间。
 - 只重试 `ai.IsRetryable` 判定的错误。
 
-流式调用只有在第一个事件出现前失败才可能重试。一旦任何事件已交给消费者，后续错误原样返回，不重放 Prompt，从而避免重复文本或 Tool Call。
+流式调用只重放尚未交付实际输出的尝试。`message_start` 会暂存到实际输出或完整结束，因此仅收到开始事件后发生的故障也能重试。正文、推理或 Tool Call 已经交给消费者后，后续错误原样返回，由外层显式恢复策略处理，避免中间件重复输出。
+
+Coding 在重试中间件内侧启用答案校验：完整响应没有正文或工具调用时返回 `ai.ErrEmptyResponse`，只有 reasoning 也属于此类。独立 SDK 的 `Collect` 仍允许完整的 reasoning-only 响应。明确拒绝、内容过滤和输出上限分别处理，不能一律归为空响应重试。`*ai.ResponseError` 提供不含正文或工具参数的诊断摘要；持久化时仍需限制标识符长度并遵守应用的导出策略。
+
+Coding 的中间件重放与 Agent 可丢弃候选恢复共用一个 turn 内的十次重试额度，避免两层计数重置后放大调用次数。可见正文或工具候选仍使用独立的三次恢复额度；两层共用从首次安排恢复起计算的时间窗口。
 
 `WithSleep` 和 `WithJitter` 主要用于确定性测试。生产代码通常不应去掉真实等待；否则可能形成重试风暴。
 

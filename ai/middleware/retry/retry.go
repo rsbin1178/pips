@@ -3,7 +3,7 @@
 //
 // Only retryable failures are retried (see [ai.IsRetryable]); a provider's
 // Retry-After delay is honored when present. Streaming is retried only before
-// the first event is produced — once output has been observed, replaying the
+// the first output is produced — once output has been observed, replaying the
 // request could duplicate content, so the original error is surfaced instead.
 // Each streaming re-attempt is announced with one [ai.StreamRetry] event.
 //
@@ -151,6 +151,10 @@ func (m *model) Generate(ctx context.Context, req ai.Request) (*ai.Response, err
 	var lastErr error
 
 	for attempt := range m.cfg.maxAttempts {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		resp, err := m.LanguageModel.Generate(ctx, req)
 		if err == nil {
 			return resp, nil
@@ -161,8 +165,14 @@ func (m *model) Generate(ctx context.Context, req ai.Request) (*ai.Response, err
 			return resp, err
 		}
 
-		if m.spent(started) {
+		if m.replayWindowSpent(ctx, started) {
 			return resp, err
+		}
+
+		if allowance, ok := ai.RetryAllowanceFromContext(ctx); ok {
+			if _, allowed := allowance.Claim(); !allowed {
+				return resp, err
+			}
 		}
 
 		if err := m.cfg.sleep(ctx, m.backoff(attempt, err)); err != nil {
@@ -173,8 +183,8 @@ func (m *model) Generate(ctx context.Context, req ai.Request) (*ai.Response, err
 	return nil, lastErr
 }
 
-// Stream retries only before any event is produced. Once the first event
-// arrives the stream is passed through verbatim.
+// Stream retries only before output is produced. A message start is held until
+// the attempt produces output, so a failed start cannot leak into the next try.
 //
 // Every re-attempt is announced with one [ai.StreamRetry] event carrying the
 // attempt that is about to start and the backoff before it, so a consumer can
@@ -184,13 +194,22 @@ func (m *model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 		started := m.cfg.clock.Now()
 
 		for attempt := range m.cfg.maxAttempts {
+			if err := ctx.Err(); err != nil {
+				yield(ai.StreamEvent{}, err)
+				return
+			}
+
 			retriable, err := m.streamAttempt(ctx, req, yield)
 			if err == nil {
 				return // stream finished (successfully or consumer stopped)
 			}
 
-			// A pre-first-event error may be retryable; anything after the
-			// first event is terminal and was already yielded.
+			if ctx.Err() != nil {
+				yield(ai.StreamEvent{}, ctx.Err())
+				return
+			}
+
+			// Only an attempt that exposed no output belongs to this owner.
 			if !retriable || !ai.IsRetryable(err) || attempt == m.cfg.maxAttempts-1 {
 				yield(ai.StreamEvent{}, err)
 				return
@@ -198,22 +217,25 @@ func (m *model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 
 			// The episode has spent its window, so an attempt that would exceed
 			// it is never announced or started: the failure stands as it is.
-			if m.spent(started) {
+			if m.replayWindowSpent(ctx, started) {
 				yield(ai.StreamEvent{}, err)
 				return
 			}
 
-			delay := m.backoff(attempt, err)
-			// attempt is zero-based, so this is retry attempt+1 of the
-			// maxAttempts-1 replays the configuration allows.
+			notice := m.replayNotice(ctx, attempt, err)
+			if notice == nil {
+				yield(ai.StreamEvent{}, err)
+				return
+			}
+
 			if !yield(ai.StreamEvent{
 				Type:  ai.StreamRetry,
-				Retry: ai.NewRetryNotice(attempt+1, m.cfg.maxAttempts-1, delay, err),
+				Retry: notice,
 			}, nil) {
 				return
 			}
 
-			if sleepErr := m.cfg.sleep(ctx, delay); sleepErr != nil {
+			if sleepErr := m.cfg.sleep(ctx, notice.Delay); sleepErr != nil {
 				yield(ai.StreamEvent{}, sleepErr)
 				return
 			}
@@ -221,31 +243,87 @@ func (m *model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 	}
 }
 
+func (m *model) replayNotice(ctx context.Context, attempt int, err error) *ai.RetryNotice {
+	retryAttempt, retryLimit := attempt+1, m.cfg.maxAttempts-1
+
+	if allowance, ok := ai.RetryAllowanceFromContext(ctx); ok {
+		var allowed bool
+
+		retryAttempt, allowed = allowance.Claim()
+		if !allowed {
+			return nil
+		}
+
+		if retryLimit < allowance.Limit() {
+			retryAttempt = attempt + 1
+		} else {
+			retryLimit = allowance.Limit()
+		}
+	}
+
+	return ai.NewRetryNotice(retryAttempt, retryLimit, m.backoff(attempt, err), err)
+}
+
 // streamAttempt runs one streaming attempt. It returns retriable=true with a
-// non-nil error only when the failure happened before any event was yielded;
+// non-nil error only when the failure happened before output was yielded;
 // in that case the caller may retry without having emitted anything.
 func (m *model) streamAttempt(ctx context.Context, req ai.Request, yield func(ai.StreamEvent, error) bool) (retriable bool, err error) {
 	produced := false
+	ended := false
+
+	var pending *ai.StreamEvent
 
 	for ev, streamErr := range m.LanguageModel.Stream(ctx, req) {
 		if streamErr != nil {
-			if !produced {
-				return true, streamErr
-			}
-			// Already streaming: surface the error to the consumer as-is.
-			yield(ai.StreamEvent{}, streamErr)
-
-			return false, nil
+			return !produced, streamErr
 		}
 
-		produced = true
+		if ev.Type == ai.StreamMessageStart && !produced {
+			pending = &ev
+			continue
+		}
+
+		if ev.Type != ai.StreamRetry {
+			if pending != nil {
+				if !yield(*pending, nil) {
+					return false, nil
+				}
+
+				pending = nil
+			}
+
+			produced = true
+		}
+
+		ended = ended || ev.Type == ai.StreamMessageEnd
 
 		if !yield(ev, nil) {
 			return false, nil // consumer stopped
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	if !ended {
+		var resp *ai.Response
+		if pending != nil {
+			resp = &ai.Response{Provider: pending.Provider, Model: pending.Model, ID: pending.ID}
+		}
+
+		return !produced, ai.NewResponseError(ai.ErrIncompleteStream, resp, false)
+	}
+
 	return false, nil
+}
+
+func (m *model) replayWindowSpent(ctx context.Context, started time.Time) bool {
+	if allowance, ok := ai.RetryAllowanceFromContext(ctx); ok {
+		return allowance.Expired()
+	}
+
+	return m.spent(started)
 }
 
 // spent reports whether the replay episode that began at started has used up its

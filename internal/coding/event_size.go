@@ -38,8 +38,12 @@ func eventByteSize(event Event) int {
 		size += len(payload.TaskPreview) + len(payload.Model)
 	case IntegrationDiagnostic:
 		size += len(payload.Message) + len(payload.Code)
+		size += modelResponseFailureBytes(payload.Response)
+	case ModelRetry:
+		size += len(payload.Reason) + modelResponseFailureBytes(payload.Response)
 	case RuntimeError:
 		size += len(payload.Message)
+		size += modelResponseFailureBytes(payload.Response)
 	default:
 		// Lifecycle payloads are bounded counters and identifiers.
 	}

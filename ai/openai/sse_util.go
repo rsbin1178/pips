@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -44,6 +45,55 @@ func (m *Model) runStream(ctx context.Context, path, label string, body any, bui
 		}
 		defer stream.Close() //nolint:errcheck // best-effort cleanup on all exit paths
 
-		emit(m.provider, newSSEParser(stream, m.client.MaxStreamLineSize()), yield)
+		emit(m.provider, newSSEParser(stream, m.client.MaxStreamLineSize()), withResponseDiagnostics(m.provider, m.model, yield))
 	}
+}
+
+// withResponseDiagnostics attaches bounded counters without retaining model output.
+func withResponseDiagnostics(provider ai.Provider, model string, yield func(ai.StreamEvent, error) bool) func(ai.StreamEvent, error) bool {
+	summary := ai.ResponseError{Provider: provider, Model: model}
+
+	return func(ev ai.StreamEvent, err error) bool {
+		if err != nil {
+			if responseErr, ok := errors.AsType[*ai.ResponseError](err); ok {
+				err = mergeResponseDiagnostics(responseErr, summary)
+			}
+
+			return yield(ev, err)
+		}
+
+		switch ev.Type {
+		case ai.StreamMessageStart:
+			summary.ResponseID = ev.ID
+		case ai.StreamTextDelta:
+			summary.TextBytes += len(ev.Text)
+		case ai.StreamReasoningDelta:
+			summary.HasReasoning = true
+		case ai.StreamToolCallStart:
+			summary.ToolCalls++
+		default:
+		}
+
+		return yield(ev, nil)
+	}
+}
+
+func mergeResponseDiagnostics(failure *ai.ResponseError, summary ai.ResponseError) *ai.ResponseError {
+	clone := *failure
+	if clone.Provider == "" {
+		clone.Provider = summary.Provider
+	}
+
+	if clone.Model == "" {
+		clone.Model = summary.Model
+	}
+
+	if clone.ResponseID == "" {
+		clone.ResponseID = summary.ResponseID
+	}
+
+	clone.TextBytes, clone.ToolCalls = max(clone.TextBytes, summary.TextBytes), max(clone.ToolCalls, summary.ToolCalls)
+	clone.HasReasoning = clone.HasReasoning || summary.HasReasoning
+
+	return &clone
 }

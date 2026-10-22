@@ -116,6 +116,8 @@ type StreamEvent struct {
 // Attempt is the retry ordinal — 1 for the first replay — and MaxRetries is
 // the retry budget, so "1/10" reads as the first of at most ten replays.
 type RetryNotice struct {
+	// Response is a content-free summary when a response was rejected.
+	Response *ResponseError
 	// Attempt is the 1-based ordinal of the retry that is about to start.
 	Attempt int
 	// MaxRetries is the budget of retries available, so Attempt <= MaxRetries.
@@ -132,6 +134,7 @@ type RetryNotice struct {
 // error. Retry events are ignored: they report a wait, not output.
 func Collect(stream Stream) (*Response, error) {
 	acc := newAccumulator()
+	ended := false
 
 	for ev, err := range stream {
 		if err != nil {
@@ -139,9 +142,15 @@ func Collect(stream Stream) (*Response, error) {
 		}
 
 		acc.add(ev)
+		ended = ended || ev.Type == StreamMessageEnd
 	}
 
-	return acc.response(), nil
+	resp := acc.response()
+	if !ended {
+		return resp, NewResponseError(ErrIncompleteStream, resp, false)
+	}
+
+	return resp, nil
 }
 
 // accumulator folds StreamEvents into a Response. Provider adapters and the

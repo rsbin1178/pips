@@ -177,9 +177,14 @@ func projectSafePayload(payload EventPayload) EventPayload {
 		return value
 	case IntegrationDiagnostic:
 		value.Message = ""
+		value.Response = nil
+		return value
+	case ModelRetry:
+		value.Response = nil
 		return value
 	case RuntimeError:
 		value.Message = ""
+		value.Response = nil
 		return value
 	default:
 		return cloneEventPayload(payload)

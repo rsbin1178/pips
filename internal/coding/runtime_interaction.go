@@ -1353,6 +1353,12 @@ func (r *Runtime) driveHarness(
 
 			if retry, ok := projected.Payload.(ModelRetry); ok {
 				current.recordRetry(retry.Reason)
+				if retry.Response != nil {
+					if err := emitter.emit(current.id, event.RunID, EventIntegrationDiagnostic,
+						modelRetryDiagnostic(retry)); err != nil {
+						return "", err
+					}
+				}
 			}
 
 			if completed, ok := projected.Payload.(RunCompleted); ok {
@@ -1478,17 +1484,7 @@ func (r *Runtime) emitRunError(
 	outcome InteractionOutcome,
 	emitter *eventEmitter,
 ) error {
-	code := "run_failed"
-	message := "Agent run failed"
-	if outcome == InteractionCanceled || errors.Is(runErr, context.Canceled) ||
-		errors.Is(runErr, errConsumerStopped) {
-		code = "run_canceled"
-		message = "Agent run was canceled"
-	}
-
-	return emitter.emit(current.id, current.activeRunID, EventError, RuntimeError{
-		Code: code, Message: message, Fatal: true,
-	})
+	return emitter.emit(current.id, current.activeRunID, EventError, modelRuntimeError(runErr, outcome))
 }
 
 //nolint:gocyclo,nestif // Input-owner recovery is intentionally ordered and exclusive.

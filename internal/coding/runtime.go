@@ -413,6 +413,8 @@ func openRuntime(
 		if err != nil {
 			return nil, err
 		}
+	} else {
+		baseModel = model.RequireOutput(baseModel)
 	}
 	if baseModel.Provider() != resolved.Ref.Provider ||
 		baseModel.ModelID() != resolved.Ref.Model {
