@@ -225,6 +225,11 @@ func (m *Model) helpShortcutLines() []statusPageLine {
 
 	return append(lines,
 		statusBlank(),
+		statusHeading("Pending requests"),
+		statusField("enter / tab while running", "queue after the complete current request"),
+		statusField("N queued", "waiting requests plus the queued request still executing"),
+		statusField("/queue resume / discard", "continue or remove unsent requests after a failure or cancellation"),
+		statusBlank(),
 		statusHeading("The draft"),
 		statusField("wheel over the draft", "scroll a draft taller than its box"),
 		statusField("home / end", "start / end of the line"),

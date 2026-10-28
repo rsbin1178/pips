@@ -400,7 +400,7 @@ func TestReadyPasteFollowsRouteInputPrecedence(t *testing.T) {
 	assert.Empty(t, model.composer.Value())
 }
 
-func TestReadyQueueFailureRestoresProtectedSnapshot(t *testing.T) {
+func TestReadyFullQueueKeepsProtectedSnapshot(t *testing.T) {
 	t.Parallel()
 
 	state := readyState()
@@ -413,6 +413,7 @@ func TestReadyQueueFailureRestoresProtectedSnapshot(t *testing.T) {
 		err: errors.New("queue refused"),
 	}
 	model := readyModelWithController(t, controller, true)
+	model.queued = maximumQueuedRequests
 	content := strings.Repeat("payload\n", 9)
 	model.Update(tea.PasteMsg{Content: content})
 	before := model.composer.Snapshot()
@@ -421,7 +422,8 @@ func TestReadyQueueFailureRestoresProtectedSnapshot(t *testing.T) {
 	require.NotNil(t, command)
 	model.Update(command())
 	assert.Equal(t, before, model.composer.Snapshot())
-	assert.ErrorIs(t, model.streamErr, controller.err)
+	require.Error(t, model.streamErr)
+	assert.Contains(t, model.streamErr.Error(), "queue is full")
 	assert.Empty(t, model.composer.history)
 }
 

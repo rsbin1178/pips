@@ -40,7 +40,8 @@ type eventBridge struct {
 }
 
 type bridgeStartedMsg struct {
-	bridge *eventBridge
+	bridge     *eventBridge
+	generation uint64
 }
 
 type streamItemMsg struct {

@@ -1775,6 +1775,23 @@ wait for the turn to finish and say so, and `/plan`, `/mode`, `/permissions`,
 `/model`, `/new`, `/resume`, `/fork`, `/reload`, `/compact`, `/review` and
 `Shift+Tab` remain idle-only.
 
+While a request runs, `Enter` and `Tab` put composer messages into a FIFO
+queue. Each message starts a separate request after the preceding request has
+finished, including its final answer and cleanup. Tool completion and model
+retries do not send the next message. `N queued` includes a queued message while
+it runs: if B and C are queued behind A, it stays at 2 while B runs, falls to 1
+when B finishes, and reaches 0 when C finishes. Waiting for an approval or a
+question keeps that request counted.
+The queue accepts up to 64 outstanding messages; reaching the limit leaves the
+composer draft available for editing or later submission.
+
+Failure or cancellation pauses automatic sending and preserves unsent messages.
+Use `/queue` to inspect the queue, `/queue resume` to continue sending, or
+`/queue discard` to remove unsent messages. Resuming does not repeat a request
+that has already run; discarding does not cancel a running request. The queue
+belongs to the current interactive Session and is cleared when switching
+Sessions. Pending messages are held in memory and do not survive exit.
+
 Every model request also carries the session ID as the provider's prompt-cache
 routing key, so requests from one conversation stay on the same cache and a
 resumed session keeps reusing the cache it built. It is sent as

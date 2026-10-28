@@ -61,24 +61,11 @@ type bootstrapResult struct {
 	err        error
 }
 
-type controllerCommand string
-
-const (
-	commandSteer    controllerCommand = "steer"
-	commandFollowUp controllerCommand = "follow_up"
-)
-
-type controllerCommandMsg struct {
-	snapshot composerSnapshot
-	err      error
-}
-
 type submissionKind uint8
 
 const (
 	submissionPrompt submissionKind = iota
-	submissionSteer
-	submissionFollowUp
+	submissionQueued
 )
 
 type composerResolvedMsg struct {
@@ -91,6 +78,7 @@ type composerResolvedMsg struct {
 
 type cancelResultMsg struct {
 	bridge      *eventBridge
+	generation  uint64
 	beforeStart bool
 	err         error
 }
@@ -225,6 +213,7 @@ type Model struct {
 	// to report a silent model instead of looking merely slow.
 	lastModelEventAt    time.Time
 	starting            bool
+	streamSeq           uint64
 	cancelStart         bool
 	waiting             bool
 	streamErr           error
@@ -235,6 +224,7 @@ type Model struct {
 	clipboardGeneration uint64
 	clipboardCancel     context.CancelFunc
 	queued              int
+	requests            requestQueue
 	canceling           bool
 	exitArmed           bool
 	bannerPrinted       bool
@@ -492,6 +482,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.observedSequence = m.state.Sequence
 		m.rebaseCompletionMarkers()
 		if previousSessionID != m.state.SessionID {
+			m.resetRequestQueue()
 			m.stopTeamWorkerRouteSubscription()
 			m.resetTeamProjection(m.state.SessionID)
 			m.resetTasksPane()
@@ -509,11 +500,17 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.loadPausedSubagentControls(),
 			m.loadPlanViewIfNeeded(),
 			m.startActivityClock(activityWasVisible),
+			m.requestAdvanceCommand(),
 		)
 		return m, m.afterScrollback(commit, wait)
 	case subscriptionEventMsg:
 		return m.updateSubscription(message)
 	case bridgeStartedMsg:
+		if message.generation != m.streamSeq {
+			message.bridge.once.Do(message.bridge.cancel)
+
+			return m, nil
+		}
 		m.starting = false
 		if m.bridge != nil {
 			message.bridge.once.Do(message.bridge.cancel)
@@ -528,6 +525,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.setLayout()
 		if m.cancelStart {
 			m.cancelStart = false
+			m.waiting = false
 
 			return m, tea.Batch(m.stopBridge(message.bridge), m.activity.Tick())
 		}
@@ -535,20 +533,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(message.bridge.wait(), m.activity.Tick())
 	case streamItemMsg:
 		return m.updateStream(message)
-	case controllerCommandMsg:
-		if message.err != nil {
-			m.streamErr = message.err
-			if m.composer.Value() == "" {
-				m.streamErr = errors.Join(m.streamErr, m.composer.Restore(message.snapshot))
-			}
-		} else {
-			m.queued++
-			if err := m.composer.RecordHistory(message.snapshot); err != nil {
-				m.streamErr = errors.Join(m.streamErr, err)
-			}
-		}
-		m.setLayout()
-		return m, m.commitStableTimeline()
+	case requestAdvanceMsg:
+		return m, m.advanceRequestQueue(message)
 	case composerResolvedMsg:
 		if !m.composerResolving || message.generation != m.composerResolveSeq {
 			return m, nil
@@ -562,7 +548,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamErr = message.err
 			m.setLayout()
 
-			return m, m.commitStableTimeline()
+			return m, m.afterScrollback(m.commitStableTimeline(), m.requestAdvanceCommand())
 		}
 
 		return m, m.dispatchSubmission(message.kind, message.snapshot, message.message)
@@ -587,6 +573,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case goalControlResultMsg:
 		return m.applyGoalControl(message)
 	case cancelResultMsg:
+		if message.generation != m.streamSeq {
+			return m, nil
+		}
 		if message.beforeStart {
 			m.streamErr = errors.Join(m.streamErr, message.err)
 			if !m.subscriptionMode {
@@ -598,8 +587,32 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.setLayout()
 			return m, m.commitStableTimeline()
 		}
-		if m.bridge != nil && message.bridge != nil && message.bridge != m.bridge {
-			return m, nil
+		if message.bridge != nil && message.bridge != m.bridge {
+			if !m.canceling || m.bridge != nil {
+				return m, nil
+			}
+			m.canceling = false
+			m.streamErr = errors.Join(m.streamErr, message.err)
+			m.setLayout()
+
+			return m, m.afterScrollback(m.commitStableTimeline(), m.requestAdvanceCommand())
+		}
+		if message.bridge != nil {
+			select {
+			case <-message.bridge.stopped():
+			default:
+				m.canceling = false
+				m.streamErr = errors.Join(m.streamErr, message.err)
+				m.setLayout()
+				commit := m.commitStableTimeline()
+				if !m.waiting {
+					m.waiting = true
+
+					return m, m.afterScrollback(commit, message.bridge.wait())
+				}
+
+				return m, commit
+			}
 		}
 		m.bridge = nil
 		m.waiting = false
@@ -612,6 +625,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.syncApprovalPrompt()
 		m.clearCompletedDirectAgent()
+		m.finishRequestOperation()
 		m.setLayout()
 		return m, m.commitStableTimeline()
 	case subagentRouteDataMsg:
@@ -900,6 +914,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch message.operation {
 		case operationNew, operationResume, operationFork:
+			m.resetRequestQueue()
 			m.completionMarkers = nil
 			m.transcriptHanded = false
 			m.resetTeamProjection(m.state.SessionID)
@@ -1348,6 +1363,8 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.composerResolving = false
 			m.composerResolveSeq++
 			m.setLayout()
+
+			return m, m.afterScrollback(m.commitStableTimeline(), m.requestAdvanceCommand())
 		}
 
 		return m, nil
@@ -1464,7 +1481,7 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case actionSubmit:
 			return m, m.submit(context)
 		case actionFollowUp:
-			return m, m.queueMessage(commandFollowUp)
+			return m, m.queueMessage()
 		case actionToggleTool:
 			return m, m.toggleLatestTool()
 		case actionToggleMouseCapture:
@@ -2029,6 +2046,9 @@ func (m *Model) statusExtras() []string {
 	}
 	if m.queued > 0 {
 		extras = append(extras, fmt.Sprintf("%d queued", m.queued))
+		if m.requests.paused {
+			extras = append(extras, "queue paused · /queue resume or discard")
+		}
 	}
 	// While the runtime is idle and something is still running, the cue stands
 	// in for the tasks pane the automatic rule may have closed (or that a short
@@ -2861,7 +2881,7 @@ func actionContextFor(state coding.State) actionContext {
 }
 
 func (m *Model) actionContext() actionContext {
-	if m.starting || m.bridge != nil {
+	if m.starting || m.bridge != nil || m.canceling {
 		return contextRunning
 	}
 
@@ -2888,24 +2908,18 @@ func (m *Model) submit(actionCtx actionContext) tea.Cmd {
 			return nil
 		}
 
-		return m.prepareSubmission(submissionSteer, snapshot)
+		return m.prepareSubmission(submissionQueued, snapshot)
 	default:
 		return nil
 	}
 }
 
-func (m *Model) queueMessage(kind controllerCommand) tea.Cmd {
+func (m *Model) queueMessage() tea.Cmd {
 	if m.directAgent != nil && m.directAgent.running {
 		return nil
 	}
 
-	snapshot := m.composer.Snapshot()
-	submission := submissionSteer
-	if kind == commandFollowUp {
-		submission = submissionFollowUp
-	}
-
-	return m.prepareSubmission(submission, snapshot)
+	return m.prepareSubmission(submissionQueued, m.composer.Snapshot())
 }
 
 func (m *Model) prepareSubmission(
@@ -2923,6 +2937,7 @@ func (m *Model) prepareSubmission(
 		m.composerResolveSeq++
 		generation := m.composerResolveSeq
 		resolveCtx, cancel := context.WithCancel(m.ctx)
+		resolveFile := m.controller.ResolveWorkspaceFile
 		m.composerCancel = cancel
 		m.composerResolving = true
 		m.streamErr = nil
@@ -2933,7 +2948,7 @@ func (m *Model) prepareSubmission(
 				resolveCtx,
 				snapshot,
 				vision,
-				m.controller.ResolveWorkspaceFile,
+				resolveFile,
 			)
 
 			return composerResolvedMsg{
@@ -2963,47 +2978,38 @@ func (m *Model) dispatchSubmission(
 	snapshot composerSnapshot,
 	message ai.Message,
 ) tea.Cmd {
-	if kind == submissionPrompt {
-		if err := m.composer.RecordHistory(snapshot); err != nil {
-			return m.publishRefusal(err)
-		}
-		m.composer.Reset()
-		m.setLayout()
-		m.streamErr = nil
-
-		return m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
-			return m.controller.Prompt(ctx, message)
-		})
+	if kind == submissionQueued || m.queued > 0 || m.canceling {
+		return m.enqueueRequest(snapshot, message)
 	}
-
+	if err := m.composer.RecordHistory(snapshot); err != nil {
+		return m.publishRefusal(err)
+	}
 	m.composer.Reset()
 	m.setLayout()
+	m.streamErr = nil
+	m.requests.paused = false
+	controller := m.controller
 
-	return func() tea.Msg {
-		var commandErr error
-		if kind == submissionFollowUp {
-			commandErr = m.controller.FollowUp(message)
-		} else {
-			commandErr = m.controller.Steer(message)
-		}
-
-		return controllerCommandMsg{
-			snapshot: snapshot, err: commandErr,
-		}
-	}
+	return m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
+		return controller.Prompt(ctx, message)
+	})
 }
 
 func (m *Model) startStream(operation streamOperation) tea.Cmd {
-	if m.bridge != nil || m.starting {
+	if m.bridge != nil || m.starting || m.canceling {
 		return nil
 	}
 	m.activity.Reset()
+	m.requests.operationFailed = false
 	m.canceling = false
 	m.starting = true
+	m.streamSeq++
+	generation := m.streamSeq
+	parent := m.ctx
 	m.setLayout()
 
 	return func() tea.Msg {
-		return bridgeStartedMsg{bridge: startBridge(m.ctx, operation)}
+		return bridgeStartedMsg{bridge: startBridge(parent, operation), generation: generation}
 	}
 }
 
@@ -3030,6 +3036,7 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 	if !message.ok {
 		return m, m.finishStream()
 	}
+	m.observeRequestEvent(message.item.event)
 
 	if m.subscriptionMode && message.item.err == nil {
 		// The subscription is the parent projection's source and already received
@@ -3048,6 +3055,9 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 	batch = append(batch, message.item)
 	batch = append(batch, message.bridge.drainBatch(streamBatchMax-1, streamBatchBudget)...)
 	m.streamItems += len(batch)
+	for _, item := range batch[1:] {
+		m.observeRequestEvent(item.event)
+	}
 
 	advanced := m.queueStreamBatch(batch)
 	if advanced {
@@ -3150,6 +3160,7 @@ func (m *Model) reduceStreamBatch(items []streamItem) {
 	}
 
 	if previousSessionID != m.state.SessionID {
+		m.resetRequestQueue()
 		m.stopTeamWorkerRouteSubscription()
 		m.resetTeamProjection(m.state.SessionID)
 		m.resetSubagentInteractions()
@@ -3341,6 +3352,7 @@ func (m *Model) adoptRuntimeState(last coding.Event) bool {
 
 // failStream records a stream failure and stops the running bridge.
 func (m *Model) failStream(err error) {
+	m.requests.operationFailed = true
 	m.streamErr = err
 	if m.bridge != nil {
 		m.bridge.once.Do(m.bridge.cancel)
@@ -3362,6 +3374,7 @@ func (m *Model) observeStreamEvent(event coding.Event) {
 	m.trackInteractionRun(event)
 	switch event.Type {
 	case coding.EventSessionNavigated:
+		m.resetRequestQueue()
 		// A new conversation replaces what the main buffer holds, so the exit
 		// handoff may write it again. Compaction keeps the flag: the rows the
 		// escape hatch already printed are still on the screen.
@@ -3634,6 +3647,7 @@ func (m *Model) finishStream() tea.Cmd {
 				m.state.Sequence,
 				snapshot.Sequence,
 			)
+			m.requests.operationFailed = true
 		}
 		m.state = snapshot
 	}
@@ -3642,14 +3656,21 @@ func (m *Model) finishStream() tea.Cmd {
 	m.bridge = nil
 	m.starting = false
 	m.waiting = false
-	m.queued = 0
+	m.finishRequestOperation()
 	m.setLayout()
 
-	return m.commitStableTimeline()
+	return m.afterScrollback(m.commitStableTimeline(), m.requestAdvanceCommand())
 }
 
 func (m *Model) cancelStream() tea.Cmd {
+	if m.canceling {
+		return nil
+	}
+	m.requests.paused = true
 	bridge := m.bridge
+	generation := m.streamSeq
+	controller := m.controller
+	parent := m.ctx
 	beforeStart := bridge == nil && m.starting
 	if beforeStart {
 		m.cancelStart = true
@@ -3658,29 +3679,36 @@ func (m *Model) cancelStream() tea.Cmd {
 	m.setLayout()
 
 	return func() tea.Msg {
-		err := m.controller.Cancel()
+		if beforeStart {
+			return cancelResultMsg{generation: generation, beforeStart: true}
+		}
+		err := controller.Cancel()
 		if bridge != nil {
 			stopCtx, cancel := context.WithTimeout(
-				context.WithoutCancel(m.ctx),
+				context.WithoutCancel(parent),
 				controllerCloseTimeout,
 			)
 			err = errors.Join(err, bridge.stop(stopCtx))
 			cancel()
 		}
 
-		return cancelResultMsg{bridge: bridge, beforeStart: beforeStart, err: err}
+		return cancelResultMsg{bridge: bridge, generation: generation, beforeStart: beforeStart, err: err}
 	}
 }
 
 func (m *Model) stopBridge(bridge *eventBridge) tea.Cmd {
+	generation := m.streamSeq
+	parent := m.ctx
+	controller := m.controller
 	return func() tea.Msg {
+		err := controller.Cancel()
 		stopCtx, cancel := context.WithTimeout(
-			context.WithoutCancel(m.ctx),
+			context.WithoutCancel(parent),
 			controllerCloseTimeout,
 		)
 		defer cancel()
 
-		return cancelResultMsg{bridge: bridge, err: bridge.stop(stopCtx)}
+		return cancelResultMsg{bridge: bridge, generation: generation, err: errors.Join(err, bridge.stop(stopCtx))}
 	}
 }
 
@@ -3761,7 +3789,7 @@ func (m *Model) updateSubscription(message subscriptionEventMsg) (tea.Model, tea
 		commit = m.commitStableTimeline()
 	}
 
-	return m, m.afterScrollback(commit, wait, render, refresh)
+	return m, m.afterScrollback(commit, wait, render, refresh, m.requestAdvanceCommand())
 }
 
 // reduceObservedEvent applies one already-observed event. Batched updates use
