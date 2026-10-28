@@ -74,69 +74,80 @@ func boundedToolUpdateParts(parts []ai.Part, budget *updateBudget) []ai.Part {
 			break
 		}
 
-		switch value := part.(type) {
-		case ai.TextPart:
-			text, used := truncateToolUpdateText(value.Text, budget.bytes)
-			if text == "" {
-				continue
-			}
-			out = append(out, ai.TextPart{Text: text})
-			budget.bytes -= used
-		case ai.ReasoningPart:
-			text, used := truncateToolUpdateText(value.Text, budget.bytes)
-			if text == "" {
-				continue
-			}
-			// Progress reasoning is display text; its signature is never
-			// rendered and must not be retained here.
-			out = append(out, ai.ReasoningPart{Text: text})
-			budget.bytes -= used
-		case ai.ImagePart:
-			if len(value.Source.Data) == 0 || len(value.Source.Data) > budget.bytes {
-				continue
-			}
-			value.Source.Data = slices.Clone(value.Source.Data)
-			out = append(out, value)
-			budget.bytes -= len(value.Source.Data)
-		case ai.FilePart:
-			if len(value.Source.Data) == 0 || len(value.Source.Data) > budget.bytes {
-				continue
-			}
-			value.Source.Data = slices.Clone(value.Source.Data)
-			out = append(out, value)
-			budget.bytes -= len(value.Source.Data)
-		case ai.StructuredContentPart:
-			if len(value.Data) > budget.bytes {
-				continue
-			}
-			value.Data = slices.Clone(value.Data)
-			out = append(out, value)
-			budget.bytes -= len(value.Data)
-		case ai.EmbeddedResourcePart:
-			if len(value.Blob) > budget.bytes {
-				continue
-			}
-			value.Blob = slices.Clone(value.Blob)
-			out = append(out, value)
-			budget.bytes -= len(value.Blob)
-		case ai.ToolResultPart:
-			value.Content = boundedToolUpdateParts(value.Content, budget)
-			out = append(out, value)
-		case ai.ToolCallPart:
-			if len(value.Args) > budget.bytes {
-				continue
-			}
-			value.Args = slices.Clone(value.Args)
-			out = append(out, value)
-			budget.bytes -= len(value.Args)
-		default:
-			out = append(out, part)
+		bounded, keep := boundedToolUpdatePart(part, budget)
+		if !keep {
+			continue
 		}
+		out = append(out, bounded)
 
 		budget.parts--
 	}
 
 	return out
+}
+
+func boundedToolUpdatePart(part ai.Part, budget *updateBudget) (ai.Part, bool) {
+	switch value := part.(type) {
+	case ai.TextPart:
+		text, used := truncateToolUpdateText(value.Text, budget.bytes)
+		budget.bytes -= used
+		return ai.TextPart{Text: text}, text != ""
+	case ai.ReasoningPart:
+		text, used := truncateToolUpdateText(value.Text, budget.bytes)
+		budget.bytes -= used
+		// Progress reasoning is display text; never retain its signature.
+		return ai.ReasoningPart{Text: text}, text != ""
+	default:
+		return boundedToolUpdateContent(part, budget)
+	}
+}
+
+func boundedToolUpdateContent(part ai.Part, budget *updateBudget) (ai.Part, bool) {
+	switch value := part.(type) {
+	case ai.ImagePart:
+		if !reserveToolUpdateBytes(len(value.Source.Data), budget, false) {
+			return nil, false
+		}
+		value.Source.Data = slices.Clone(value.Source.Data)
+		return value, true
+	case ai.FilePart:
+		if !reserveToolUpdateBytes(len(value.Source.Data), budget, false) {
+			return nil, false
+		}
+		value.Source.Data = slices.Clone(value.Source.Data)
+		return value, true
+	case ai.StructuredContentPart:
+		if !reserveToolUpdateBytes(len(value.Data), budget, true) {
+			return nil, false
+		}
+		value.Data = slices.Clone(value.Data)
+		return value, true
+	case ai.EmbeddedResourcePart:
+		if !reserveToolUpdateBytes(len(value.Blob), budget, true) {
+			return nil, false
+		}
+		value.Blob = slices.Clone(value.Blob)
+		return value, true
+	case ai.ToolResultPart:
+		value.Content = boundedToolUpdateParts(value.Content, budget)
+		return value, true
+	case ai.ToolCallPart:
+		if !reserveToolUpdateBytes(len(value.Args), budget, true) {
+			return nil, false
+		}
+		value.Args = slices.Clone(value.Args)
+		return value, true
+	default:
+		return part, true
+	}
+}
+
+func reserveToolUpdateBytes(size int, budget *updateBudget, allowEmpty bool) bool {
+	if size > budget.bytes || (!allowEmpty && size == 0) {
+		return false
+	}
+	budget.bytes -= size
+	return true
 }
 
 // truncateToolUpdateText cuts text to at most limit bytes at a UTF-8 boundary.
@@ -246,6 +257,10 @@ func (state *State) trimTranscriptWindow() {
 		state.Compaction.BoundaryIndex = max(0, state.Compaction.BoundaryIndex-drop)
 	}
 
+	state.trimTranscriptTools(droppedCalls)
+}
+
+func (state *State) trimTranscriptTools(droppedCalls map[string]struct{}) {
 	if len(droppedCalls) == 0 {
 		return
 	}
@@ -1008,8 +1023,8 @@ func transcriptToolArguments(messages ai.Messages, callID string) ai.JSON {
 		return nil
 	}
 
-	for index := len(messages) - 1; index >= 0; index-- {
-		parts, err := ai.MessagePartsView(messages[index])
+	for _, message := range slices.Backward(messages) {
+		parts, err := ai.MessagePartsView(message)
 		if err != nil {
 			continue
 		}

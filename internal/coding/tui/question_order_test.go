@@ -62,6 +62,7 @@ func questionOrderResolution(request question.Request) question.Resolution {
 
 func questionBlockIndex(blocks []timelineBlock, body string) (int, int) {
 	card, answer := -1, -1
+
 	for index, block := range blocks {
 		switch {
 		case block.kind == blockQuestion:
@@ -113,6 +114,7 @@ func TestQuestionPreviewStaysAboveACommittedAnswerInFullscreen(t *testing.T) {
 		"the preview is rendered exactly once across frames")
 	cardAt := strings.Index(content, "User answered the question")
 	answerAt := strings.Index(content, questionAnswerBody)
+
 	require.NotEqual(t, -1, cardAt)
 	require.NotEqual(t, -1, answerAt)
 	assert.Less(t, cardAt, answerAt, "the painted frame keeps the same order")
@@ -166,6 +168,7 @@ func TestQuestionPreviewOrderSurvivesTheDurableResult(t *testing.T) {
 	content := ansi.Strip(model.View().Content)
 	cardAt := strings.Index(content, "User answered the question")
 	answerAt := strings.Index(content, questionAnswerBody)
+
 	require.NotEqual(t, -1, cardAt)
 	require.NotEqual(t, -1, answerAt)
 	assert.Less(t, cardAt, answerAt, "the store rebuilt the records the preview shifted")
@@ -296,6 +299,7 @@ func streamedAnswerCommit(state coding.State, sequence uint64) coding.Event {
 // commits, so both kinds count.
 func previewOrderIndex(blocks []timelineBlock, body string) (int, int) {
 	card, answer := -1, -1
+
 	for index, block := range blocks {
 		switch {
 		case block.kind == blockQuestion && card < 0:
@@ -403,6 +407,7 @@ func TestQuestionPreviewOrderHoldsAcrossStreamedFrames(t *testing.T) {
 				deliver(streamedAnswerDelta(state, sequence, chunk))
 
 				body := strings.TrimSpace(streamed)
+
 				if fullscreen {
 					blocks := model.transcriptBlocks()
 					require.Equal(t, blocks, viewportProjectionBlocks(model),

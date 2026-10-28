@@ -1,4 +1,3 @@
-//nolint:wsl_v5 // The configured window and its two owners stay adjacent.
 package coding
 
 import (
@@ -19,7 +18,7 @@ func TestBootstrapHonorsConfiguredTranscriptLimit(t *testing.T) {
 	session, err := harness.NewSession(store)
 	require.NoError(t, err)
 
-	for index := 0; index < 1_000; index++ {
+	for range 1_000 {
 		_, err := session.AppendMessage(ai.UserText("message"), nil)
 		require.NoError(t, err)
 	}
@@ -42,7 +41,7 @@ func TestBootstrapClampsAnOversizedTranscriptLimit(t *testing.T) {
 	session, err := harness.NewSession(store)
 	require.NoError(t, err)
 
-	for index := 0; index < 10; index++ {
+	for range 10 {
 		_, err := session.AppendMessage(ai.UserText("message"), nil)
 		require.NoError(t, err)
 	}
@@ -59,7 +58,7 @@ func TestBootstrapStateRetainsOnlyTheWindowAndOwnsItsMessages(t *testing.T) {
 	t.Parallel()
 
 	path := make([]harness.Entry, 0, 1_000)
-	for index := 0; index < 1_000; index++ {
+	for index := range 1_000 {
 		path = append(path, harness.Entry{
 			Kind: harness.KindMessage, ID: fmt.Sprintf("entry-%d", index),
 			Message: ai.UserText(fmt.Sprintf("message-%d", index)),

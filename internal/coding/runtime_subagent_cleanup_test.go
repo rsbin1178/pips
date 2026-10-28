@@ -12,6 +12,7 @@ func TestRetainFinishedChildProjectionIsBounded(t *testing.T) {
 	t.Parallel()
 
 	runtime := &Runtime{children: make(map[string]*childProjection)}
+
 	for index := range maxRetainedFinishedChildProjections + 2 {
 		childSessionID := fmt.Sprintf("child-%d", index)
 		runtime.children[childSessionID] = &childProjection{finished: true}

@@ -3460,6 +3460,8 @@ func (m *Model) trackInteractionRun(event coding.Event) {
 		if event.RunID != "" {
 			m.rememberInteractionRun(event.InteractionID, event.RunID)
 		}
+	default:
+		// Other events carry no new interaction-to-run ownership.
 	}
 }
 

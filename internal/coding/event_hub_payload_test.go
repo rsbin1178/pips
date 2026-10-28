@@ -70,6 +70,8 @@ func BenchmarkEventHubPublish(b *testing.B) {
 	event := largeMediaEvent(1 << 20)
 
 	run := func(b *testing.B, cloned bool) {
+		b.Helper()
+
 		hub := newEventHub(256, 256)
 		subscriptions := make([]*EventSubscription, 4)
 		for index := range subscriptions {
@@ -129,8 +131,6 @@ func publishCloned(hub *eventHub, event Event) {
 	}
 }
 
-var eventHubBenchmarkSink EventRecord
-
 func BenchmarkEventHubRetained(b *testing.B) {
 	const (
 		events    = 64
@@ -148,7 +148,7 @@ func BenchmarkEventHubRetained(b *testing.B) {
 			}
 		}
 
-		for index := 0; index < events; index++ {
+		for index := range events {
 			event := largeMediaEvent(payload)
 			event.Sequence = uint64(index + 1)
 			if cloned {
@@ -171,12 +171,12 @@ func BenchmarkEventHubRetained(b *testing.B) {
 		runtime.GC()
 		runtime.ReadMemStats(&after)
 
-		retained := int64(after.HeapAlloc) - int64(before.HeapAlloc)
-		b.ReportMetric(float64(retained), "retained-B")
-		b.Logf("retained=%dKB", retained/1024)
+		retained := float64(after.HeapAlloc) - float64(before.HeapAlloc)
+		b.ReportMetric(retained, "retained-B")
+		b.Logf("retained=%.0fKB", retained/1024)
 		b.ResetTimer()
 
-		for index := 0; index < b.N; index++ {
+		for range b.N {
 			runtime.KeepAlive(hub)
 		}
 	})
@@ -191,12 +191,12 @@ func BenchmarkEventHubRetained(b *testing.B) {
 		runtime.GC()
 		runtime.ReadMemStats(&after)
 
-		retained := int64(after.HeapAlloc) - int64(before.HeapAlloc)
-		b.ReportMetric(float64(retained), "retained-B")
-		b.Logf("retained=%dKB", retained/1024)
+		retained := float64(after.HeapAlloc) - float64(before.HeapAlloc)
+		b.ReportMetric(retained, "retained-B")
+		b.Logf("retained=%.0fKB", retained/1024)
 		b.ResetTimer()
 
-		for index := 0; index < b.N; index++ {
+		for range b.N {
 			runtime.KeepAlive(hub)
 		}
 	})

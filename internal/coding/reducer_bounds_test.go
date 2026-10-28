@@ -23,7 +23,7 @@ func TestStateBoundsRunHistory(t *testing.T) {
 
 	state := fixtureState(t, nil)
 
-	for index := 0; index < 4*maxRecentRuns; index++ {
+	for index := range 4 * maxRecentRuns {
 		runID := fmt.Sprintf("run-%04d", index)
 
 		var err error
@@ -44,7 +44,7 @@ func TestStateKeepsActiveRunsWhileBoundingHistory(t *testing.T) {
 	state := fixtureState(t, nil)
 
 	// Fill the history with completed runs, then start one that stays active.
-	for index := 0; index < 2*maxRecentRuns; index++ {
+	for index := range 2 * maxRecentRuns {
 		runID := fmt.Sprintf("run-%04d", index)
 
 		var err error
@@ -68,7 +68,7 @@ func TestStateBoundsDiagnostics(t *testing.T) {
 
 	state := fixtureState(t, nil)
 
-	for index := 0; index < 4*maxRecentDiagnostics; index++ {
+	for index := range 4 * maxRecentDiagnostics {
 		var err error
 		state, err = Reduce(state, boundEvent(state, EventIntegrationDiagnostic, "", IntegrationDiagnostic{
 			Component: "test", Code: fmt.Sprintf("code-%d", index), Message: "diagnostic",

@@ -1,4 +1,3 @@
-//nolint:wsl_v5 // Payload fixtures and the clone variants they compare stay adjacent.
 package coding
 
 import (

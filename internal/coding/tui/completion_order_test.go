@@ -145,7 +145,7 @@ func TestCompletionMarkerAnchorsToItsOwnRunWhenSnapshotLeads(t *testing.T) {
 		{}, assistantCandidate("run-a"), {}, assistantCandidate("run-b"),
 	}
 
-	controller := runtimeStateController{stubController: stubController{state: state}}
+	controller := runtimeStateController{state: state}
 	model := readyModelWithController(t, controller, true)
 	model.subscription = &subscriptionBridge{}
 	model.subscriptionMode = true
@@ -326,7 +326,7 @@ func TestCompletionMarkerOrderThroughPerEventDelivery(t *testing.T) {
 		{}, assistantCandidate("run-a"), {}, assistantCandidate("run-b"),
 	}
 
-	controller := runtimeStateController{stubController: stubController{state: state}}
+	controller := runtimeStateController{state: state}
 	model := readyModelWithController(t, controller, true)
 	model.subscriptionMode = true
 	model.runtimeState = true

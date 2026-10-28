@@ -1,4 +1,3 @@
-//nolint:wsl_v5 // View fixtures and their branches stay adjacent.
 package harness_test
 
 import (

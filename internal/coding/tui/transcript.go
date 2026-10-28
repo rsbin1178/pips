@@ -574,6 +574,8 @@ func (s *transcriptStore) renderFull(block timelineBlock) rowSegments {
 		if full.id == draftThinkingID {
 			full.id = ""
 		}
+	default:
+		// Settled blocks already have their complete render shape.
 	}
 
 	return rowSegments{frozen: splitTranscriptRows(renderTimelineEntry(

@@ -27,7 +27,8 @@ func Capture(path string) error {
 	}
 
 	directory := filepath.Dir(path)
-	if err := os.MkdirAll(directory, 0o750); err != nil {
+	// The opt-in operator-selected destination intentionally allows absolute and relative paths.
+	if err := os.MkdirAll(directory, 0o750); err != nil { //nolint:gosec // G703: directory comes from the operator's explicit profile destination.
 		return fmt.Errorf("heap profile: create directory: %w", err)
 	}
 
@@ -35,13 +36,14 @@ func Capture(path string) error {
 	if err != nil {
 		return fmt.Errorf("heap profile: create file: %w", err)
 	}
+
 	tempPath := file.Name()
 	committed := false
 
 	defer func() {
 		if !committed {
 			_ = file.Close()
-			_ = os.Remove(tempPath)
+			_ = os.Remove(tempPath) //nolint:gosec // G703: tempPath is the file just returned by os.CreateTemp.
 		}
 	}()
 
@@ -50,16 +52,19 @@ func Capture(path string) error {
 	if err := pprof.WriteHeapProfile(file); err != nil {
 		return fmt.Errorf("heap profile: write: %w", err)
 	}
+
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("heap profile: sync: %w", err)
 	}
+
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("heap profile: close: %w", err)
 	}
-	if err := os.Rename(tempPath, path); err != nil {
+
+	if err := os.Rename(tempPath, path); err != nil { //nolint:gosec // G703: publish only to the operator-selected destination.
 		return errors.Join(
 			fmt.Errorf("heap profile: publish: %w", err),
-			os.Remove(tempPath),
+			os.Remove(tempPath), //nolint:gosec // G703: tempPath is the file just returned by os.CreateTemp.
 		)
 	}
 
@@ -81,6 +86,7 @@ func Start() func() {
 
 	return func() {
 		stop()
+
 		_ = Capture(path)
 	}
 }

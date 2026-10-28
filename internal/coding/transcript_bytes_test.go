@@ -50,9 +50,11 @@ func TestTranscriptByteWindowTrimsOversizedMessages(t *testing.T) {
 
 	assert.LessOrEqual(t, state.transcriptBytes, state.transcriptByteWindow(),
 		"the byte window is enforced")
-	assert.Greater(t, state.TranscriptBase(), 0, "the trim advanced the durable base")
+	assert.Positive(t, state.TranscriptBase(), "the trim advanced the durable base")
 	require.NotEmpty(t, state.Transcript)
-	assert.Len(t, state.Transcript[len(state.Transcript)-1].(ai.UserMessage).Parts, 1,
+	newest, ok := state.Transcript[len(state.Transcript)-1].(ai.UserMessage)
+	require.True(t, ok)
+	assert.Len(t, newest.Parts, 1,
 		"the newest message is retained")
 }
 
@@ -67,7 +69,12 @@ func TestTranscriptByteWindowKeepsOneHugeMessage(t *testing.T) {
 	state = commitText(t, state, 512<<10)
 
 	require.Len(t, state.Transcript, 1)
-	assert.Equal(t, 512<<10, len(state.Transcript[0].(ai.UserMessage).Parts[0].(ai.TextPart).Text))
+	newest, ok := state.Transcript[0].(ai.UserMessage)
+	require.True(t, ok)
+	require.Len(t, newest.Parts, 1)
+	text, ok := newest.Parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.Len(t, text.Text, 512<<10)
 }
 
 // TestTranscriptByteWindowCountsMedia pins that image bytes, not just text,
@@ -76,12 +83,14 @@ func TestTranscriptByteWindowCountsMedia(t *testing.T) {
 	t.Parallel()
 
 	state := byteState(t, 1<<20)
+
 	for index := range 8 {
 		media := make([]byte, 256<<10)
 		next, err := Reduce(state, boundEvent(state, EventMessageCommitted, "bench-run", MessageCommitted{
 			Message: ai.User(ai.ImagePart{Source: ai.MediaSource{Data: media, MIMEType: "image/png"}}),
 		}))
 		require.NoError(t, err)
+
 		state = next
 		assert.LessOrEqual(t, state.transcriptBytes, state.transcriptByteWindow(), "message %d", index)
 	}
@@ -105,6 +114,7 @@ func TestTranscriptByteWindowDropsTheToolProjectionWithItsMessages(t *testing.T)
 		Turn: 1, Call: call,
 	}))
 	require.NoError(t, err)
+
 	result := structuredToolResult(call.ID, ai.JSON(`{"data":"`+bigText(256<<10)+`"}`))
 	completed, err := Reduce(started, boundEvent(started, EventToolCompleted, "bench-run", ToolCompleted{
 		Turn: 1, Call: call, Result: result,
@@ -121,8 +131,8 @@ func TestTranscriptByteWindowDropsTheToolProjectionWithItsMessages(t *testing.T)
 	}
 
 	assert.Empty(t, committed.Tools, "the released tool projection is gone")
-	assert.Greater(t, committed.ToolsBase(), 0, "the tool base advanced with it")
-	assert.Greater(t, committed.TranscriptBase(), 0)
+	assert.Positive(t, committed.ToolsBase(), "the tool base advanced with it")
+	assert.Positive(t, committed.TranscriptBase())
 }
 
 // TestToolsByteWindowKeepsRunningTools pins the other side: a completed
@@ -135,7 +145,9 @@ func TestToolsByteWindowKeepsRunningTools(t *testing.T) {
 
 	for index := range 8 {
 		call := toolSharingCall(fmt.Sprintf("call-tool-%d", index), ai.JSON(`{"path":"x"}`))
+
 		var err error
+
 		state, err = Reduce(state, boundEvent(state, EventToolStarted, "bench-run", ToolStarted{
 			Turn: 1, Call: call,
 		}))
@@ -148,7 +160,9 @@ func TestToolsByteWindowKeepsRunningTools(t *testing.T) {
 	}
 
 	running := toolSharingCall("call-running", ai.JSON(`{"path":"live"}`))
+
 	var err error
+
 	state, err = Reduce(state, boundEvent(state, EventToolStarted, "bench-run", ToolStarted{
 		Turn: 1, Call: running,
 	}))
@@ -158,10 +172,12 @@ func TestToolsByteWindowKeepsRunningTools(t *testing.T) {
 	require.NotEmpty(t, state.Tools)
 	assert.Equal(t, running.ID, state.Tools[len(state.Tools)-1].Call.ID,
 		"the running Tool is retained")
+
 	for _, tool := range state.Tools {
 		if tool.Call.ID == running.ID {
 			continue
 		}
+
 		assert.Equal(t, ToolStatusCompleted, tool.Status)
 	}
 }
@@ -173,17 +189,21 @@ func TestTranscriptByteWindowAndCountCapAgree(t *testing.T) {
 	t.Parallel()
 
 	countBound := byteState(t, 64<<20)
+
 	countBound.transcriptLimit = 4
 	for range 12 {
 		countBound = commitText(t, countBound, 64<<10)
 	}
+
 	assert.Len(t, countBound.Transcript, 4, "the count cap binds first")
 
 	byteBound := byteState(t, 1<<20)
+
 	byteBound.transcriptLimit = 4096
 	for range 12 {
 		byteBound = commitText(t, byteBound, 256<<10)
 	}
+
 	assert.Less(t, len(byteBound.Transcript), 12, "the byte cap binds first")
 	assert.LessOrEqual(t, byteBound.transcriptBytes, byteBound.transcriptByteWindow())
 }
@@ -232,14 +252,17 @@ func TestTranscriptByteWindowBindsAtTheRealCountCap(t *testing.T) {
 		previousBase = state.TranscriptBase()
 	}
 
-	assert.Greater(t, state.TranscriptBase(), 0, "the durable base advanced")
+	assert.Positive(t, state.TranscriptBase(), "the durable base advanced")
 	assert.Less(t, len(state.Transcript), messages/4, "the byte cap binds long before the count cap")
 	assert.Equal(t, messages, state.TranscriptBase()+len(state.Transcript),
 		"every committed message is either retained or counted into the base")
 
-	newest := state.Transcript[len(state.Transcript)-1].(ai.UserMessage)
+	newest, ok := state.Transcript[len(state.Transcript)-1].(ai.UserMessage)
+	require.True(t, ok)
 	require.Len(t, newest.Parts, 1)
-	assert.Equal(t, body, len(newest.Parts[0].(ai.TextPart).Text),
+	text, ok := newest.Parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.Len(t, text.Text, body,
 		"the newest message is retained whole")
 }
 
@@ -257,7 +280,7 @@ func TestTranscriptCountCapTrimsToItsLowWater(t *testing.T) {
 	}
 
 	lowWater := retainedTranscriptItems - retainedTranscriptItems/4
-	assert.Equal(t, lowWater, len(state.Transcript), "the count trim lands on the low water")
+	assert.Len(t, state.Transcript, lowWater, "the count trim lands on the low water")
 	assert.Equal(t, retainedTranscriptItems+1-lowWater, state.TranscriptBase(),
 		"the base advances by exactly the dropped count")
 	assert.LessOrEqual(t, state.transcriptBytes, state.transcriptByteWindow())
@@ -289,6 +312,7 @@ func TestToolsByteWindowReleasesTheProjectionNotTheTranscript(t *testing.T) {
 		calls = append(calls, call)
 
 		var err error
+
 		state, err = Reduce(state, boundEvent(state, EventMessageCommitted, "bench-run", MessageCommitted{
 			Message: ai.Assistant(ai.ToolCallPart{ID: call.ID, Name: call.Name, Args: call.Arguments}),
 		}))
@@ -305,7 +329,7 @@ func TestToolsByteWindowReleasesTheProjectionNotTheTranscript(t *testing.T) {
 	}
 
 	require.Less(t, len(state.Tools), tools, "the Tools window released the oldest projections")
-	require.Greater(t, state.ToolsBase(), 0)
+	require.Positive(t, state.ToolsBase())
 	assert.Zero(t, state.TranscriptBase(), "the transcript window did not bind")
 	require.Len(t, state.Transcript, tools, "every call message is still retained")
 
@@ -316,9 +340,11 @@ func TestToolsByteWindowReleasesTheProjectionNotTheTranscript(t *testing.T) {
 
 	released := calls[:state.ToolsBase()]
 	durable := toolCallIDsInMessages(state.Transcript)
+
 	for _, call := range released {
 		_, projected := live[call.ID]
 		assert.False(t, projected, "the released projection is gone from Tools")
+
 		_, retained := durable[call.ID]
 		assert.True(t, retained, "the released call is still in the transcript")
 	}
@@ -330,6 +356,7 @@ func TestToolsByteWindowReleasesTheProjectionNotTheTranscript(t *testing.T) {
 			Message: structuredToolResult(call.ID, ai.JSON(`{"data":"`+bigText(resultBody)+`"}`)),
 		}))
 		require.NoError(t, err)
+
 		state = next
 	}
 
@@ -338,5 +365,6 @@ func TestToolsByteWindowReleasesTheProjectionNotTheTranscript(t *testing.T) {
 		_, retained := durable[call.ID]
 		assert.True(t, retained, "call %s keeps both halves in the transcript", call.ID)
 	}
+
 	assert.Zero(t, state.TranscriptBase())
 }

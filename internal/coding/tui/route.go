@@ -203,6 +203,7 @@ func (m *Model) enqueueScrollbackPage(content string, continuation bool) tea.Cmd
 		sequence: m.presentation.writeSequence, content: content,
 	})
 	m.presentation.queuedBytes += len(content)
+
 	m.scrollbackOutput = true
 	if len(m.presentation.writes) != 1 {
 		return nil
@@ -223,11 +224,13 @@ func (m *Model) pumpPendingScrollback() tea.Cmd {
 		}
 
 		source := m.presentation.pendingSources[0]
+
 		write, ok := source.nextPage(m, scrollbackPageBytes)
 		if !ok {
 			// Release the exhausted source: its backing array would otherwise
 			// keep the content it paged alive behind the new slice header.
 			m.presentation.pendingSources[0] = nil
+
 			m.presentation.pendingSources = m.presentation.pendingSources[1:]
 			if len(m.presentation.pendingSources) == 0 {
 				m.presentation.pendingSources = nil
@@ -425,10 +428,12 @@ func (m *Model) finishScrollbackWrite(sequence uint64) tea.Cmd {
 	// that backpressure held back. Pages enqueued into an empty queue own the
 	// dispatch command; an existing head is dispatched here.
 	pump := m.pumpPendingScrollback()
+
 	dispatch := pump
 	if m.presentation.hasScrollbackWrites() && dispatch == nil {
 		dispatch = m.dispatchScrollback()
 	}
+
 	catchUp := m.commitStableTimeline()
 
 	if m.presentation.hasScrollbackWrites() {

@@ -36,16 +36,8 @@ func eventByteSize(event Event) int {
 		size += messagesByteSize(payload.Transcript)
 	case SubagentLifecycle:
 		size += len(payload.TaskPreview) + len(payload.Model)
-	case IntegrationDiagnostic:
-		size += len(payload.Message) + len(payload.Code)
-		size += modelResponseFailureBytes(payload.Response)
-	case ModelRetry:
-		size += len(payload.Reason) + modelResponseFailureBytes(payload.Response)
-	case RuntimeError:
-		size += len(payload.Message)
-		size += modelResponseFailureBytes(payload.Response)
 	default:
-		// Lifecycle payloads are bounded counters and identifiers.
+		size += diagnosticEventBytes(event)
 	}
 
 	return size
@@ -61,4 +53,18 @@ func questionRequestBytes(request question.Request) int {
 	}
 
 	return size
+}
+
+func diagnosticEventBytes(event Event) int {
+	switch payload := event.Payload.(type) {
+	case IntegrationDiagnostic:
+		return len(payload.Message) + len(payload.Code) + modelResponseFailureBytes(payload.Response)
+	case ModelRetry:
+		return len(payload.Reason) + modelResponseFailureBytes(payload.Response)
+	case RuntimeError:
+		return len(payload.Message) + modelResponseFailureBytes(payload.Response)
+	default:
+		// Lifecycle payloads are bounded counters and identifiers.
+		return 0
+	}
 }

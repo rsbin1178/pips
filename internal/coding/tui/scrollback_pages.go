@@ -85,6 +85,7 @@ func (p *scrollbackPager) nextPage(m *Model, maxBytes int) (scrollbackWrite, boo
 	}
 
 	var content strings.Builder
+
 	for {
 		if p.line >= len(p.lines) {
 			if p.next >= len(p.blocks) {
@@ -96,10 +97,12 @@ func (p *scrollbackPager) nextPage(m *Model, maxBytes int) (scrollbackWrite, boo
 			rendered := renderTimelineEntry(
 				block, m.markdown, m.width, m.theme, m.options.NoColor, timelineRenderOptions{},
 			)
+
 			lines := splitTranscriptRows(rendered)
 			if p.gap && len(lines) > 0 {
 				lines = append([]string{""}, lines...)
 			}
+
 			p.gap = true
 			p.lines = lines
 			p.line = 0
@@ -108,16 +111,20 @@ func (p *scrollbackPager) nextPage(m *Model, maxBytes int) (scrollbackWrite, boo
 		}
 
 		line := p.lines[p.line]
+
 		need := len(line)
 		if content.Len() > 0 {
 			need++
 		}
+
 		if content.Len() > 0 && content.Len()+need > maxBytes {
 			break
 		}
+
 		if content.Len() > 0 {
 			content.WriteByte('\n')
 		}
+
 		content.WriteString(line)
 		p.line++
 	}
@@ -157,11 +164,13 @@ func (p *scrollbackTextPager) nextPage(_ *Model, maxBytes int) (scrollbackWrite,
 	if maxBytes <= 0 {
 		maxBytes = scrollbackPageBytes
 	}
+
 	if p.done {
 		return scrollbackWrite{}, false
 	}
 
 	var content strings.Builder
+
 	for !p.done {
 		line, next, last := p.peekLine()
 
@@ -169,13 +178,17 @@ func (p *scrollbackTextPager) nextPage(_ *Model, maxBytes int) (scrollbackWrite,
 		if content.Len() > 0 {
 			need++
 		}
+
 		if content.Len() > 0 && content.Len()+need > maxBytes {
 			break
 		}
+
 		if content.Len() > 0 {
 			content.WriteByte('\n')
 		}
+
 		content.WriteString(line)
+
 		p.offset = next
 		p.done = last
 	}
@@ -197,6 +210,7 @@ func (p *scrollbackTextPager) peekLine() (string, int, bool) {
 	if p.offset >= len(p.content) {
 		return "", len(p.content), true
 	}
+
 	if end := strings.IndexByte(p.content[p.offset:], '\n'); end >= 0 {
 		return p.content[p.offset : p.offset+end], p.offset + end + 1, false
 	}
@@ -215,6 +229,7 @@ func splitScrollbackPages(content string, maxBytes int) []string {
 	}
 
 	pager := newScrollbackTextPager(content, false)
+
 	pages := make([]string, 0, len(content)/maxBytes+1)
 	for {
 		page, ok := pager.nextPage(nil, maxBytes)
@@ -224,6 +239,7 @@ func splitScrollbackPages(content string, maxBytes int) []string {
 
 		pages = append(pages, page.content)
 	}
+
 	if len(pages) == 0 {
 		return nil
 	}

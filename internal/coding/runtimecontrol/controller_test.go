@@ -47,7 +47,7 @@ func TestControllerRetainsReadOnlySnapshots(t *testing.T) {
 
 	// Snapshot is still the defensive copy: mutating it cannot reach lastState.
 	snapshot := controller.Snapshot()
-	deep, readOnly = runtime.snapshotCounts()
+	deep, _ = runtime.snapshotCounts()
 	assert.Equal(t, 1, deep)
 	snapshot.Mode = coding.ModePlan
 	assert.Equal(t, coding.ModeAgent, controller.SnapshotReadOnly().Mode)

@@ -26,6 +26,7 @@ func TestHistoryWindowTrimsByBytes(t *testing.T) {
 	for range 40 {
 		page.Messages = append(page.Messages, ai.UserText(strings.Repeat("h", 1<<20)))
 	}
+
 	model.applyHistoryPage(historyPageMsg{sequence: model.history.sequence, page: page})
 
 	assert.LessOrEqual(t, model.history.bytes, maxHistoryBytes)
@@ -77,6 +78,7 @@ func (c *historyFixtureController) History(
 	if request.Before >= 0 {
 		end = min(request.Before, len(c.messages))
 	}
+
 	start := max(0, end-limit)
 
 	return coding.HistoryPage{
@@ -104,8 +106,8 @@ func TestHistoryByteTrimmedPageIsReadAgainFromItsStart(t *testing.T) {
 	}
 
 	controller := &historyFixtureController{
-		stubController: stubController{state: cappedState()},
-		messages:       messages,
+		state:    cappedState(),
+		messages: messages,
 	}
 	model := fullscreenModel(t, controller, true)
 	model.Update(tea.WindowSizeMsg{Width: 60, Height: 12})
@@ -121,7 +123,7 @@ func TestHistoryByteTrimmedPageIsReadAgainFromItsStart(t *testing.T) {
 	assert.Equal(t, -1, controller.requests[0].Before, "the first read asks for the window boundary")
 
 	dropped := durable - len(model.history.messages)
-	require.Greater(t, dropped, 0, "the byte budget trimmed the loaded page")
+	require.Positive(t, dropped, "the byte budget trimmed the loaded page")
 	assert.LessOrEqual(t, model.history.bytes, maxHistoryBytes, "the window stays inside its byte budget")
 	assert.Equal(t, dropped, model.history.start, "the window names the boundary it dropped")
 	assert.True(t, model.history.more, "the dropped content can still be read")

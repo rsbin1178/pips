@@ -131,7 +131,7 @@ func TestSubscribedFrameUsesReadOnlySnapshot(t *testing.T) {
 	state.Runs = []coding.RunState{{ID: "run-1", Active: true, TurnOpen: true, Turn: 1}}
 
 	controller := &readOnlyRuntimeStateController{
-		runtimeStateController: &runtimeStateController{stubController: stubController{state: state}},
+		runtimeStateController: &runtimeStateController{state: state},
 	}
 	model := readyModelWithController(t, controller, true)
 	model.subscription = &subscriptionBridge{}
@@ -171,7 +171,7 @@ func TestSubscribedCommitUsesReadOnlySnapshot(t *testing.T) {
 	committed.Transcript = append(committed.Transcript, ai.AssistantText("world"))
 
 	controller := &readOnlyRuntimeStateController{
-		runtimeStateController: &runtimeStateController{stubController: stubController{state: committed}},
+		runtimeStateController: &runtimeStateController{state: committed},
 	}
 	model := readyModelWithController(t, controller, true)
 	model.subscription = &subscriptionBridge{}

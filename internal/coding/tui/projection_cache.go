@@ -514,10 +514,12 @@ func (m *Model) viewportProjection() frameProjection {
 	// them to the combined frame and let the store rebuild from the first
 	// insertion.
 	wasPreviewSplit := cache.previewSplit
+
 	previewSplit := -1
 	if previews := m.optimisticQuestionBlocks(); len(previews) > 0 {
 		prefix, tail, previewSplit = m.splitQuestionPreviews(prefix, tail, previews)
 	}
+
 	cache.previewSplit = previewSplit
 
 	if reused {
@@ -536,6 +538,7 @@ func (m *Model) viewportProjection() frameProjection {
 		if wasPreviewSplit >= 0 {
 			stable = min(stable, wasPreviewSplit)
 		}
+
 		if previewSplit >= 0 {
 			stable = min(stable, previewSplit)
 		}
@@ -578,18 +581,21 @@ func (m *Model) splitQuestionPreviews(
 	previews []timelineBlock,
 ) ([]transcriptEntry, []transcriptEntry, int) {
 	total := len(prefix) + len(tail)
+
 	first := total
 	for _, preview := range slices.Backward(previews) {
 		at := total
-		for index := 0; index < len(prefix); index++ {
+
+		for index := range prefix {
 			if questionPreviewPrecedes(*prefix[index].block, preview) {
 				at = index
 
 				break
 			}
 		}
+
 		if at == total {
-			for index := 0; index < len(tail); index++ {
+			for index := range tail {
 				if questionPreviewPrecedes(*tail[index].block, preview) {
 					at = len(prefix) + index
 
@@ -597,6 +603,7 @@ func (m *Model) splitQuestionPreviews(
 				}
 			}
 		}
+
 		first = min(first, at)
 	}
 
@@ -604,9 +611,11 @@ func (m *Model) splitQuestionPreviews(
 	for index := first; index < len(prefix); index++ {
 		blocks = append(blocks, *prefix[index].block)
 	}
+
 	for index := range tail {
 		blocks = append(blocks, *tail[index].block)
 	}
+
 	inserted := insertQuestionPreviews(blocks, previews)
 
 	entries := make([]transcriptEntry, 0, len(inserted))

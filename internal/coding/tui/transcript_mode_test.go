@@ -62,7 +62,7 @@ func TestTranscriptPagesAreBounded(t *testing.T) {
 	t.Parallel()
 
 	state := readyState()
-	for index := 0; index < transcriptPageRows*2+50; index++ {
+	for index := range transcriptPageRows*2 + 50 {
 		state.Transcript = append(state.Transcript, ai.UserText(fmt.Sprintf("ROW-%04d", index)))
 	}
 	model := fullscreenModel(t, stubController{state: state}, true)
@@ -234,7 +234,7 @@ func TestTranscriptExitHandoffPagesWithoutWholeSnapshot(t *testing.T) {
 	t.Parallel()
 
 	state := readyState()
-	for index := 0; index < 300; index++ {
+	for index := range 300 {
 		state.Transcript = append(state.Transcript, ai.UserText(fmt.Sprintf("EXIT-ROW-%04d", index)))
 	}
 

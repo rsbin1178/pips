@@ -12,6 +12,7 @@ import (
 func watchCaptureSignal(capture func()) func() {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGUSR2)
+
 	done := make(chan struct{})
 
 	go func() {

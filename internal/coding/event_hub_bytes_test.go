@@ -80,6 +80,7 @@ func TestEventHubSubscriberByteBudgetClosesSlowConsumer(t *testing.T) {
 		"a subscriber's queued bytes stay inside its budget")
 
 	delivered := 0
+
 	for {
 		_, ok := awaitRecord(t, subscription)
 		if !ok {
@@ -88,7 +89,8 @@ func TestEventHubSubscriberByteBudgetClosesSlowConsumer(t *testing.T) {
 
 		delivered++
 	}
-	assert.Greater(t, delivered, 0, "the records that fit the budget are still delivered")
+
+	assert.Positive(t, delivered, "the records that fit the budget are still delivered")
 	assert.Less(t, delivered, 31, "the budget closes the slow subscriber early")
 }
 
@@ -106,8 +108,10 @@ func TestEventHubSubscriberByteBudgetIsExact(t *testing.T) {
 	t.Cleanup(subscription.Close)
 
 	accepted := 0
+
 	for sequence := uint64(1); sequence <= 8; sequence++ {
 		hub.publish(hubPayloadEvent(sequence, size))
+
 		if subscription.Err() != nil {
 			break
 		}
@@ -118,7 +122,8 @@ func TestEventHubSubscriberByteBudgetIsExact(t *testing.T) {
 	require.ErrorIs(t, subscription.Err(), ErrEventGap)
 
 	queued := subscription.subscriber.queuedBytes
-	assert.Greater(t, accepted, 0)
+
+	assert.Positive(t, accepted)
 	assert.Less(t, accepted, 8)
 	assert.LessOrEqual(t, queued, hub.subscriberBytes)
 	assert.Greater(t, queued+size, hub.subscriberBytes,
@@ -158,6 +163,7 @@ func TestEventHubSubscriberBytesAreReleasedOnReceive(t *testing.T) {
 func BenchmarkEventHubSubscriberQueue(b *testing.B) {
 	event := hubTestEvent(1)
 	hub := newEventHubWithBudget(256, 256, 8<<20, 4<<20)
+
 	subscription, _, err := hub.subscribe(0)
 	if err != nil {
 		b.Fatal(err)
@@ -168,9 +174,11 @@ func BenchmarkEventHubSubscriberQueue(b *testing.B) {
 
 	for b.Loop() {
 		hub.publish(event)
+
 		if _, ok := subscription.TryReceive(); !ok {
 			b.Fatal("the record was not queued")
 		}
+
 		if subscription.subscriber.queuedBytes != 0 {
 			b.Fatal("a pop did not release the record's bytes")
 		}

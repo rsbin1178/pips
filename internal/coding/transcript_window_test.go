@@ -31,6 +31,7 @@ func windowTestState() State {
 			ID: fmt.Sprintf("call-%d", index), Name: "read",
 		})
 	}
+
 	state.Tools = []ToolState{
 		{Call: ToolCall{ID: "call-0", Name: "read"}, Status: ToolStatusCompleted},
 		{Call: ToolCall{ID: "call-500", Name: "read"}, Status: ToolStatusRunning},
@@ -50,7 +51,7 @@ func TestTrimTranscriptWindowRebasesProjections(t *testing.T) {
 	drop := len(state.Transcript) - retainedTranscriptLowWater
 	state.trimTranscriptWindow()
 
-	require.Equal(t, retainedTranscriptLowWater, len(state.Transcript))
+	require.Len(t, state.Transcript, retainedTranscriptLowWater)
 	assert.Equal(t, 10+drop, state.TranscriptBase())
 	assert.Equal(t, uint64(1), state.Sequence, "trimming is projection maintenance, not a transition")
 	assert.Equal(t, "message 1025", runtimeMessageText(state.Transcript[0]))
@@ -87,7 +88,7 @@ func TestMessageCommittedTrimsTheLiveTranscript(t *testing.T) {
 	next, err := Reduce(state, event)
 	require.NoError(t, err)
 
-	require.Equal(t, retainedTranscriptLowWater, len(next.Transcript))
+	require.Len(t, next.Transcript, retainedTranscriptLowWater)
 	assert.Equal(t, retainedTranscriptItems+1-retainedTranscriptLowWater, next.TranscriptBase())
 	assert.Equal(t, "newest", runtimeMessageText(next.Transcript[len(next.Transcript)-1]))
 	require.Len(t, next.MessageCandidates, len(next.Transcript))

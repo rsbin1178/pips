@@ -93,19 +93,6 @@ func (c *toolProjectionCache) describe(record toolActivityRecord) *toolActivity 
 	return &activity
 }
 
-// cached returns the memoized description for a call ID without rebuilding the
-// key [toolProjectionCache.describe] compares, which is what lets the append path
-// reuse a description its scan did not touch.
-func (c *toolProjectionCache) cached(id string) (*toolActivity, bool) {
-	if c == nil {
-		return nil, false
-	}
-
-	entry, ok := c.entries[id]
-
-	return entry.activity, ok
-}
-
 func (c *toolProjectionCache) retain(records map[string]*toolActivityRecord) {
 	if c == nil {
 		return

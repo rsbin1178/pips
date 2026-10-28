@@ -154,5 +154,5 @@ func TestCloneReadOnlyAfterProgressClears(t *testing.T) {
 	state := startBenchTool(t, fixtureState(t, nil))
 	view := state.CloneReadOnly()
 	assert.Nil(t, view.Tools[0].Update)
-	assert.True(t, view.Tools[0].Call.Arguments != nil)
+	assert.NotNil(t, view.Tools[0].Call.Arguments)
 }

@@ -90,6 +90,7 @@ func TestLiveChildStatesTakesTheObservationWithoutCloning(t *testing.T) {
 
 	require.Contains(t, states, "live")
 	assert.NotContains(t, states, "finished")
+
 	source := observation["live"]
 	taken := states["live"]
 	assert.Same(t, &source.Transcript[0], &taken.Transcript[0],

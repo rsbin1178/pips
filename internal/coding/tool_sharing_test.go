@@ -102,7 +102,9 @@ func TestCommittedToolResultSharesTranscriptPayload(t *testing.T) {
 	cloneData := structuredData(t, cloned.Tools[0].Result)
 	assert.NotSame(t, &shared[0], &cloneData[0])
 	cloneData[0] = 'X'
+
 	assert.NotEqual(t, byte('X'), shared[0], "mutating the clone cannot reach the original")
+
 	view := committed.CloneReadOnly()
 	viewData := structuredData(t, view.Tools[0].Result)
 	assert.Same(t, &shared[0], &viewData[0])
@@ -130,6 +132,7 @@ func TestSharedToolPayloadKeepsSiblingStatesIsolated(t *testing.T) {
 		Turn: 1, Call: call,
 	}))
 	require.NoError(t, err)
+
 	result := structuredToolResult("call-share", ai.JSON(`{"value":"shared"}`))
 	completed, err := Reduce(started, toolSharingEvent(started, EventToolCompleted, ToolCompleted{
 		Turn: 1, Call: call, Result: result,

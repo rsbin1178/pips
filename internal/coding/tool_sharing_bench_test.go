@@ -37,6 +37,7 @@ func committedToolBatch(tb testing.TB, tools, payload int, share bool) State {
 			Turn: 1, Call: call,
 		}))
 		require.NoError(tb, err)
+
 		state = started
 
 		result := structuredToolResult(call.ID, ai.JSON(`{"data":"`+strings.Repeat("y", payload)+`"}`))
@@ -44,7 +45,9 @@ func committedToolBatch(tb testing.TB, tools, payload int, share bool) State {
 			Turn: 1, Call: call, Result: result,
 		}))
 		require.NoError(tb, err)
+
 		state = completed
+
 		parts = append(parts, result.Parts[0])
 	}
 
@@ -61,8 +64,10 @@ func committedToolBatch(tb testing.TB, tools, payload int, share bool) State {
 	for index := range committed.Tools {
 		message, cloneErr := ai.CloneMessage(committed.Tools[index].Result)
 		require.NoError(tb, cloneErr)
+
 		cloned, ok := message.(ai.ToolMessage)
 		require.True(tb, ok)
+
 		committed.Tools[index].Result = cloned
 	}
 
@@ -84,6 +89,7 @@ func TestCommittedToolBatchRetainsOnePayloadCopy(t *testing.T) {
 	for index := range transcript.Parts {
 		part, ok := transcript.Parts[index].Content[0].(ai.StructuredContentPart)
 		require.True(t, ok)
+
 		owned[&part.Data[0]] = struct{}{}
 	}
 
@@ -92,6 +98,7 @@ func TestCommittedToolBatchRetainsOnePayloadCopy(t *testing.T) {
 		_, shared := owned[&data[0]]
 		assert.True(t, shared, "tool %d shares its transcript payload", index)
 	}
+
 	assert.Len(t, owned, 8, "one payload per committed part")
 }
 
@@ -117,6 +124,7 @@ func BenchmarkRetainedCompletedToolBatch(b *testing.B) {
 			for b.Loop() {
 				state := committedToolBatch(b, tools, payload, share)
 				retainedToolSharingSink = state
+
 				runtime.GC()
 
 				var stats runtime.MemStats

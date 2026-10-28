@@ -101,17 +101,17 @@ func BenchmarkFullscreenProjectionRetained(b *testing.B) {
 			runtime.GC()
 			runtime.ReadMemStats(&after)
 
-			retained := int64(after.HeapAlloc) - int64(before.HeapAlloc)
-			b.Logf("messages=%d tools=%d retained=%dKB activities=%d projectionEntries=%d scanRecords=%d blocks=%d records=%d",
+			retained := float64(after.HeapAlloc) - float64(before.HeapAlloc)
+			b.Logf("messages=%d tools=%d retained=%.0fKB activities=%d projectionEntries=%d scanRecords=%d blocks=%d records=%d",
 				len(state.Transcript), len(state.Tools), retained/1024,
 				len(model.toolActivities), len(model.toolProjection.entries),
 				len(model.frameCache.toolScan.records), len(model.frameCache.entries),
 				len(model.transcript.records))
-			b.ReportMetric(float64(retained), "retained-B")
+			b.ReportMetric(retained, "retained-B")
 
 			b.ResetTimer()
 
-			for index := 0; index < b.N; index++ {
+			for range b.N {
 				runtime.KeepAlive(model)
 			}
 		})
@@ -124,9 +124,9 @@ func TestFullscreenProjectionRetainsOneBlockPerRecord(t *testing.T) {
 	state := toolBulkState(600, 200)
 	model := fullscreenProjectionModel(t, state)
 
-	require.Equal(t, len(model.frameCache.entries), len(model.transcript.records),
+	require.Len(t, model.transcript.records, len(model.frameCache.entries),
 		"the store keeps one record per cached entry")
-	require.Equal(t, len(model.toolActivities), len(state.Tools))
+	require.Len(t, state.Tools, len(model.toolActivities))
 
 	shared := 0
 
@@ -166,12 +166,12 @@ func BenchmarkTranscriptModeSnapshotRetained(b *testing.B) {
 		runtime.GC()
 		runtime.ReadMemStats(&after)
 
-		retained := int64(after.HeapAlloc) - int64(before.HeapAlloc)
-		b.Logf("rows=%d retained=%dKB", len(rows), retained/1024)
-		b.ReportMetric(float64(retained), "retained-B")
+		retained := float64(after.HeapAlloc) - float64(before.HeapAlloc)
+		b.Logf("rows=%d retained=%.0fKB", len(rows), retained/1024)
+		b.ReportMetric(retained, "retained-B")
 		b.ResetTimer()
 
-		for index := 0; index < b.N; index++ {
+		for range b.N {
 			runtime.KeepAlive(rows)
 		}
 	})
@@ -186,12 +186,12 @@ func BenchmarkTranscriptModeSnapshotRetained(b *testing.B) {
 		runtime.GC()
 		runtime.ReadMemStats(&after)
 
-		retained := int64(after.HeapAlloc) - int64(before.HeapAlloc)
-		b.Logf("records=%d retained=%dKB", len(document.store.records), retained/1024)
-		b.ReportMetric(float64(retained), "retained-B")
+		retained := float64(after.HeapAlloc) - float64(before.HeapAlloc)
+		b.Logf("records=%d retained=%.0fKB", len(document.store.records), retained/1024)
+		b.ReportMetric(retained, "retained-B")
 		b.ResetTimer()
 
-		for index := 0; index < b.N; index++ {
+		for range b.N {
 			runtime.KeepAlive(document)
 		}
 	})
@@ -215,15 +215,15 @@ func BenchmarkFullscreenProjectionMessageScaling(b *testing.B) {
 			runtime.GC()
 			runtime.ReadMemStats(&after)
 
-			retained := int64(after.HeapAlloc) - int64(before.HeapAlloc)
-			b.Logf("messages=%d tools=%d retained=%dKB",
+			retained := float64(after.HeapAlloc) - float64(before.HeapAlloc)
+			b.Logf("messages=%d tools=%d retained=%.0fKB",
 				len(state.Transcript), len(state.Tools), retained/1024)
-			b.ReportMetric(float64(retained), "retained-B")
-			b.ReportMetric(float64(retained)/float64(len(state.Transcript)), "B/message")
+			b.ReportMetric(retained, "retained-B")
+			b.ReportMetric(retained/float64(len(state.Transcript)), "B/message")
 
 			b.ResetTimer()
 
-			for index := 0; index < b.N; index++ {
+			for range b.N {
 				runtime.KeepAlive(model)
 			}
 		})

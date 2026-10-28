@@ -16,7 +16,7 @@ func TestCaptureWritesAnAtomicGzipProfile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "profiles", "heap.pprof")
 	require.NoError(t, Capture(path))
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is a fixed filename under t.TempDir.
 	require.NoError(t, err)
 	require.NotEmpty(t, data)
 	assert.True(t, bytes.HasPrefix(data, []byte{0x1f, 0x8b}), "pprof writes a gzip stream")
@@ -43,7 +43,7 @@ func TestStartCapturesOnExitWhenConfigured(t *testing.T) {
 	stop := Start()
 	stop()
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is a fixed filename under t.TempDir.
 	require.NoError(t, err)
 	assert.True(t, bytes.HasPrefix(data, []byte{0x1f, 0x8b}))
 }

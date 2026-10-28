@@ -172,7 +172,7 @@ func TestSearchMatchesTheRowsAThinkingBlockRenders(t *testing.T) {
 // the window rather than the conversation: the same frame work for four times the
 // messages, and no settled record re-rendered.
 //
-//nolint:paralleltest // AllocsPerRun must not run beside another test.
+
 func TestOversizedRecordKeepsABoundedRowWindow(t *testing.T) {
 	t.Parallel()
 

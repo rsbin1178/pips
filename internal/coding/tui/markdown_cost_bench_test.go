@@ -35,6 +35,7 @@ func benchmarkLiveListBody(bytes int) string {
 func benchmarkLiveTableBody(bytes int) string {
 	var body strings.Builder
 	body.WriteString("| column one | column two |\n| --- | --- |\n")
+
 	row := "| a value | another value |\n"
 	body.WriteString(strings.Repeat(row, (bytes-body.Len())/len(row)+1))
 
@@ -147,6 +148,7 @@ func BenchmarkLiveMutableSeam(b *testing.B) {
 				}
 
 				b.ReportAllocs()
+
 				for index := 0; b.Loop(); index++ {
 					rows, err := renderer.renderLiveRows(
 						"draft", grownLiveShape(shape, body, index), 100, 2, themeDark, false, true,
@@ -154,6 +156,7 @@ func BenchmarkLiveMutableSeam(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
+
 					if rows.count() == 0 {
 						b.Fatal("no rows")
 					}
@@ -190,13 +193,12 @@ func BenchmarkSettledCodeBlock(b *testing.B) {
 // alreadyDetached skips the copy, which is what the renderer does for a window
 // whose rows it produced individually. Passing false exercises the window the
 // transcript store takes of one rendered document.
-func windowRetainedHeap(alreadyDetached bool) int64 {
+func windowRetainedHeap(alreadyDetached bool) uint64 {
 	source := strings.Repeat(strings.Repeat("x", 100)+"\n", 100000)
 	split := strings.Split(source, "\n")
 	rows := rowSegments{frozen: split, detached: alreadyDetached}.window(99999, 100000)
+
 	runtime.KeepAlive(source)
-	source = ""
-	split = nil
 
 	runtime.GC()
 
@@ -204,12 +206,14 @@ func windowRetainedHeap(alreadyDetached bool) int64 {
 	runtime.ReadMemStats(&stats)
 	runtime.KeepAlive(rows)
 
-	return int64(stats.HeapAlloc)
+	return stats.HeapAlloc
 }
 
 // TestRowWindowRetainedHeap pins the residency fix with a measurement rather than
 // a tight number: the window that keeps one row of a 10 MB render must not retain
 // that render.
+//
+//nolint:paralleltest // Heap residency comparisons must not overlap other tests.
 func TestRowWindowRetainedHeap(t *testing.T) {
 	if testing.Short() {
 		t.Skip("heap measurement")

@@ -1,4 +1,3 @@
-//nolint:wsl_v5 // One completed tool projection and its detail stay adjacent.
 package tui
 
 import (

@@ -325,7 +325,7 @@ func decodeJournalLine(line []byte, complete bool) (JournalRecord, bool, error) 
 // ReadJournal remains the validating reader for callers that inspect the whole
 // history; this path validates the record the append sequence continues from.
 func journalTailSequence(path string) (uint64, error) {
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // G304: same caller-owned store path used by OpenJournal.
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}

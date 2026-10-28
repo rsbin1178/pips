@@ -66,6 +66,7 @@ func TestSplitScrollbackPagesKeepsEveryLineWhole(t *testing.T) {
 		assert.LessOrEqual(t, len(page), scrollbackPageBytes, "page %d exceeds the byte budget", index)
 		rejoined = append(rejoined, strings.Split(page, "\n")...)
 	}
+
 	assert.Equal(t, lines, rejoined, "every line is preserved exactly once and in order")
 
 	oversized := strings.Repeat("y", scrollbackPageBytes+64)
@@ -83,6 +84,7 @@ func TestPrintScrollbackPagesWrapInOrderAndDrainTheQueue(t *testing.T) {
 	command := model.printScrollback(content)
 	require.NotNil(t, command)
 	require.Greater(t, len(model.presentation.writes), 1, "a large payload is paged")
+
 	for index, write := range model.presentation.writes {
 		assert.LessOrEqual(t, len(write.content), scrollbackPageBytes,
 			"write %d exceeds the byte budget", index)
@@ -163,16 +165,19 @@ func TestStartupHistoryPrintsInPages(t *testing.T) {
 	t.Parallel()
 
 	model := scrollbackTestModel(t)
+
 	state := readyState()
 	for index := range 3000 {
 		state.Transcript = append(state.Transcript,
 			ai.UserText(fmt.Sprintf("history-%05d-%s", index, strings.Repeat("h", 100))))
 	}
+
 	model.state = state
 
 	command := model.commitBannerOutput("STARTUP-BANNER")
 	require.NotNil(t, command)
 	require.Greater(t, len(model.presentation.writes), 1, "the startup history is paged")
+
 	for index, write := range model.presentation.writes {
 		assert.LessOrEqual(t, len(write.content), scrollbackPageBytes,
 			"startup page %d exceeds the byte budget", index)
@@ -183,6 +188,7 @@ func TestStartupHistoryPrintsInPages(t *testing.T) {
 	assert.Contains(t, printed, "STARTUP-BANNER")
 	require.Less(t, strings.Index(printed, "STARTUP-BANNER"),
 		strings.Index(printed, "history-00000"))
+
 	for index := 1; index < 3000; index++ {
 		assert.Less(t,
 			strings.Index(printed, fmt.Sprintf("history-%05d", index-1)),
@@ -225,6 +231,7 @@ func hugeScrollbackPayload(lines int) string {
 
 	var content strings.Builder
 	content.Grow(lines * 193)
+
 	for index := range lines {
 		if index > 0 {
 			content.WriteByte('\n')
@@ -244,12 +251,15 @@ func hugeScrollbackPayload(lines int) string {
 //
 // The caller's payload is built before the measurement, so the guard covers what
 // the write queue itself retains.
+//
+//nolint:paralleltest // Heap residency comparisons must not overlap other tests.
 func TestScrollbackDeferredWriteHoldsOnePageInsteadOfThePayload(t *testing.T) {
 	model := scrollbackTestModel(t)
 	payload := hugeScrollbackPayload(600000)
 	require.Greater(t, len(payload), 100<<20)
 
 	var command tea.Cmd
+
 	resident := retainedHeap(func() any {
 		command = model.printScrollback(payload)
 
@@ -262,7 +272,7 @@ func TestScrollbackDeferredWriteHoldsOnePageInsteadOfThePayload(t *testing.T) {
 
 	pager, ok := model.presentation.pendingSources[0].(*scrollbackTextPager)
 	require.True(t, ok, "a rendered string waits as a cursor over it, not as page copies")
-	assert.True(t, pager.content == payload, "the pager references the caller's string")
+	assert.Equal(t, pager.content, payload, "the pager references the caller's string")
 	assert.LessOrEqual(t, model.presentation.queuedBytes, scrollbackQueueBytes+scrollbackPageBytes,
 		"the rendered queue holds its cap plus at most one page")
 	assert.Less(t, resident, uint64(8<<20),
@@ -309,6 +319,7 @@ func TestScrollbackTextPagerSplitsAtRowBoundaries(t *testing.T) {
 	page, ok := trailing.nextPage(model, 64)
 	require.True(t, ok)
 	assert.Equal(t, "aaa\n", page.content, "a trailing newline keeps its empty last row")
+
 	_, ok = trailing.nextPage(model, 64)
 	assert.False(t, ok)
 
@@ -318,6 +329,7 @@ func TestScrollbackTextPagerSplitsAtRowBoundaries(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, oversized, page.content, "an unbreakable row stays whole")
 	assert.True(t, page.continuation, "the caller's continuation is reported on the first page")
+
 	_, ok = wide.nextPage(model, scrollbackPageBytes)
 	assert.False(t, ok)
 
@@ -357,11 +369,13 @@ func TestStableDeltaHandsOverBlocksInsteadOfAJoinedString(t *testing.T) {
 	t.Parallel()
 
 	model := scrollbackTestModel(t)
+
 	state := readyState()
 	for index := range 2000 {
 		state.Transcript = append(state.Transcript,
 			ai.UserText(fmt.Sprintf("delta-%05d-%s", index, strings.Repeat("d", 200))))
 	}
+
 	model.state = state
 
 	sources := model.streamingScrollbackSources(model.takeStableTimelineBlocks())
@@ -378,5 +392,6 @@ func TestStableDeltaHandsOverBlocksInsteadOfAJoinedString(t *testing.T) {
 	for index := range 2000 {
 		assert.Contains(t, printed, fmt.Sprintf("delta-%05d", index), "row %d is printed", index)
 	}
+
 	assert.False(t, model.presentation.hasPendingScrollback())
 }

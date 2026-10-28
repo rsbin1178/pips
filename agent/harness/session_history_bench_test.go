@@ -26,7 +26,7 @@ func historyBenchSession(tb testing.TB, count int) (*harness.Session, *harness.M
 		tb.Fatal(err)
 	}
 
-	for index := 0; index < count; index++ {
+	for index := range count {
 		text := fmt.Sprintf("%04d %s", index, strings.Repeat(historyBenchText, 2))
 
 		var message ai.Message
@@ -104,7 +104,7 @@ func BenchmarkSessionOpen(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		for index := 0; index < size; index++ {
+		for index := range size {
 			text := fmt.Sprintf("%04d %s", index, strings.Repeat(historyBenchText, 2))
 			if _, err := session.AppendMessage(ai.UserText(text), nil); err != nil {
 				b.Fatal(err)
@@ -174,14 +174,14 @@ func BenchmarkSessionHistoryRetained(b *testing.B) {
 			runtime.GC()
 			runtime.ReadMemStats(&after)
 
-			retained := int64(after.HeapAlloc) - int64(before.HeapAlloc)
-			b.ReportMetric(float64(retained), "retained-B")
-			b.ReportMetric(float64(retained)/float64(size), "B/entry")
-			b.Logf("retained heap: %d bytes (%.0f B/entry)", retained, float64(retained)/float64(size))
+			retained := float64(after.HeapAlloc) - float64(before.HeapAlloc)
+			b.ReportMetric(retained, "retained-B")
+			b.ReportMetric(retained/float64(size), "B/entry")
+			b.Logf("retained heap: %.0f bytes (%.0f B/entry)", retained, retained/float64(size))
 
 			b.ResetTimer()
 
-			for index := 0; index < b.N; index++ {
+			for range b.N {
 				runtime.KeepAlive(session)
 				runtime.KeepAlive(store)
 			}

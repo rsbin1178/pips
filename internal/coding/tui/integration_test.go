@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -496,7 +497,7 @@ func TestScriptedRuntimeToolSharingKeepsCardDetailAndJSON(t *testing.T) {
 		secondJSON, marshalErr := json.Marshal(second)
 		require.NoError(t, marshalErr)
 
-		assert.Equal(t, string(firstJSON), string(secondJSON), "the projection is stable")
+		assert.True(t, bytes.Equal(firstJSON, secondJSON), "the projection is byte-for-byte stable")
 		assert.Contains(t, string(firstJSON), "call-1")
 		projected++
 	}

@@ -466,6 +466,8 @@ func TestLargeLiveFrameKeepsTheEventLoopResponsive(t *testing.T) {
 // TestRowWindowReleasesTheWholeRender pins the residency fix: a window that keeps
 // a small share of a record's rows must not keep the record's rendered string
 // alive through the rows it retained.
+//
+//nolint:gosec // G103: compare read-only string addresses to verify backing storage is released; neither pointer is dereferenced.
 func TestRowWindowReleasesTheWholeRender(t *testing.T) {
 	t.Parallel()
 
@@ -485,6 +487,8 @@ func TestRowWindowReleasesTheWholeRender(t *testing.T) {
 
 // TestRowWindowKeepsProportionalWindowsZeroCopy pins the other side: a window
 // that keeps most of the record is not copied.
+//
+//nolint:gosec // G103: compare read-only string addresses to verify zero-copy windows; neither pointer is dereferenced.
 func TestRowWindowKeepsProportionalWindowsZeroCopy(t *testing.T) {
 	t.Parallel()
 
