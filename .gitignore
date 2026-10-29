@@ -43,7 +43,8 @@ go.work.sum
 /AGENTS.md
 /skills-lock.json
 
-# Local Trellis state
-.trellis/
-**/research/vendor/
+# Local workflow scratch: specs and tickets live here, never in the repo
+/.scratch/
+
+# Local media and tooling
 .vhs/

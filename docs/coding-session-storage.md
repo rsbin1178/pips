@@ -6,8 +6,8 @@ opens a transcript.
 
 The design keeps a workspace group holding one directory per session, a small
 metadata index, an authoritative protocol stream, model-input snapshots, and
-rebuildable derived state. The research notes and the full layer table live in
-`.trellis/tasks/10-10-session-store-v2/` (`research/` and `design.md`).
+rebuildable derived state. The layer table below is the contract; the research
+notes that led to it are not part of the repository.
 
 ## Layout
 

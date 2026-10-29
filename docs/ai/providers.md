@@ -197,7 +197,7 @@ model := compat.New(profile, "company-model")
 
 ### Reasoning 旋钮：按家族发送，不做能力猜测 (`ChatReasoning`)
 
-各厂商读取的思考旋钮不同。已审阅 Profile 会声明本家族真正读取的那个旋钮；**不确定是否支持时一律如实转发**，绝不用"大概不支持"删字段或拦截用户显式配置（完整规范见 `.trellis/spec/backend/provider-compatibility-policy.md`）。
+各厂商读取的思考旋钮不同。已审阅 Profile 会声明本家族真正读取的那个旋钮；**不确定是否支持时一律如实转发**，绝不用"大概不支持"删字段或拦截用户显式配置（完整规范见 `CODING_STANDARDS.md §7`）。
 
 | 厂商/家族 | 真正读取的旋钮 | Profile 默认 |
 | --- | --- | --- |

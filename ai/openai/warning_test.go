@@ -17,7 +17,7 @@ import (
 // TestStructuredOutputDowngradeWarns covers the compatibility half of the
 // warning contract: the request still goes out, but in a weaker encoding than
 // asked for, and the caller can tell
-// (.trellis/spec/backend/provider-compatibility-policy.md R5).
+// (CODING_STANDARDS.md §7 R5).
 func TestStructuredOutputDowngradeWarns(t *testing.T) {
 	t.Parallel()
 

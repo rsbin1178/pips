@@ -23,7 +23,7 @@ default_reasoning_level = "high"
 // TestConfigShowReportsReasoningState proves `config show` states the reasoning
 // level that will be sent and the encoding that carries it, so a profile change
 // is visible without starting a session
-// (.trellis/spec/backend/provider-compatibility-policy.md R5).
+// (CODING_STANDARDS.md §7 R5).
 func TestConfigShowReportsReasoningState(t *testing.T) {
 	t.Parallel()
 

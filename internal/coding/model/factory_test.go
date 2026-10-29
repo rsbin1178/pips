@@ -158,7 +158,7 @@ func TestNewWithoutDeclarationKeepsAdapterDefaults(t *testing.T) {
 // the families the compatibility policy stopped omitting: configuration ->
 // catalog -> generation policy -> adapter -> HTTP body. It proves a configured
 // level both starts the agent and is actually sent, rather than being withheld
-// by a capability guess (.trellis/spec/backend/provider-compatibility-policy.md
+// by a capability guess (CODING_STANDARDS.md §7
 // R1).
 func TestConfiguredReasoningLevelReachesTheWire(t *testing.T) {
 	t.Parallel()
