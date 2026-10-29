@@ -25,7 +25,7 @@ import (
 
 // Update defaults and bounds. The asset naming mirrors install.sh and the
 // release workflow: "pips_<version>_<os>_<arch>.tar.gz" with the release tag
-// verbatim, so a "v0.1.8" tag yields "pips_v0.1.8_darwin_arm64.tar.gz".
+// verbatim, so a "v0.2.0" tag yields "pips_v0.2.0_darwin_arm64.tar.gz".
 const (
 	updateDefaultRepo       = "rsbin1178/pips"
 	updateDefaultAPIBase    = "https://api.github.com"
@@ -365,7 +365,7 @@ func (c updateClient) resolveRelease(ctx context.Context, version string) (updat
 }
 
 // assetName picks the platform asset. The release workflow names it after the
-// tag verbatim ("pips_v0.1.8_linux_amd64.tar.gz"), so the tag is used as-is; an
+// tag verbatim ("pips_v0.1.0_linux_amd64.tar.gz"), so the tag is used as-is; an
 // explicit asset list wins when it names the platform asset differently.
 func (c updateClient) assetName(release updateRelease, tag string) (string, error) {
 	expected := fmt.Sprintf("pips_%s_%s_%s.tar.gz", tag, c.os, c.arch)

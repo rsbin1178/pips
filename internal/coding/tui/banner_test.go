@@ -189,10 +189,10 @@ func TestStartupBannerVersionLabelShowsTheRelease(t *testing.T) {
 		version string
 		want    string
 	}{
-		{"release tag", "v0.1.7", "v0.1.7"},
-		{"between releases", "v0.1.7-6-g274ace2", "v0.1.7"},
-		{"uncommitted work", "v0.1.7-dirty", "v0.1.7"},
-		{"both suffixes", "v0.1.7-6-g274ace2-dirty", "v0.1.7"},
+		{"release tag", "v0.1.0", "v0.1.0"},
+		{"between releases", "v0.1.0-6-g274ace2", "v0.1.0"},
+		{"uncommitted work", "v0.1.0-dirty", "v0.1.0"},
+		{"both suffixes", "v0.1.0-6-g274ace2-dirty", "v0.1.0"},
 		{"prerelease keeps its own suffix", "v0.2.0-rc1", "v0.2.0-rc1"},
 		{"no version", "", "dev"},
 		{"whitespace only", "   ", "dev"},

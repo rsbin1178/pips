@@ -1,7 +1,7 @@
 GO=go
 
 # Build stamp. The release version comes from the nearest tag; override on the
-# command line (make release VERSION=v0.1.2) when the tag is not yet created.
+# command line (make release VERSION=v0.2.0) when the tag is not yet created.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)

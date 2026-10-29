@@ -40,7 +40,7 @@ type startupBannerContext struct {
 
 // versionLabel is the header's version text: the release the build belongs to.
 //
-// A build between releases reports a git describe string, "v0.1.7-6-g274ace2", and a
+// A build between releases reports a git describe string, "v0.1.0-6-g274ace2", and a
 // build with uncommitted changes appends "-dirty". The header names the release
 // rather than the commit or the working tree, so both suffixes are dropped. A tag
 // carrying its own suffix, such as "v0.2.0-rc1", is left alone, because it does not

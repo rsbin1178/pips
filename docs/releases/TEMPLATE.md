@@ -1,7 +1,7 @@
 # Release notes
 
-One file per release, named after the tag: `docs/releases/v0.1.7.md` is the body of the GitHub release
-`v0.1.7`. `.github/workflows/release.yml` reads it, appends the compare link, and publishes it; if the
+One file per release, named after the tag: `docs/releases/<tag>.md` is the body of the GitHub release
+`<tag>`. `.github/workflows/release.yml` reads it, appends the compare link, and publishes it; if the
 file is missing the workflow warns and falls back to GitHub's generated notes.
 
 ## Updating a published note
