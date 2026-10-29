@@ -122,7 +122,7 @@ to your user `PATH`.
 
 | Variable | Effect |
 | --- | --- |
-| `PIPS_VERSION` | install a specific tag (`PIPS_VERSION=v0.1.7`) instead of the latest release |
+| `PIPS_VERSION` | install a specific tag (`PIPS_VERSION=v0.1.0`) instead of the latest release |
 | `PIPS_BIN_DIR` | install into this directory instead of the default above |
 | `PIPS_NO_MODIFY_PATH=1` | never edit shell rc files or the user `PATH`; print the line instead |
 | `GH_TOKEN` | use a token for the releases API, which avoids its anonymous rate limit |
@@ -144,7 +144,7 @@ Archives are named `pips_<tag>_<os>_<arch>.tar.gz`, where `os` is `darwin` or `l
 Building from source requires Go 1.27.2 or later:
 
 ```sh
-git clone --branch v0.1.7 https://github.com/rsbin1178/pips.git   # or the tag you want
+git clone --branch v0.1.0 https://github.com/rsbin1178/pips.git   # or the tag you want
 cd pips
 go install ./cmd/pips
 ```

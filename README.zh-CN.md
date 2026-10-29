@@ -120,7 +120,7 @@ irm https://raw.githubusercontent.com/rsbin1178/pips/main/install.ps1 | iex
 
 | 环境变量 | 作用 |
 | --- | --- |
-| `PIPS_VERSION` | 安装指定 tag（例如 `PIPS_VERSION=v0.1.7`），而不是最新发布 |
+| `PIPS_VERSION` | 安装指定 tag（例如 `PIPS_VERSION=v0.1.0`），而不是最新发布 |
 | `PIPS_BIN_DIR` | 指定安装目录，跳过上面的默认位置 |
 | `PIPS_NO_MODIFY_PATH=1` | 不改动 shell 配置与用户 `PATH`，只打印那行 |
 | `GH_TOKEN` | 用 token 访问 releases API，避开匿名速率限制 |
@@ -141,7 +141,7 @@ Windows 除 Linux/macOS 的归档外还提供 `pips_<tag>_windows_amd64.zip`，�
 从源码构建要求 Go 1.27.2 或更高版本：
 
 ```sh
-git clone --branch v0.1.7 https://github.com/rsbin1178/pips.git   # 或你需要的 tag
+git clone --branch v0.1.0 https://github.com/rsbin1178/pips.git   # 或你需要的 tag
 cd pips
 go install ./cmd/pips
 ```
