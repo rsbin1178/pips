@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -121,17 +122,28 @@ func BenchmarkLiveFenceFrame(b *testing.B) {
 			body := largeFenceBody("go", size)
 			renderer := newMarkdownRenderer(8)
 
-			b.ReportAllocs()
-
-			for index := 0; b.Loop(); index++ {
+			// One frame asks for a body the frame cache does not hold, which is what
+			// a growing tail costs every time it is rendered.
+			frame := func() error {
 				delete(renderer.liveFrames, "draft")
+
 				rows, err := renderer.renderLiveRows("draft", body+"// frame\n", 100, 2, themeDark, false, true)
 				if err != nil {
-					b.Fatal(err)
+					return err
 				}
 
 				if rows.count() == 0 {
-					b.Fatal("no rows")
+					return errors.New("no rows")
+				}
+
+				return nil
+			}
+
+			b.ReportAllocs()
+
+			for b.Loop() {
+				if err := frame(); err != nil {
+					b.Fatal(err)
 				}
 			}
 		})

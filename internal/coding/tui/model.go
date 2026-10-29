@@ -2588,13 +2588,7 @@ func (m *Model) managedTimelineNeedsLeadingGap(blocks []timelineBlock) bool {
 // truthful for every block whose body and title are its visible content, and it
 // answers true for the kinds that always draw a row of their own.
 func timelineProjectionDrawsRows(blocks []timelineBlock) bool {
-	for _, block := range blocks {
-		if timelineBlockDrawsRows(block) {
-			return true
-		}
-	}
-
-	return false
+	return slices.ContainsFunc(blocks, timelineBlockDrawsRows)
 }
 
 // timelineBlockDrawsRows reports whether one block contributes a visible row
@@ -2608,6 +2602,9 @@ func timelineBlockDrawsRows(block timelineBlock) bool {
 	}
 
 	switch block.kind {
+	case blockUser, blockAssistant, blockDraft, blockDiagnostic:
+		// These kinds draw the title and body tested above and nothing else.
+		return false
 	case blockThinking, blockIncomplete, blockCompaction, blockQuestion, blockCompletion,
 		blockChange, blockTeam, blockTool, blockSubagent, blockPlan, blockError:
 		return true
