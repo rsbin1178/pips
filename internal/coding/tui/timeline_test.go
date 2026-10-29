@@ -510,6 +510,45 @@ func TestVisibleDiagnosticsKeepsEveryOtherIntegrationNotice(t *testing.T) {
 	assert.Equal(t, []coding.IntegrationDiagnostic{keptDiagnosticFixture()}, visible)
 }
 
+func TestTimelineKeepsModelRetryDiagnosticsInStatus(t *testing.T) {
+	t.Parallel()
+
+	diagnostics := []coding.IntegrationDiagnostic{
+		{
+			Component: "model", Code: "incomplete_stream", Message: "retry stream detail",
+			Response: &coding.ModelResponseFailure{Kind: "incomplete_stream", Attempt: 1, MaxRetries: 10},
+		},
+		{
+			Component: "model", Code: "empty_response", Message: "retry empty detail",
+			Response: &coding.ModelResponseFailure{Kind: "empty_response", Attempt: 2, MaxRetries: 10},
+		},
+		{Component: "model", Code: "unavailable", Message: "model unavailable"},
+		{
+			Component: "model", Code: "response_failed", Message: "model failure without retry",
+			Response: &coding.ModelResponseFailure{Kind: "response_failed"},
+		},
+		{
+			Component: "hooks", Code: "failed", Message: "hook failure",
+			Response: &coding.ModelResponseFailure{Kind: "response_failed", Attempt: 1, MaxRetries: 1},
+		},
+	}
+	state := coding.State{
+		Diagnostics: diagnostics,
+		LastError:   &coding.RuntimeError{Code: "model_stream_incomplete", Message: "model recovery stopped"},
+	}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 4)
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
+	assert.NotContains(t, rendered, "retry stream detail")
+	assert.NotContains(t, rendered, "retry empty detail")
+	assert.Contains(t, rendered, "model unavailable")
+	assert.Contains(t, rendered, "model failure without retry")
+	assert.Contains(t, rendered, "hook failure")
+	assert.Contains(t, rendered, "model recovery stopped")
+	assert.Equal(t, diagnostics, visibleDiagnostics(state.Diagnostics), "status retains retry details")
+}
+
 // TestFrameOmitsTheNonRepositoryNotice drives the real viewport: a session
 // opened outside a repository shows its conversation and no change notice at
 // all, in both presentations.
