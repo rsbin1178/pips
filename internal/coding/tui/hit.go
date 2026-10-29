@@ -27,6 +27,10 @@ type frameHitMap struct {
 	// row, so a click there can be answered without re-deciding the question
 	// against a scroll position the reader has already left.
 	turnIndicator bool
+	// turnRail is the rail's pointer map: the marks this frame painted, in frame rows.
+	// It is empty unless the frame drew a rail, so a click on a margin the frame
+	// left blank stays the transcript's.
+	turnRail turnRailHits
 	// composerTop is the frame row the Composer band started at, or -1 when the
 	// height clamp pushed it off the frame, and composerRows is how many rows it
 	// owns. A wheel notch that lands there belongs to the draft the Composer is
@@ -78,6 +82,18 @@ func (m *Model) bandRowOf(parts []string, index, dropped int, affords bool) int 
 	return frameRowOf(parts, index, dropped)
 }
 
+// leftClick reports the pointer's left click, the one gesture every painted
+// control answers. Any other button, and any other pointer event, is not a click
+// on anything the frame drew.
+func leftClick(message tea.MouseMsg) (tea.MouseClickMsg, bool) {
+	click, ok := message.(tea.MouseClickMsg)
+	if !ok || click.Button != tea.MouseLeft {
+		return tea.MouseClickMsg{}, false
+	}
+
+	return click, true
+}
+
 // bandMouse answers a left click on the reserved band by returning to the newest
 // rows, which is the mouse form of End. It requires the ready frame to be the one
 // on screen, because the recorded row belongs to that frame; a frame that drew no
@@ -87,8 +103,8 @@ func (m *Model) bandMouse(message tea.MouseMsg) (tea.Cmd, bool) {
 		return nil, false
 	}
 
-	click, ok := message.(tea.MouseClickMsg)
-	if !ok || click.Button != tea.MouseLeft || click.Y != m.frameHit.band {
+	click, ok := leftClick(message)
+	if !ok || click.Y != m.frameHit.band {
 		return nil, false
 	}
 
@@ -135,11 +151,16 @@ func (m *Model) handleMouse(message tea.MouseMsg) tea.Cmd {
 		return command
 	}
 
-	// The turn indicator and the reserved band are pointer targets of their own and
-	// need no hit test: the frame that painted each one recorded where. They are
-	// answered before the selection gate because neither is a selection gesture —
-	// the gesture that owns the transcript would otherwise drop a click on them.
+	// The turn indicator, the turn rail and the reserved band are pointer targets
+	// of their own and need no hit test: the frame that painted each one recorded
+	// where. They are answered before the selection gate because none of them is a
+	// selection gesture — the gesture that owns the transcript would otherwise
+	// drop a click on them.
 	if command, handled := m.turnIndicatorMouse(message); handled {
+		return command
+	}
+
+	if command, handled := m.turnRailMouse(message); handled {
 		return command
 	}
 

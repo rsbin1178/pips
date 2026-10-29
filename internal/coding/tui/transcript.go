@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -1235,6 +1236,15 @@ func (r *scrollRegion) visible() string {
 	}
 
 	return strings.Join(r.source.rowsIn(r.offset, end), "\n")
+}
+
+// scrollToRow moves the transcript window so one row sits at the top, and asks for
+// the repaint the move needs. A row too close to the end stops at the tail, which
+// is as far as the viewport scrolls.
+func (m *Model) scrollToRow(row int) tea.Cmd {
+	m.transcriptScroll.scrollTo(row)
+
+	return redrawFrame()
 }
 
 // rowMatches reports whether one rendered row contains the query. Matching is

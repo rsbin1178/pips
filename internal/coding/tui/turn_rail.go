@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -55,6 +56,9 @@ type turnRailState struct {
 	// is the shipped frame; the geometry keeps the spacing a parameter because a
 	// mark per row and a mark every other row read very differently.
 	pitch int
+	// marks is the scratch the frame's pointer map is recorded into, so a frame
+	// does not allocate for the rail. The map itself belongs to the frame's.
+	marks []turnRailHit
 }
 
 // markPitch reports the row stride one mark occupies.
@@ -64,6 +68,42 @@ func (s turnRailState) markPitch() int {
 	}
 
 	return s.pitch
+}
+
+// turnRailHit is one painted mark: the frame row it sits on, the user turn it
+// stands for, and that turn's first transcript row as the frame was painted. The
+// row travels with the mark rather than being looked up at click time, so a click
+// lands where the mark said it would even if the store changed underneath it.
+type turnRailHit struct {
+	row      int
+	turn     int
+	startRow int
+}
+
+// turnRailHits is the rail's pointer map, recorded from the frame that painted
+// the marks rather than re-decided at click time: every painted mark answers for
+// its own user turn, in the cell the frame actually used.
+type turnRailHits struct {
+	painted bool
+	column  int
+	marks   []turnRailHit
+}
+
+// hitAt resolves a frame row to the mark the rail painted there. A row the rail
+// did not paint — the blank row between two marks, or below the last one —
+// answers ok false.
+func (hits turnRailHits) hitAt(row int) (turnRailHit, bool) {
+	if !hits.painted {
+		return turnRailHit{}, false
+	}
+
+	for _, mark := range hits.marks {
+		if mark.row == row {
+			return mark, true
+		}
+	}
+
+	return turnRailHit{}, false
 }
 
 // turnRailShown reports whether this frame has the cells and the rows for a rail.
@@ -126,57 +166,126 @@ func (m *Model) turnRailActiveIndex(starts []int) int {
 	return min(max(0, turn), last)
 }
 
-// drawTurnRail paints the rail into the right margin of a composed transcript
-// band. A hidden frame is returned untouched, so losing the rail restores the
-// band exactly and costs nothing: the band is only split, and the user turn list
-// only consulted, once the cheap gates have passed.
-func (m *Model) drawTurnRail(band string) string {
-	if band == "" {
-		return band
-	}
+// turnRailFrame is the rail one frame paints: the user turns it can show, the
+// window it shows them from, and the active one among them.
+type turnRailFrame struct {
+	starts   []int
+	start    int
+	active   int
+	capacity int
+	pitch    int
+}
 
-	rows := strings.Count(band, "\n") + 1
-	if !m.turnRailShown(rows) {
-		return band
+// frameRail resolves the rail for a frame with bandRows transcript rows, scrolling
+// the window so the active mark stays inside its comfort band. ok is false when
+// this frame affords no rail.
+func (m *Model) frameRail(bandRows int) (turnRailFrame, bool) {
+	if bandRows <= 0 || !m.turnRailShown(bandRows) {
+		return turnRailFrame{}, false
 	}
 
 	starts := m.transcript.userTurns()
 	if len(starts) < 2 {
-		return band
+		return turnRailFrame{}, false
 	}
 
 	pitch := m.turnRail.markPitch()
-	capacity := turnRailCapacity(rows, pitch)
+	capacity := turnRailCapacity(bandRows, pitch)
 
 	if capacity < 2 {
-		return band
+		return turnRailFrame{}, false
 	}
 
 	active := m.turnRailActiveIndex(starts)
 	m.turnRail.start = turnRailWindow(m.turnRail.start, active, len(starts), capacity)
-	slots := strings.Split(band, "\n")
-	column := m.railColumn()
 
-	for slot := range capacity {
-		turn := m.turnRail.start + slot
-		if turn >= len(starts) {
+	return turnRailFrame{
+		starts: starts, start: m.turnRail.start, active: active, capacity: capacity, pitch: pitch,
+	}, true
+}
+
+// isFaded reports whether one mark sits at a scrollable end of the window and is
+// therefore dimmed one step further. The current mark never fades.
+func (rail turnRailFrame) isFaded(turn int) bool {
+	if turn == rail.active {
+		return false
+	}
+
+	if turn == rail.start && rail.start > 0 {
+		return true
+	}
+
+	return turn == rail.start+rail.capacity-1 && rail.start+rail.capacity < len(rail.starts)
+}
+
+// drawTurnRail paints the rail into the right margin of a composed frame and
+// hands back that frame's own pointer map. bandRows is how many transcript rows
+// the frame shows: the rail decorates those and nothing else, so a click on the
+// composer or the status line never reaches it.
+//
+// A hidden frame is returned untouched, so losing the rail restores the frame
+// exactly and costs nothing: the frame is only split, and the user turn list only
+// consulted, once the cheap gates have passed.
+func (m *Model) drawTurnRail(frame string, bandRows int) (string, turnRailHits) {
+	rail, ok := m.frameRail(bandRows)
+	if !ok || frame == "" {
+		return frame, turnRailHits{}
+	}
+
+	rows := strings.Split(frame, "\n")
+	if bandRows > len(rows) {
+		bandRows = len(rows)
+	}
+
+	column := m.railColumn()
+	marks := m.turnRail.marks[:0]
+
+	for slot := range rail.capacity {
+		turn := rail.start + slot
+		row := slot * rail.pitch
+
+		if turn >= len(rail.starts) || row >= bandRows {
 			break
 		}
 
-		isCurrent := turn == active
-		atTop := turn == m.turnRail.start && m.turnRail.start > 0
-		atEnd := turn == m.turnRail.start+capacity-1 && m.turnRail.start+capacity < len(starts)
-		faded := !isCurrent && (atTop || atEnd)
-		row := slot * pitch
-		slots[row] = paintRailCell(slots[row], m.turnRailMark(isCurrent, faded), column)
+		glyph := m.turnRailGlyph(turn == rail.active, rail.isFaded(turn))
+		rows[row] = paintRailCell(rows[row], glyph, column)
+		marks = append(marks, turnRailHit{row: row, turn: turn, startRow: rail.starts[turn]})
 	}
 
-	return strings.Join(slots, "\n")
+	m.turnRail.marks = marks
+
+	return strings.Join(rows, "\n"), turnRailHits{painted: true, column: column, marks: marks}
 }
 
-// turnRailMark renders one mark. A faded mark is one step dimmer than the rest
+// turnRailMouse answers a left click in the rail column from the pointer map the
+// last painted frame recorded. A click on a mark jumps to that user turn; a click
+// on a blank row inside the transcript band is swallowed, because the column is
+// the rail's and not the entry underneath it. Everything else — another button,
+// another column, a row outside the band, or a frame that painted no rail —
+// belongs to whatever the pointer found there.
+func (m *Model) turnRailMouse(message tea.MouseMsg) (tea.Cmd, bool) {
+	hits := m.frameHit.turnRail
+	if !hits.painted || !m.readyViewOwnsPointer() {
+		return nil, false
+	}
+
+	click, ok := leftClick(message)
+	if !ok || click.X != hits.column || click.Y < 0 || click.Y >= m.frameHit.transcript {
+		return nil, false
+	}
+
+	mark, ok := hits.hitAt(click.Y)
+	if !ok {
+		return nil, true
+	}
+
+	return m.scrollToRow(mark.startRow), true
+}
+
+// turnRailGlyph renders one mark. A faded mark is one step dimmer than the rest
 // state, which is the terminal's stand-in for the scrollable-end fade band.
-func (m *Model) turnRailMark(active, faded bool) string {
+func (m *Model) turnRailGlyph(active, faded bool) string {
 	if m.options.NoColor {
 		if active {
 			return turnRailActiveNoColor

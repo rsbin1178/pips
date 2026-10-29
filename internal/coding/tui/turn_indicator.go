@@ -101,9 +101,8 @@ func (m *Model) turnIndicatorMouse(message tea.MouseMsg) (tea.Cmd, bool) {
 		return nil, false
 	}
 
-	click, isClick := message.(tea.MouseClickMsg)
-	if !isClick || click.Button != tea.MouseLeft || click.Y != row ||
-		click.X < left || click.X >= right {
+	click, isClick := leftClick(message)
+	if !isClick || click.Y != row || click.X < left || click.X >= right {
 		return nil, false
 	}
 
@@ -120,7 +119,5 @@ func (m *Model) jumpToPreviousTurn() tea.Cmd {
 		row = 0
 	}
 
-	m.transcriptScroll.scrollTo(row)
-
-	return redrawFrame()
+	return m.scrollToRow(row)
 }

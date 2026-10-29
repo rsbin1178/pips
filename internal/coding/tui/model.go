@@ -1682,6 +1682,10 @@ func (m *Model) readyView() tea.View {
 	// and why a frame with no visible transcript row draws none.
 	indicator := transcriptVisible > 0 && m.turnIndicatorShown()
 	content = m.drawTurnIndicator(clampFrameTail(content, m.height), indicator)
+	// The rail fills the margin the transcript band leaves blank. It is painted on
+	// the clamped frame, after the indicator, so its marks and the pointer map they
+	// carry are already in the frame's own coordinates.
+	content, railHits := m.drawTurnRail(content, transcriptVisible)
 	view := m.presentationView(content)
 	promptTop := frameRowOf(parts, promptIndex, dropped)
 	promptHit.place(promptTop, timelineInset(m.width))
@@ -1691,6 +1695,7 @@ func (m *Model) readyView() tea.View {
 		topDropped:    min(dropped, transcriptRows),
 		band:          m.bandRowOf(parts, bandIndex, dropped, bandHint != ""),
 		turnIndicator: indicator,
+		turnRail:      railHits,
 		question:      promptHit,
 		composerTop:   frameRowOf(parts, composerIndex, dropped),
 		composerRows:  lipgloss.Height(footer[composerFooterIndex]),
@@ -2530,10 +2535,7 @@ func (m *Model) transcriptWindow(height int) string {
 		visible = padRows(visible, height)
 	}
 
-	// The rail fills the margin the band already leaves blank. It is drawn on the
-	// composed band, after the selection and search highlights, so a mark is never
-	// painted over and the text column keeps every cell it had.
-	return m.drawTurnRail(visible)
+	return visible
 }
 
 // ownsScreen reports whether the frame is drawn in the alternate buffer, where

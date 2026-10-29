@@ -479,3 +479,208 @@ func TestTurnRailReusesTheUserTurnListAcrossFrames(t *testing.T) {
 		"a frame whose records did not change re-uses the cached user turn list")
 	assert.NotEmpty(t, markedRows(model), "the rail is still painted")
 }
+
+// railClick delivers a left click in the rail column on one frame row.
+func railClick(model *Model, row int) tea.Cmd {
+	return model.handleMouse(tea.MouseClickMsg{X: model.railColumn(), Y: row, Button: tea.MouseLeft})
+}
+
+// markRowForTurn reports the frame row the pointer map says one user turn's mark
+// sits on.
+func markRowForTurn(model *Model, turn int) (int, bool) {
+	for _, mark := range model.frameHit.turnRail.marks {
+		if mark.turn == turn {
+			return mark.row, true
+		}
+	}
+
+	return 0, false
+}
+
+func TestTurnRailClickJumpsToTheUserTurn(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 30, 80, 30, true)
+	starts := model.transcript.userTurns()
+	capacity := railCapacity(model)
+	require.Greater(t, capacity, 2, "the fixture needs a scrolled rail window")
+
+	rows := markedRows(model)
+	require.Len(t, rows, capacity)
+
+	// Following the tail shows the last window, so the first visible mark is the
+	// window's first user turn.
+	clicked := len(starts) - capacity
+
+	require.NotNil(t, railClick(model, rows[0]))
+
+	assert.Equal(t, starts[clicked], model.transcriptScroll.offset,
+		"one click puts that user turn's first row at the top")
+	assert.False(t, model.transcriptScroll.follow, "a jump leaves the tail")
+
+	_ = model.View()
+	top, _, _ := strings.Cut(ansi.Strip(model.View().Content), "\n")
+	assert.Contains(t, top, "TURN-"+itoa(clicked+1),
+		"the frame opens on the prompt the mark stands for")
+	activeRow, ok := markRowForTurn(model, clicked)
+	require.True(t, ok, "the clicked user turn still has a mark")
+	assert.Equal(t, turnRailActiveNoColor, railGlyphs(model)[activeRow],
+		"the clicked user turn is the current mark")
+}
+
+func TestTurnRailClickLandsEachEndInOneClick(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 30, 80, 30, true)
+	starts := model.transcript.userTurns()
+	capacity := railCapacity(model)
+	rows := markedRows(model)
+	require.Greater(t, len(rows), 2)
+
+	// Following the tail already puts the newest turn's first row at the top, so
+	// that click cannot move the viewport. What it must do is answer as the rail —
+	// not as a selection — and leave the newest turn current.
+	newest := len(starts) - 1
+	require.NotNil(t, railClick(model, rows[len(rows)-1]))
+	assert.False(t, model.selection.visible, "the rail answered the click, not the transcript")
+	assert.Equal(t, min(starts[newest], model.transcriptScroll.maxOffset()),
+		model.transcriptScroll.offset, "the newest mark lands on the newest user turn")
+	assert.True(t, model.transcriptScroll.atBottom(),
+		"and the viewport is at the tail, where that turn is visible")
+
+	_ = model.View()
+	glyphs := railGlyphs(model)
+	assert.Equal(t, turnRailActiveNoColor, glyphs[rows[len(rows)-1]],
+		"the newest mark stays the current one")
+
+	// The first visible mark is the oldest turn of the window; one click reaches it
+	// even though the rail's own window has scrolled.
+	rows = markedRows(model)
+	require.Len(t, rows, capacity)
+	require.NotNil(t, railClick(model, rows[0]))
+	assert.Equal(t, starts[len(starts)-capacity], model.transcriptScroll.offset,
+		"the first visible mark lands on its own user turn")
+	assert.False(t, model.transcriptScroll.follow, "and the jump leaves the tail")
+}
+
+func TestTurnRailHitMapMatchesThePaintedMarks(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 30, 80, 30, true)
+	capacity := railCapacity(model)
+	starts := model.transcript.userTurns()
+	rows := markedRows(model)
+	require.Len(t, rows, capacity)
+
+	for slot, row := range rows {
+		mark, ok := model.frameHit.turnRail.hitAt(row)
+		require.True(t, ok, "row %d holds a mark", row)
+		assert.Equal(t, len(starts)-capacity+slot, mark.turn,
+			"mark %d stands for its own user turn", slot)
+		assert.Equal(t, starts[mark.turn], mark.startRow,
+			"and carries that turn's first row as the frame painted it")
+	}
+
+	_, ok := model.frameHit.turnRail.hitAt(rows[0] + 1)
+	assert.False(t, ok, "the blank row between two marks answers nothing")
+
+	// The window scrolls to the beginning: the map has to follow it rather than
+	// keep answering the window it was built for.
+	model.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	_ = model.View()
+
+	rows = markedRows(model)
+	require.Len(t, rows, capacity)
+
+	for slot, row := range rows {
+		mark, ok := model.frameHit.turnRail.hitAt(row)
+		require.True(t, ok)
+		assert.Equal(t, slot, mark.turn, "from the beginning the window starts at turn zero")
+	}
+}
+
+func TestTurnRailClickOnABlankRowDoesNothing(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 30, 80, 30, true)
+	rows := markedRows(model)
+	require.NotEmpty(t, rows)
+	blank := rows[0] + 1
+	require.Less(t, blank, model.frameHit.transcript, "the fixture needs a blank rail row")
+
+	_, painted := model.frameHit.turnRail.hitAt(blank)
+	require.False(t, painted, "the row between two marks carries no mark")
+
+	before := model.transcriptScroll.offset
+	assert.Nil(t, railClick(model, blank), "a blank rail row answers nothing")
+	assert.Equal(t, before, model.transcriptScroll.offset)
+	assert.False(t, model.selection.visible, "and it does not start a selection")
+}
+
+func TestTurnRailClickIsNotATranscriptClick(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 12, 80, 30, true)
+	rows := markedRows(model)
+	require.NotEmpty(t, rows)
+
+	press := model.handleMouse(tea.MouseClickMsg{X: model.railColumn(), Y: rows[0], Button: tea.MouseLeft})
+	require.NotNil(t, press)
+	assert.False(t, model.selection.visible, "the press is the rail's, not a selection")
+	assert.False(t, model.selection.dragging)
+
+	release := model.handleMouse(tea.MouseReleaseMsg{X: model.railColumn(), Y: rows[0], Button: tea.MouseLeft})
+	assert.Nil(t, release, "the release has no selection to finish")
+	assert.False(t, model.selection.visible, "the rail owns its column, not the transcript")
+	assert.Equal(t, routeNone, model.route.kind, "and no entry under it was activated")
+}
+
+func TestTurnRailClickNeedsAPaintedRail(t *testing.T) {
+	t.Parallel()
+
+	t.Run("inline mode never paints one", func(t *testing.T) {
+		t.Parallel()
+
+		model := readyModelWithController(t, stubController{state: turnRailConversation(12)}, true)
+		model.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+		model.rerenderTranscript(true)
+		_ = model.View()
+		require.True(t, model.frameHit.painted, "the fixture has to paint a frame")
+		assert.False(t, model.turnRailShown(turnRailMinRows),
+			"inline mode has no managed viewport to raise a rail in")
+
+		before := model.transcriptScroll.offset
+		assert.Nil(t, railClick(model, 0), "there is no rail to answer")
+		assert.Equal(t, before, model.transcriptScroll.offset)
+		assert.False(t, model.selection.visible)
+	})
+
+	t.Run("the escape hatch answers none", func(t *testing.T) {
+		t.Parallel()
+
+		model := turnRailModel(t, 30, 80, 30, true)
+		model.Update(ctrlO())
+		require.True(t, model.transcriptMode.active)
+
+		before := model.transcriptScroll.offset
+		assert.Nil(t, railClick(model, 0), "the terminal owns the screen and its clicks")
+		assert.Equal(t, before, model.transcriptScroll.offset)
+	})
+
+	t.Run("a narrow frame paints none", func(t *testing.T) {
+		t.Parallel()
+
+		model := turnRailModel(t, 30, 80, 30, true)
+		require.True(t, model.frameHit.turnRail.painted)
+
+		model.Update(tea.WindowSizeMsg{Width: composerBoxMinWidth - 1, Height: 30})
+		_ = model.View()
+		require.False(t, model.frameHit.turnRail.painted, "the narrow frame paints no rail")
+
+		before := model.transcriptScroll.offset
+		railClick(model, 0)
+		assert.Equal(t, before, model.transcriptScroll.offset, "no rail jump is answered")
+		assert.True(t, model.selection.visible,
+			"the margin is the transcript's again, so the click selects")
+	})
+}
