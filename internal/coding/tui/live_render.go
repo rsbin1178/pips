@@ -80,6 +80,26 @@ func newLiveRenderWorker() *liveRenderWorker {
 	return worker
 }
 
+// liveRenderDutyFactor bounds how much wall time the background renderer may
+// spend rendering: one finished version stands for its own cost times this
+// factor, so a whole-body render that costs 50 ms is repeated at most every
+// 150 ms and the worker holds a third of a core instead of all of it.
+//
+// The frame on screen stays correct while the worker waits — it is the previous
+// whole render of a shorter version of the same body — and the newest version is
+// always the next one rendered, so this bounds CPU without dropping content. For
+// an ordinary tail the wait is shorter than the next frame, which leaves
+// realtime presentation unchanged; only an un-freezable body large enough to
+// cost more than a frame is throttled, and that is exactly the body that used to
+// hold a core for the length of the stream.
+const liveRenderDutyFactor = 3
+
+// liveRenderPause is how long the worker stands on a finished version before it
+// takes the next one. A zero cost costs no pause, so a fast render never waits.
+func liveRenderPause(cost time.Duration) time.Duration {
+	return max(0, (liveRenderDutyFactor-1)*cost)
+}
+
 func (w *liveRenderWorker) run() {
 	// The worker's renderer is private. Its capacity is small because it exists to
 	// render one version at a time, not to cache a stream.
@@ -92,15 +112,32 @@ func (w *liveRenderWorker) run() {
 		case request := <-w.requests:
 			started := time.Now()
 			rows, err := request.miss.render(renderer)
+			cost := time.Since(started)
 			result := liveRenderResult{
 				sequence: request.sequence, epoch: request.epoch, miss: request.miss, rows: rows,
-				cost: time.Since(started), err: err,
+				cost: cost, err: err,
 			}
 
 			select {
 			case w.results <- result:
 			case <-w.done:
 				return
+			}
+
+			// The installed version stays on screen while the worker waits, and a
+			// request queued during the wait replaces any older one, so the pause
+			// bounds the share of a core the renderer may take without ever
+			// dropping content.
+			if pause := liveRenderPause(cost); pause > 0 {
+				timer := time.NewTimer(pause)
+
+				select {
+				case <-w.done:
+					timer.Stop()
+
+					return
+				case <-timer.C:
+				}
 			}
 		}
 	}

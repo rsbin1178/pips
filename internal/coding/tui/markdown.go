@@ -194,6 +194,13 @@ func (r *markdownRenderer) renderLiveRows(
 	noColor bool,
 	window bool,
 ) (rowSegments, error) {
+	// A large fenced block is rendered without its chroma lexer while the body is
+	// live. The transform is part of what a frame renders, so every comparison
+	// below — the exact background result, the reusable frame, the queued version
+	// — is made against the prepared content, and a body that only grows keeps
+	// preparing to the same bytes.
+	content = liveMarkdownContent(content)
+
 	// A version the background renderer already produced is exact and free.
 	if rows, ok := r.exactRows(slot, content, width, inset, theme, noColor, window); ok {
 		r.clearLiveStale(slot)

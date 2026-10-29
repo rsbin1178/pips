@@ -369,12 +369,13 @@ func TestManagedAssistantTailOwnsNativeScrollbackBoundaryImmediately(t *testing.
 	})
 	model.renderTranscript(false)
 
-	assert.True(
+	assert.Equal(
 		t,
-		strings.HasPrefix(model.timeline, strings.Repeat("\n", conversationGapHeight)),
+		conversationGapHeight,
+		model.transcript.leading,
 		"the mutable response must not wait for stable scrollback promotion to gain its conversation gap",
 	)
-	assert.Contains(t, model.timeline, "I will inspect it now.")
+	assert.Contains(t, inlineRegionText(model), "I will inspect it now.")
 }
 
 func TestManagedStreamingContinuationDoesNotRepeatNativeBoundary(t *testing.T) {
@@ -393,8 +394,14 @@ func TestManagedStreamingContinuationDoesNotRepeatNativeBoundary(t *testing.T) {
 	})
 	model.renderTranscript(false)
 
-	assert.False(t, strings.HasPrefix(model.timeline, "\n"))
-	assert.Contains(t, model.timeline, "continued row")
+	assert.Equal(t, 0, model.transcript.leading)
+	assert.Contains(t, inlineRegionText(model), "continued row")
+}
+
+// inlineRegionText renders the rows the inline frame paints. The frame is served
+// by the transcript store; it never builds a conversation string.
+func inlineRegionText(model *Model) string {
+	return strings.Join(model.transcript.rowsIn(0, model.transcript.rowCount()), "\n")
 }
 
 func TestScrollbackKeepsLogicalPayloadUntilRendererExecution(t *testing.T) {
@@ -992,4 +999,28 @@ func sequenceMessages(t *testing.T, command tea.Cmd) []tea.Msg {
 	}
 
 	return messages
+}
+
+// TestInlineFrameRendersNoConversationString pins the frame contract: the inline
+// frame is painted from the transcript store, so an unchanged frame must not
+// re-render the active blocks. The window here outgrows the markdown cache, which
+// is where the old "render the conversation, then test the string" path
+// re-rendered a growing share of the window on every frame.
+func TestInlineFrameRendersNoConversationString(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.scrollbackOutput = true
+	for index := range 200 {
+		model.state.Transcript = append(model.state.Transcript,
+			ai.AssistantText(fmt.Sprintf("archived answer %d with ordinary words in it", index)))
+	}
+	model.renderTranscript(false)
+
+	rendered := model.markdown.uncachedRenders
+	model.renderTranscript(false)
+
+	assert.Equal(t, rendered, model.markdown.uncachedRenders,
+		"an unchanged inline frame renders no active block")
+	assert.Positive(t, model.transcript.rowCount(), "the frame still has the store's rows")
 }

@@ -34,7 +34,8 @@ func TestLargeMutableSeamUsesTheWorkerAfterProse(t *testing.T) {
 			assert.Equal(t, previous.all(), rows.all())
 			miss, ok := renderer.takeLiveMiss()
 			require.True(t, ok)
-			assert.Equal(t, grown, miss.content)
+			assert.Equal(t, liveMarkdownContent(grown), miss.content,
+				"a live frame renders a large fence without its chroma lexer")
 
 			worker := newLiveRenderWorker()
 			t.Cleanup(worker.shutdown)
@@ -50,7 +51,9 @@ func TestLargeMutableSeamUsesTheWorkerAfterProse(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, before, renderer.uncachedRenders, "a paused final frame is installed without synchronous rendering")
 
-			whole, err := newMarkdownRenderer(1).render(grown, 100, themeDark, false)
+			// The live frame renders a large fence without its chroma lexer, so the
+			// whole render it is compared with is the prepared body's.
+			whole, err := newMarkdownRenderer(1).render(liveMarkdownContent(grown), 100, themeDark, false)
 			require.NoError(t, err)
 			assert.Equal(t, insetRowSlice(splitTranscriptRows(whole), 2), finalRows.all())
 		})
@@ -88,7 +91,8 @@ func TestNewlyFrozenLargeRegionAlsoUsesTheWorker(t *testing.T) {
 	assert.Equal(t, before, renderer.uncachedRenders)
 	miss, ok := renderer.takeLiveMiss()
 	require.True(t, ok)
-	assert.Equal(t, grown, miss.content)
+	assert.Equal(t, liveMarkdownContent(grown), miss.content,
+		"a live frame renders a large fence without its chroma lexer")
 }
 
 func TestLiveRenderDeliverySurvivesDiscardedResults(t *testing.T) {
@@ -248,6 +252,9 @@ func TestLiveRenderWorkerProducesTheExactRows(t *testing.T) {
 	body := liveRenderProbeBody()
 	require.GreaterOrEqual(t, len(body), liveFrameBytes)
 	grown := body + "// the newest line\n"
+	// Production hands the worker the body the live frame renders, which for a
+	// large fence means the prepared content without its chroma lexer.
+	prepared := liveMarkdownContent(grown)
 
 	worker := newLiveRenderWorker()
 	t.Cleanup(worker.shutdown)
@@ -255,7 +262,7 @@ func TestLiveRenderWorkerProducesTheExactRows(t *testing.T) {
 	worker.submit(liveRenderRequest{
 		epoch: 7,
 		miss: liveRenderMiss{
-			slot: "draft", content: grown, width: 100, inset: 2,
+			slot: "draft", content: prepared, width: 100, inset: 2,
 			theme: themeDark, noColor: false, window: true,
 		},
 	})
@@ -265,7 +272,7 @@ func TestLiveRenderWorkerProducesTheExactRows(t *testing.T) {
 	require.True(t, ok, "the worker delivers a result message")
 	assert.Equal(t, uint64(7), ready.result.epoch)
 	require.NoError(t, ready.result.err)
-	assert.Equal(t, grown, ready.result.miss.content)
+	assert.Equal(t, prepared, ready.result.miss.content)
 	assert.Positive(t, ready.result.cost)
 	assert.NotEmpty(t, ready.result.rows.all())
 
@@ -317,7 +324,8 @@ func TestLargeLiveTailFrameNeitherRendersNorLosesContent(t *testing.T) {
 		"the event loop paid for no whole-document render")
 	miss, ok := model.markdown.takeLiveMiss()
 	require.True(t, ok, "the newest version was handed to the background renderer")
-	assert.Equal(t, grown, miss.content)
+	assert.Equal(t, liveMarkdownContent(grown), miss.content,
+		"a live frame renders a large fence without its chroma lexer")
 
 	rows, err := miss.render(newMarkdownRenderer(1))
 	require.NoError(t, err)
@@ -524,4 +532,20 @@ func TestPendingBufferReleasesItsEvents(t *testing.T) {
 
 	assert.Zero(t, backing[0].event.Sequence)
 	assert.Nil(t, backing[0].event.Payload)
+}
+
+// TestLiveRenderPauseBoundsTheWorkerShare pins the duty cycle: a finished
+// version stands for its own cost times liveRenderDutyFactor, so the background
+// renderer can never own the process while a large tail streams. A render that
+// costs nothing waits for nothing.
+func TestLiveRenderPauseBoundsTheWorkerShare(t *testing.T) {
+	t.Parallel()
+
+	cost := 40 * time.Millisecond
+	pause := liveRenderPause(cost)
+
+	assert.Equal(t, time.Duration(liveRenderDutyFactor-1)*cost, pause)
+	assert.Equal(t, time.Duration(liveRenderDutyFactor)*cost, cost+pause,
+		"one version stands for liveRenderDutyFactor times its own cost")
+	assert.Zero(t, liveRenderPause(0), "a free render never waits")
 }
