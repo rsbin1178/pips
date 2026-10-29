@@ -16,7 +16,7 @@ and the notes are not part of them.
 ## Source material
 
 Start from what merged since the previous tag: `git log --oneline <previous-tag>..HEAD`, the pull requests
-it names, and the task records under `.trellis/tasks/`. Settle three things for each change before writing
+it names, and the spec and tickets the change was built from (`.scratch/<feature>/`). Settle three things for each change before writing
 a line about it — what a reader can now do, or no longer has to do; which surface changed; and whether
 they have to act. A change that answers none of the three is internal churn, and belongs in the commit
 rather than here.

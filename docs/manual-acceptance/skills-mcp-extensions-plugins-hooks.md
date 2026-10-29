@@ -14,7 +14,7 @@
 - 通过条件：发现、信任、切换、精确调用、资源安全与 generation 更新均正确。
 - 失败条件：项目未信任即读取、disabled Skill 仍注入、symlink 跟随、脚本自动执行、或 policy 污染 `.gitignore`。
 - 清理/回滚：移除夹具 Skill/policy；共享 root 夹具应使用专用测试账号。
-- 来源/测试锚点：[resource](../../internal/coding/resource)、[route_skills.go](../../internal/coding/tui/route_skills.go)、[Agent Skills contract](../../.trellis/spec/backend/coding-application.md#skill-bundle-and-mcp-integrations)。
+- 来源/测试锚点：[resource](../../internal/coding/resource)、[route_skills.go](../../internal/coding/tui/route_skills.go)。
 - 结果：`未执行`。
 
 ## MA-INT-002：MCP 定义、连接、权限与 Reload
@@ -27,7 +27,7 @@
 - 通过条件：启动不被 MCP 阻塞、`/mcp` 状态与实际连接一致、首个 prompt 有 2 秒上界、瞬时失败会重试且后续 interaction 可恢复、连接、工具调用、folder trust + 可选 user deny、隔离失败与 reload 均符合契约；重复 ID/authority 字段失败关闭。
 - 失败条件：TUI 就绪时间随 server 连接时间线性增长、grace 内已连接 server 的工具缺失、`/mcp` 泄露 endpoint/command/env、未信任项目仍加载、无 user deny 时项目 server 未启用、shell command 拼接、v1alpha1 文件接受 headers/env、Agent Plugin 的 `${env:...}` 被展开、secret 值出现在 fingerprint/状态/诊断/日志中、单个无效条目导致启动失败、或失败清空所有 server。
 - 清理/回滚：关闭 server；撤销人工 permission；确认 private temp/child process 已清理。
-- 来源/测试锚点：[mcp](../../internal/coding/mcp)、[mcpstdio](../../internal/coding/execution/mcpstdio)、[route_mcp.go](../../internal/coding/tui/route_mcp.go)、[runtime_mcp_test.go](../../internal/coding/runtime_mcp_test.go)、[MCP contract](../../.trellis/spec/backend/coding-application.md#skill-bundle-and-mcp-integrations)。
+- 来源/测试锚点：[mcp](../../internal/coding/mcp)、[mcpstdio](../../internal/coding/execution/mcpstdio)、[route_mcp.go](../../internal/coding/tui/route_mcp.go)、[runtime_mcp_test.go](../../internal/coding/runtime_mcp_test.go)。
 - 结果：`未执行`。
 
 ## MA-INT-003：Extension 生命周期与不可变 Generation
@@ -47,7 +47,7 @@
 - 通过条件：测试全通过，生命周期恰一次且错误合并/回滚完整。
 - 失败条件：Bundle 加载 Go code、失败 candidate 部分发布、running interaction 被 reload 改写、或 cleanup 泄漏。
 - 清理/回滚：测试进程退出即释放；无用户文件安装动作。
-- 来源/测试锚点：[extension](../../agent/extension)、[integration_generation_test.go](../../internal/coding/integration_generation_test.go)、[Extension spec](../../.trellis/spec/backend/extension-bundle.md)。
+- 来源/测试锚点：[extension](../../agent/extension)、[integration_generation_test.go](../../internal/coding/integration_generation_test.go)。
 - 结果：`未执行`。
 
 ## MA-INT-004：Bundle 选择、信任与资源边界
@@ -66,7 +66,7 @@
 - 通过条件：合法选择正确，所有负向夹具按类型拒绝，空选择不隐式变成“全部”。
 - 失败条件：manifest 获得代码/命令权限、未信任读取、symlink 逃逸、或失败 reload 清空 active generation。
 - 清理/回滚：移除 Bundle 夹具，退出 runtime 释放资源。
-- 来源/测试锚点：[bundle](../../agent/bundle)、[resource](../../internal/coding/resource)、[Bundle spec](../../.trellis/spec/backend/extension-bundle.md)。
+- 来源/测试锚点：[bundle](../../agent/bundle)、[resource](../../internal/coding/resource)。
 - 结果：`未执行`。
 
 ## MA-INT-005：Agent Plugin 发现与校验

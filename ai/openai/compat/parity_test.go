@@ -78,7 +78,7 @@ func TestReviewedProfileFacadeParity(t *testing.T) {
 // Chat Completions profile encodes. Ability guesses must not turn into a
 // withheld field: ChatReasoningOmit is reserved for a protocol that has no
 // such field at all, and every reviewed chat profile has one
-// (.trellis/spec/backend/provider-compatibility-policy.md R1).
+// (CODING_STANDARDS.md §7 R1).
 func TestReviewedChatProfilesForwardReasoning(t *testing.T) {
 	t.Parallel()
 

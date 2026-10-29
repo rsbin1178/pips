@@ -103,7 +103,7 @@ func validate(model modelcatalog.ResolvedModel, options config.ModelOptions) err
 		// A reasoning selection is never rejected here merely because a
 		// provider profile declines to encode it. Ability differences are
 		// forwarded and left to the provider; see
-		// .trellis/spec/backend/provider-compatibility-policy.md (R1).
+		// CODING_STANDARDS.md §7 (R1).
 	case config.ProtocolAnthropicMessages:
 		if path := firstPresent([]optionPresence{
 			{"request.seed", options.Seed != nil},

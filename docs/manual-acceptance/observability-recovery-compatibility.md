@@ -121,7 +121,7 @@
 - 通过条件：质量门与覆盖审计均通过，例外有 owner/理由/截止时间。
 - 失败条件：测试/lint/link 错误、文档引用不存在 symbol/file、或能力边界漂移。
 - 清理/回滚：无；保存 CI/job URL 与 commit SHA。
-- 来源/测试锚点：[项目规范](../../.trellis/spec)、[Coding tests](../../internal/coding)、本目录[索引](index.md)。
+- 来源/测试锚点：[编码规范](../../CODING_STANDARDS.md)、[Coding tests](../../internal/coding)、本目录[索引](index.md)。
 - 结果：`未执行`。
 
 ## 分册判定

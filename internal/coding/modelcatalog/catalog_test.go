@@ -297,7 +297,7 @@ func TestCatalogMergesCapabilityDeclarations(t *testing.T) {
 // TestCatalogResolvesDeclaredReasoningKnob proves the reasoning encoder is
 // declarative: the reviewed profile supplies the provider default and the
 // configuration overrides it per provider or per model, with no model-name
-// dispatch in code (.trellis/spec/backend/provider-compatibility-policy.md R4).
+// dispatch in code (CODING_STANDARDS.md §7 R4).
 func TestCatalogResolvesDeclaredReasoningKnob(t *testing.T) {
 	t.Parallel()
 

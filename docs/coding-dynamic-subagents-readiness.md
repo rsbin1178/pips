@@ -164,7 +164,7 @@ Repository-controlled evidence:
   resolves both switch spellings to one value and source;
 - [x] content-free admission/lifecycle telemetry and automated rollback
   regression;
-- [x] final repository gate outputs recorded in the Trellis readiness task.
+- [x] final repository gate outputs recorded with the change that produced them.
 
 Operational evidence required before GA:
 

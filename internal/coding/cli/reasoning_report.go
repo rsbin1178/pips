@@ -33,7 +33,7 @@ func reasoningSelection(resolved modelcatalog.ResolvedModel) string {
 
 // writeResolvedReasoning prints the reasoning state that will actually reach
 // the wire, so a configured level can be checked without starting a session
-// (.trellis/spec/backend/provider-compatibility-policy.md R5).
+// (CODING_STANDARDS.md §7 R5).
 func writeResolvedReasoning(output io.Writer, resolved modelcatalog.ResolvedModel) error {
 	if _, err := fmt.Fprintf(
 		output,

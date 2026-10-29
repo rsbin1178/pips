@@ -16,7 +16,7 @@ Coding Team 是 `internal/coding` 应用层把 `agent/team` 的 durable coordina
 - 通过条件：只有 exact 当前 proposal + Workspace snapshot + 人工 admission 可创建 Team。
 - 失败条件：模型自确认、取消仍建资源、dirty 自动忽略、无初始 commit 仍 admission，或 exec 代选。
 - 清理/回滚：取消未确认 proposal；确认无 Team 目录/worktree/refs。
-- 来源/测试锚点：[team_proposal_agent.go](../../internal/coding/team_proposal_agent.go)、[team_admission_test.go](../../internal/coding/team_admission_test.go)、[Team TUI spec](../../.trellis/spec/backend/team-tui.md)。
+- 来源/测试锚点：[team_proposal_agent.go](../../internal/coding/team_proposal_agent.go)、[team_admission_test.go](../../internal/coding/team_admission_test.go)。
 - 结果：`未执行`。
 
 ## MA-TEAM-002：Task DAG、Worker Session 与公平调度
@@ -48,7 +48,7 @@ Coding Team 是 `internal/coding` 应用层把 `agent/team` 的 durable coordina
 - 通过条件：正向 capture 完整、负向 fail closed、测试/race 通过。
 - 失败条件：force cleanup、base/owner mismatch 仍捕获、repo-controlled hooks/helpers 执行、或证据 ref 丢失。
 - 清理/回滚：只通过 Team cleanup flow；保留异常对象到 recovery/cleanup 用例。
-- 来源/测试锚点：[teamworktree](../../internal/coding/teamworktree)、[gitcontrol](../../internal/coding/execution/gitcontrol)、[team-runtime spec](../../.trellis/spec/backend/team-runtime.md)。
+- 来源/测试锚点：[teamworktree](../../internal/coding/teamworktree)、[gitcontrol](../../internal/coding/execution/gitcontrol)。
 - 结果：`未执行`。
 
 ## MA-TEAM-004：Worker 审批、问题、消息与控制
@@ -100,7 +100,7 @@ Coding Team 是 `internal/coding` 应用层把 `agent/team` 的 durable coordina
 - 通过条件：clean 对象完全清理且证据保留；异常对象不被破坏；跨 Team 隔离。
 - 失败条件：无需确认、force 清理、误删其他资源、清理失败仍标 completed，或孤儿进程/lock 未报告。
 - 清理/回滚：异常资源由人工按记录处理；删除前再次核对 exact path/type/owner/inode，手册不提供宽泛递归删除命令。
-- 来源/测试锚点：[team_cleanup.go](../../internal/coding/team_cleanup.go)、[cleanup.go](../../internal/coding/teamworktree/cleanup.go)、[Team TUI cleanup](../../.trellis/spec/backend/team-tui.md)。
+- 来源/测试锚点：[team_cleanup.go](../../internal/coding/team_cleanup.go)、[cleanup.go](../../internal/coding/teamworktree/cleanup.go)。
 - 结果：`未执行`。
 
 ## MA-TEAM-008：Team 投影、Telemetry 与关闭收敛
@@ -113,7 +113,7 @@ Coding Team 是 `internal/coding` 应用层把 `agent/team` 的 durable coordina
 - 通过条件：内容最小化、生命周期计数与 durable state 一致、关闭无 goroutine/resource leak。
 - 失败条件：敏感维度进入指标、重复 terminal、Close 返回后仍启动 Worker、或 cleanup owner 竞争。
 - 清理/回滚：关闭 exporter 和 Runtime；保存脱敏聚合结果。
-- 来源/测试锚点：[team_projection.go](../../internal/coding/tui/team_projection.go)、[OTel observer](../../internal/coding/observability/otel/otel.go)、[Team lifecycle spec](../../.trellis/spec/backend/coding-application.md#coding-team-interactive-boundary)。
+- 来源/测试锚点：[team_projection.go](../../internal/coding/tui/team_projection.go)、[OTel observer](../../internal/coding/observability/otel/otel.go)。
 - 结果：`未执行`。
 
 ## 分册判定
