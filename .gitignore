@@ -35,11 +35,13 @@ go.work.sum
 
 # Local AI and agent state
 /.agent/
+/.agents/
 /.claude/
 /.codex/
 /.pi/
 /.pips/
 /AGENTS.md
+/skills-lock.json
 
 # Local Trellis state
 .trellis/

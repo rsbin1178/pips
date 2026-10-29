@@ -333,11 +333,19 @@ func TestWithSkillsDirLoadFailure(t *testing.T) {
 	require.Error(t, err)
 }
 
-// Smoke-test against the repository's real installed skills.
+// Smoke-test against the shared skills installed in this checkout.
+//
+// The .agents/skills layer is local state and git-ignored, so a clean checkout
+// skips the probe; the hermetic cases above cover loading on their own.
 func TestLoadSkillsRealTree(t *testing.T) {
 	t.Parallel()
 
-	skills, err := harness.LoadSkills("../../.agents/skills")
+	const dir = "../../.agents/skills"
+	if _, err := os.Stat(dir); err != nil {
+		t.Skipf("%s is not installed in this checkout", dir)
+	}
+
+	skills, err := harness.LoadSkills(dir)
 	require.NoError(t, err)
 	require.NotEmpty(t, skills)
 
