@@ -103,7 +103,7 @@ var defaultActions = []actionBinding{
 		ID:       actionFollowUp,
 		Contexts: []actionContext{contextRunning},
 		Keys:     []string{keyTab},
-		Label:    "follow up",
+		Label:    "queue request",
 	},
 	{
 		ID:       actionToggleMode,

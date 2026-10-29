@@ -11,10 +11,17 @@ import (
 	"github.com/rsbin1178/pips/internal/coding"
 )
 
+// workerEventSource is the bounded event consumer the Worker route reads. The
+// Runtime's *coding.EventSubscription is the only production implementation; a
+// test injects a stub to drive delivery, error and close independently.
+type workerEventSource interface {
+	Receive() (coding.EventRecord, bool)
+	Err() error
+	Close()
+}
+
 type workerSubscriptionBridge struct {
-	events <-chan coding.EventRecord
-	err    func() error
-	close  func()
+	events workerEventSource
 	once   sync.Once
 }
 
@@ -52,24 +59,22 @@ func newWorkerSubscriptionBridge(
 		return nil
 	}
 
-	return &workerSubscriptionBridge{
-		events: subscription.Events(), err: subscription.Err, close: subscription.Close,
-	}
+	return &workerSubscriptionBridge{events: subscription}
 }
 
 func (b *workerSubscriptionBridge) wait(
 	generation uint64,
 	target coding.TeamWorkerTarget,
 ) tea.Cmd {
-	if b == nil {
+	if b == nil || b.events == nil {
 		return nil
 	}
 
 	return func() tea.Msg {
-		record, ok := <-b.events
+		record, ok := b.events.Receive()
 		var err error
-		if !ok && b.err != nil {
-			err = b.err()
+		if !ok {
+			err = b.events.Err()
 		}
 
 		return teamWorkerRouteEventMsg{
@@ -85,8 +90,8 @@ func (b *workerSubscriptionBridge) stop() {
 	}
 
 	b.once.Do(func() {
-		if b.close != nil {
-			b.close()
+		if b.events != nil {
+			b.events.Close()
 		}
 	})
 }

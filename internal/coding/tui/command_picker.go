@@ -64,6 +64,7 @@ var commands = []commandDescriptor{
 	{name: "review", description: "review workspace changes in Plan Mode", idleOnly: true},
 	{name: "reload", description: "reload resources and integrations", idleOnly: true},
 	{name: commandStatus, description: "show runtime status"},
+	{name: "queue", description: "inspect, resume, or discard pending requests", arguments: true},
 	{name: string(actionHelp), description: "show keyboard help"},
 	{name: "quit", description: "exit Pips"},
 }
@@ -190,6 +191,9 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 
 	if command.name == "goal" {
 		return m.executeGoalCommand(arguments)
+	}
+	if command.name == "queue" {
+		return m.executeQueueCommand(arguments)
 	}
 	if command.name == "copy" {
 		return m.executeCopyCommand(arguments)

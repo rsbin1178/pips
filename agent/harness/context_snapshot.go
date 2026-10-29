@@ -20,6 +20,6 @@ func (s *Session) SnapshotContext() (SessionContextSnapshot, error) {
 	}
 
 	return SessionContextSnapshot{
-		LeafID: s.leaf, Entries: cloneEntries(path), Context: contextFromPath(path),
+		LeafID: s.leaf, Entries: cloneEntries(path), Context: cloneContext(contextFromPath(path)),
 	}, nil
 }

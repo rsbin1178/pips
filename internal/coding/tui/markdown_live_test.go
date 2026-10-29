@@ -373,7 +373,7 @@ func TestLiveMarkdownRowsMatchTheStringRender(t *testing.T) {
 					want, err := streaming.renderLive("draft", content, width, themeDark, false)
 					require.NoError(t, err)
 
-					rows, err := rowRenderer.renderLiveRows("draft", content, width, 0, themeDark, false)
+					rows, err := rowRenderer.renderLiveRows("draft", content, width, 0, themeDark, false, false)
 					require.NoError(t, err)
 
 					wantRows := splitTranscriptRows(want)
@@ -498,7 +498,7 @@ func reportRowDivergence(t *testing.T, corpus, content string, width, size int) 
 		return
 	}
 
-	freshRows, err := newMarkdownRenderer(128).renderLiveRows("draft", content, width, 0, themeDark, false)
+	freshRows, err := newMarkdownRenderer(128).renderLiveRows("draft", content, width, 0, themeDark, false, false)
 	if err != nil {
 		t.Logf("re-render of the row path failed: %v", err)
 
@@ -524,7 +524,7 @@ func reportRowDivergence(t *testing.T, corpus, content string, width, size int) 
 		return
 	}
 
-	probeRows, err := newMarkdownRenderer(128).renderLiveRows("draft", probe, width, 0, themeDark, false)
+	probeRows, err := newMarkdownRenderer(128).renderLiveRows("draft", probe, width, 0, themeDark, false, false)
 	if err != nil {
 		t.Logf("minimal fence, row path failed: %v", err)
 

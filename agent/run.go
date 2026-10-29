@@ -658,6 +658,11 @@ func (r *run) callTurn(
 	window := r.agent.cfg.streamRecoveryWindow
 	replayAttempts := r.agent.cfg.streamReplayAttempts
 
+	var allowance *ai.RetryAllowance
+	if recovery.attempts > 0 && replayAttempts > 0 {
+		ctx, allowance = ai.WithRetryAllowance(ctx, replayAttempts, window)
+	}
+
 	// prefix accumulates the text retained across failed attempts; a non-empty
 	// prefix switches every later attempt to the continuation request.
 	// fellBack records that the prefix was abandoned because the provider would
@@ -709,6 +714,9 @@ func (r *run) callTurn(
 		abandonPrefix := false
 
 		windowSpent := !episodeStart.IsZero() && window > 0 && time.Since(episodeStart) >= window
+		if allowance != nil {
+			windowSpent = allowance.Expired()
+		}
 
 		// budget is the allowance this failure draws on and used is how much of
 		// it the turn has already spent. Answer text and tool calls draw the
@@ -721,6 +729,9 @@ func (r *run) callTurn(
 
 		if replayTier {
 			budget, used = replayAttempts, replayed
+			if allowance != nil {
+				budget, used = allowance.Limit(), allowance.Used()
+			}
 		}
 
 		switch {
@@ -762,6 +773,10 @@ func (r *run) callTurn(
 
 			return resp, false, err
 		default:
+			if allowance != nil {
+				allowance.Begin()
+			}
+
 			if episodeStart.IsZero() {
 				episodeStart = time.Now()
 			}
@@ -779,6 +794,14 @@ func (r *run) callTurn(
 					// was looking at when the turn gave up.
 					prefix = retained
 				}
+			}
+
+			if !claimReplay(allowance, replayTier) {
+				if !r.reportAbandoned(turn, prefix, produced, err) {
+					return nil, true, nil
+				}
+
+				return resp, false, err
 			}
 
 			if replayTier {
@@ -822,6 +845,16 @@ func (r *run) callTurn(
 			}
 		}
 	}
+}
+
+func claimReplay(allowance *ai.RetryAllowance, replay bool) bool {
+	if !replay || allowance == nil {
+		return true
+	}
+
+	_, allowed := allowance.Claim()
+
+	return allowed
 }
 
 // continuationRequestUpdate returns the request constraint for a continuation
@@ -954,6 +987,7 @@ func (a *Agent) callModel(
 				}
 
 				yield(ai.StreamEvent{}, streamErr)
+
 				return
 			}
 
@@ -965,17 +999,8 @@ func (a *Agent) callModel(
 			// A retry notice reports a wait, so it is not output. The raw
 			// event decides this: a buffered delta the filter has not released
 			// yet still means the call produced output.
-			if ev.Type != ai.StreamMessageStart && ev.Type != ai.StreamRetry {
-				produced = true
-
-				// Reasoning is the one output a re-issue can drop and redo
-				// without costing the consumer an answer, so it does not make
-				// the attempt retractable. Any other kind does, including one
-				// this layer does not model yet.
-				if ev.Type != ai.StreamReasoningDelta {
-					retractable = true
-				}
-			}
+			output, answer := classifyStreamOutput(ev)
+			produced, retractable = produced || output, retractable || answer
 
 			for _, forwarded := range filter.forward(ev) {
 				if !emit(ModelStreamEvent{Turn: turn, Event: forwarded}) {
@@ -995,6 +1020,21 @@ func (a *Agent) callModel(
 	}
 
 	return resp, produced, retractable, false, err
+}
+
+// classifyStreamOutput excludes control events. Reasoning and blank text can
+// be dropped without retracting an answer; unknown event kinds stay conservative.
+func classifyStreamOutput(event ai.StreamEvent) (produced, retractable bool) {
+	switch event.Type {
+	case ai.StreamMessageStart, ai.StreamRetry, ai.StreamMessageEnd:
+		return false, false
+	case ai.StreamReasoningDelta:
+		return true, false
+	case ai.StreamTextDelta:
+		return true, strings.TrimSpace(event.Text) != ""
+	default:
+		return true, true
+	}
 }
 
 // shouldStop checks the configured stop conditions after a completed turn.

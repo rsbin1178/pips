@@ -130,3 +130,32 @@ func TestCollectReasoningSignature(t *testing.T) {
 	assert.Equal(t, ai.ReasoningPart{Text: "thinking", Signature: "sig-abc"}, resp.Message.Parts[0])
 	assert.Equal(t, ai.TextPart{Text: "answer"}, resp.Message.Parts[1])
 }
+
+func TestCollectRequiresTerminalAndPreservesPartialResponse(t *testing.T) {
+	t.Parallel()
+
+	resp, err := ai.Collect(events(
+		ai.StreamEvent{Type: ai.StreamMessageStart, ID: "partial"},
+		ai.StreamEvent{Type: ai.StreamTextDelta, Text: "fragment"},
+	))
+	require.ErrorIs(t, err, ai.ErrIncompleteStream)
+	assert.Equal(t, "fragment", resp.Text())
+
+	var failure *ai.ResponseError
+	require.ErrorAs(t, err, &failure)
+	assert.False(t, failure.TerminalObserved)
+	assert.Equal(t, len("fragment"), failure.TextBytes)
+	assert.True(t, ai.IsRetryable(err))
+}
+
+func TestCollectAcceptsCompletedReasoningOnly(t *testing.T) {
+	t.Parallel()
+
+	resp, err := ai.Collect(events(
+		ai.StreamEvent{Type: ai.StreamReasoningDelta, Text: "thought"},
+		ai.StreamEvent{Type: ai.StreamMessageEnd, FinishReason: ai.FinishStop},
+	))
+	require.NoError(t, err)
+	require.Len(t, resp.Message.Parts, 1)
+	assert.IsType(t, ai.ReasoningPart{}, resp.Message.Parts[0])
+}

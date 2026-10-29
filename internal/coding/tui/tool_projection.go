@@ -16,7 +16,7 @@ type toolProjectionKey struct {
 
 type toolProjectionEntry struct {
 	key      toolProjectionKey
-	activity toolActivity
+	activity *toolActivity
 }
 
 type toolProjectionCache struct {
@@ -27,7 +27,7 @@ type toolProjectionCache struct {
 
 // projectActivities returns the ordered tool activity the timeline projection
 // consumes, reusing the per-tool description cache.
-func (m *Model) projectActivities(state coding.State, excluded map[string]struct{}) []toolActivity {
+func (m *Model) projectActivities(state coding.State, excluded map[string]struct{}) []*toolActivity {
 	workspace := m.options.Workspace
 	if m.toolProjection.sessionID != state.SessionID ||
 		m.toolProjection.workspace != workspace {
@@ -64,9 +64,11 @@ func (m *Model) projectCommittedTimeline() (committedProjection, toolScanState) 
 	return projectCommittedBlocks(m.state, m.toolActivities), scan
 }
 
-func (c *toolProjectionCache) describe(record toolActivityRecord) toolActivity {
+func (c *toolProjectionCache) describe(record toolActivityRecord) *toolActivity {
 	if c == nil {
-		return describeToolActivity(record)
+		activity := describeToolActivity(record)
+
+		return &activity
 	}
 
 	key := toolProjectionKey{
@@ -86,22 +88,9 @@ func (c *toolProjectionCache) describe(record toolActivityRecord) toolActivity {
 		c.entries = make(map[string]toolProjectionEntry)
 	}
 
-	c.entries[key.id] = toolProjectionEntry{key: key, activity: activity}
+	c.entries[key.id] = toolProjectionEntry{key: key, activity: &activity}
 
-	return activity
-}
-
-// cached returns the memoized description for a call ID without rebuilding the
-// key [toolProjectionCache.describe] compares, which is what lets the append path
-// reuse a description its scan did not touch.
-func (c *toolProjectionCache) cached(id string) (toolActivity, bool) {
-	if c == nil {
-		return toolActivity{}, false
-	}
-
-	entry, ok := c.entries[id]
-
-	return entry.activity, ok
+	return &activity
 }
 
 func (c *toolProjectionCache) retain(records map[string]*toolActivityRecord) {

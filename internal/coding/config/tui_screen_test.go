@@ -43,6 +43,7 @@ func TestDefaultsShipFullscreenWithMouseAndAutomaticBuffer(t *testing.T) {
 	assert.True(t, defaults.TUI.Mouse)
 	assert.Equal(t, config.ExitOutputResumeHint, defaults.TUI.ExitOutput)
 	assert.True(t, defaults.TUI.ShowThinkingBlocks)
+	assert.Equal(t, config.DefaultTranscriptMessages, defaults.TUI.TranscriptMessages)
 	// Defaults intentionally leave the model unset, so runtime validation of the
 	// whole config is not the right check here; validate only the new fields.
 	_, err := config.ParseInteractiveScreen(defaults.TUI.Screen)
@@ -73,7 +74,8 @@ func TestLoadAppliesTUIScreenSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path,
 		"[tui]\nscreen = \"inline\"\nalt_screen = \"never\"\nmouse = false\n"+
-			"exit_output = \"resume-hint\"\nshow_thinking_blocks = false\n")
+			"exit_output = \"resume-hint\"\nshow_thinking_blocks = false\n"+
+			"transcript_messages = 768\n")
 	loaded, err := config.Load(config.LoadOptions{
 		ConfigFile: path,
 		LookupEnv:  config.LookupEnv(func(string) (string, bool) { return "", false }),
@@ -84,6 +86,7 @@ func TestLoadAppliesTUIScreenSettings(t *testing.T) {
 	assert.False(t, loaded.Config.TUI.Mouse)
 	assert.Equal(t, config.ExitOutputResumeHint, loaded.Config.TUI.ExitOutput)
 	assert.False(t, loaded.Config.TUI.ShowThinkingBlocks)
+	assert.Equal(t, 768, loaded.Config.TUI.TranscriptMessages)
 
 	source, ok := loaded.Config.Source(config.FieldScreen)
 	require.True(t, ok)
@@ -96,6 +99,9 @@ func TestLoadAppliesTUIScreenSettings(t *testing.T) {
 	source, ok = loaded.Config.Source(config.FieldShowThinkingBlocks)
 	require.True(t, ok)
 	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	source, ok = loaded.Config.Source(config.FieldTranscriptMessages)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
 }
 
 func TestLoadRejectsInvalidTUIScreenSettings(t *testing.T) {
@@ -105,6 +111,8 @@ func TestLoadRejectsInvalidTUIScreenSettings(t *testing.T) {
 		"[tui]\nscreen = \"native\"\n",
 		"[tui]\nalt_screen = \"sometimes\"\n",
 		"[tui]\nexit_output = \"scrollback\"\n",
+		"[tui]\ntranscript_messages = 32\n",
+		"[tui]\ntranscript_messages = 8192\n",
 	} {
 		path := filepath.Join(t.TempDir(), "config.toml")
 		writeFile(t, path, body)

@@ -21,7 +21,19 @@ import (
 const (
 	markdownCacheCapacity = 128
 	markdownCacheBytes    = 8 << 20
-	markdownEngineBytes   = 256 << 10
+	// markdownEntryBytes bounds one cached rendered document. A long answer can
+	// render to several MiB; retaining that in the LRU while the transcript store
+	// already holds its rows duplicates the same output. Larger documents are
+	// still returned for the current frame, just not cached. The bound is half
+	// the total cache because inline mode re-renders the same document for its
+	// native-history write and its managed store; dropping that shared render
+	// would trade one retained copy for repeated multi-MiB transient renders.
+	markdownEntryBytes  = 4 << 20
+	markdownEngineBytes = 256 << 10
+	// maxLiveResidentRows bounds the rendered rows a managed live block keeps.
+	// The reader follows the tail; older rows are re-rendered on demand if the
+	// reader scrolls back.
+	maxLiveResidentRows = 4096
 )
 
 type themeFingerprint string
@@ -50,14 +62,33 @@ type markdownRenderer struct {
 	// tail is expensive can be served from the previous frame instead of paying
 	// for the whole un-frozen tail again on every tick. See reuseLiveFrame.
 	liveFrames map[string]liveFrame
+	// exact holds the row sets a background render produced for one exact content
+	// version. A frame that finds its own version here pays no render at all.
+	exact []liveExactEntry
+	// stale records, per live slot, when a served frame stops being the current
+	// content's. The event loop arms one catch-up render for the earliest
+	// deadline, so a slot whose body stopped growing still reaches its exact
+	// frame. A slot that is exact has no entry and nothing polls.
+	stale map[string]time.Time
+	// misses holds the newest content version that only the background renderer
+	// may render. The event loop drains it after a transcript render.
+	miss *liveRenderMiss
+	// forceExact makes the next live render pay for the tail instead of serving a
+	// previous frame. The catch-up timer sets it only when no background render is
+	// outstanding, so a tail cannot stay missing for good without polling.
+	forceExact bool
 	// frozen holds the assembled prefix of each live slot, so a streaming frame
 	// extends it instead of rendering the whole body again. thinking is the same
 	// state for the one live Thinking section, which is rendered as prose rather
-	// than Markdown.
-	frozen    map[string]*liveFrozen
-	thinking  liveThinking
-	engine    *glamour.TermRenderer
-	engineKey markdownKey
+	// than Markdown. frozenRows and thinkingRows are the managed-store variants:
+	// they retain only a tail window, while the inline path needs the complete
+	// rows to join into its frame.
+	frozen       map[string]*liveFrozen
+	frozenRows   map[string]*liveFrozen
+	thinking     liveThinking
+	thinkingRows liveThinking
+	engine       *glamour.TermRenderer
+	engineKey    markdownKey
 	// renderedBytes counts the source bytes handed to the engine since the last
 	// reset, and thinkingWrapped the reasoning bytes handed to the wrapper, so
 	// tests can assert that a streaming frame does not reprocess the whole body.
@@ -77,12 +108,13 @@ func newMarkdownRenderer(capacity int) *markdownRenderer {
 	}
 
 	return &markdownRenderer{
-		capacity: capacity,
-		entries:  make(map[markdownKey]*list.Element, capacity),
-		recent:   list.New(),
-		maxBytes: markdownCacheBytes,
-		live:     make(map[string]markdownKey),
-		frozen:   make(map[string]*liveFrozen),
+		capacity:   capacity,
+		entries:    make(map[markdownKey]*list.Element, capacity),
+		recent:     list.New(),
+		maxBytes:   markdownCacheBytes,
+		live:       make(map[string]markdownKey),
+		frozen:     make(map[string]*liveFrozen),
+		frozenRows: make(map[string]*liveFrozen),
 	}
 }
 
@@ -93,6 +125,32 @@ func (r *markdownRenderer) render(
 	noColor bool,
 ) (string, error) {
 	return r.renderCached("", content, width, theme, noColor)
+}
+
+// releaseLiveState drops every rendered form of the live tail. The store calls
+// this once no live record remains: the committed record has its own rows, and
+// keeping the old frozen rows, reuse frames and thinking window would pin the
+// whole streaming body for the rest of the session.
+func (r *markdownRenderer) releaseLiveState() {
+	if r == nil {
+		return
+	}
+
+	for slot := range r.live {
+		r.evictLive(slot)
+	}
+
+	r.frozen = nil
+	r.frozenRows = nil
+	clear(r.liveFrames)
+	r.liveFrames = nil
+	clear(r.stale)
+	r.stale = nil
+	r.exact = nil
+	r.miss = nil
+	r.forceExact = false
+	r.thinking = liveThinking{}
+	r.thinkingRows = liveThinking{}
 }
 
 // renderLive replaces the preceding version in one bounded slot. A new stream
@@ -109,9 +167,9 @@ func (r *markdownRenderer) renderLive(
 	theme colorTheme,
 	noColor bool,
 ) (string, error) {
-	// The inline path and the managed store differ only in the indent they apply
-	// to each row, so both go through the same frame and share its cost bound.
-	rows, err := r.renderLiveRows(slot, content, width, 0, theme, noColor)
+	// The inline path joins every row into one string, so it must keep the whole
+	// body. The managed store asks for windowed rows separately.
+	rows, err := r.renderLiveRows(slot, content, width, 0, theme, noColor, false)
 	if err != nil {
 		return content, err
 	}
@@ -134,19 +192,218 @@ func (r *markdownRenderer) renderLiveRows(
 	width, inset int,
 	theme colorTheme,
 	noColor bool,
+	window bool,
 ) (rowSegments, error) {
-	if rows, ok := r.reuseLiveFrame(slot, content, width, inset, theme, noColor); ok {
+	// A version the background renderer already produced is exact and free.
+	if rows, ok := r.exactRows(slot, content, width, inset, theme, noColor, window); ok {
+		r.clearLiveStale(slot)
+
 		return rows, nil
 	}
 
+	// A small tail costs a fraction of one frame, so it is rendered here and is
+	// byte-identical to the background renderer's output.
+	if len(content) < liveFrameBytes {
+		return r.renderLiveNow(slot, content, width, inset, theme, noColor, window)
+	}
+
+	if r.forceExact {
+		r.forceExact = false
+
+		return r.renderLiveNow(slot, content, width, inset, theme, noColor, window)
+	}
+
 	started := time.Now()
-	rows, err := r.renderLiveRowsNow(slot, content, width, inset, theme, noColor)
+	// A frozen prefix does not bound the seam: prose can precede a huge code
+	// block, list or table. Check the bytes that would actually be rendered before
+	// entering the incremental path, including any newly frozen region.
+	if rows, ok := r.renderLiveIncrementalRows(
+		slot, content, width, inset, theme, noColor, window, liveFrameBytes,
+	); ok {
+		r.evictLive(slot)
+		r.rememberLiveFrame(slot, content, width, inset, theme, noColor, rows, time.Since(started), window)
+		r.clearLiveStale(slot)
+
+		return rows, nil
+	}
+
+	// An un-freezable tail costs the whole body. Above the reuse threshold the
+	// event loop serves the previous frame and hands the current version to the
+	// background renderer; the frame therefore stays responsive and the body is
+	// still painted as each version lands.
+	//
+	// Only the managed store may stand on an older frame. Inline mode hands its
+	// rows to the terminal's native history, which is append-only: a frame that
+	// later turns out to be one render behind can never be corrected there, so
+	// that path renders the current version exactly.
+	if window {
+		if rows, ok := r.previousLiveRows(slot, content, width, inset, theme, noColor, window); ok {
+			r.addLiveMiss(liveRenderMiss{
+				slot: slot, content: content, width: width, inset: inset,
+				theme: theme, noColor: noColor, window: window,
+			})
+			r.markLiveStale(slot, r.liveFrames[slot].cooldown())
+
+			return rows, nil
+		}
+	}
+
+	return r.renderLiveNow(slot, content, width, inset, theme, noColor, window)
+}
+
+// renderLiveNow renders a live version on the event loop. It is the exact path
+// for a small or first frame, and the fallback when no previous frame exists.
+func (r *markdownRenderer) renderLiveNow(
+	slot, content string,
+	width, inset int,
+	theme colorTheme,
+	noColor bool,
+	window bool,
+) (rowSegments, error) {
+	started := time.Now()
+	rows, err := r.renderLiveRowsNow(slot, content, width, inset, theme, noColor, window)
 	if err != nil {
 		return rows, err
 	}
-	r.rememberLiveFrame(slot, content, width, inset, theme, noColor, rows, time.Since(started))
+	r.rememberLiveFrame(slot, content, width, inset, theme, noColor, rows, time.Since(started), window)
+	r.clearLiveStale(slot)
 
 	return rows, nil
+}
+
+// exactRows returns the row set a background render produced for exactly this
+// version. The comparison is on the content value, so a version that only shares
+// a prefix is never served.
+func (r *markdownRenderer) exactRows(
+	slot, content string,
+	width, inset int,
+	theme colorTheme,
+	noColor bool,
+	window bool,
+) (rowSegments, bool) {
+	for index := range r.exact {
+		entry := &r.exact[index]
+		if entry.content != content || entry.width != width || entry.inset != inset ||
+			themeFingerprint(entry.theme.fingerprint) != themeFingerprint(theme.fingerprint) ||
+			entry.noColor != noColor || entry.window != window || entry.slot != slot {
+			continue
+		}
+
+		return entry.rows, true
+	}
+
+	return rowSegments{}, false
+}
+
+// installExactRows stores one background result, newest wins and bounded to
+// liveExactVersions. It also becomes the slot's previous frame, so the next
+// streaming frame extends it instead of the version it replaces.
+func (r *markdownRenderer) installExactRows(miss liveRenderMiss, rows rowSegments, cost time.Duration) bool {
+	if len(rows.frozen)+len(rows.tail) == 0 {
+		return false
+	}
+
+	entry := liveExactEntry{
+		slot: miss.slot, content: miss.content, width: miss.width, inset: miss.inset,
+		theme: miss.theme, noColor: miss.noColor, window: miss.window, rows: rows,
+	}
+
+	r.exact = append([]liveExactEntry{entry}, r.exact...)
+	if len(r.exact) > liveExactVersions {
+		r.exact = r.exact[:liveExactVersions]
+	}
+
+	if r.liveFrames == nil {
+		r.liveFrames = make(map[string]liveFrame, maxLiveFrames)
+	}
+	if frame, exists := r.liveFrames[miss.slot]; !exists || len(miss.content) >= len(frame.content) {
+		r.liveFrames[miss.slot] = liveFrame{
+			content: miss.content, rows: rows, width: miss.width, inset: miss.inset,
+			theme: themeFingerprint(miss.theme.fingerprint), noColor: miss.noColor, window: miss.window,
+			cost: cost, rendered: time.Now(),
+		}
+	}
+	delete(r.stale, miss.slot)
+
+	return true
+}
+
+// previousLiveRows serves the frame already on screen for a version that extends
+// it. It ignores the cooldown: the background renderer, not a clock, decides
+// when the tail is rendered again.
+func (r *markdownRenderer) previousLiveRows(
+	slot, content string,
+	width, inset int,
+	theme colorTheme,
+	noColor bool,
+	window bool,
+) (rowSegments, bool) {
+	frame, exists := r.liveFrames[slot]
+	if !exists || len(content) <= len(frame.content) || !strings.HasPrefix(content, frame.content) {
+		return rowSegments{}, false
+	}
+	if frame.width != width || frame.inset != inset || frame.noColor != noColor ||
+		frame.theme != themeFingerprint(theme.fingerprint) || frame.window != window {
+		return rowSegments{}, false
+	}
+
+	return frame.rows, true
+}
+
+// addLiveMiss keeps the newest version that needs a background render. An older
+// pending version is dropped: content only grows, so the newest request covers
+// everything the older one would have shown.
+func (r *markdownRenderer) addLiveMiss(miss liveRenderMiss) {
+	if r.miss != nil && len(miss.content) < len(r.miss.content) {
+		return
+	}
+	r.miss = &miss
+}
+
+// takeLiveMiss returns and clears the pending background render request.
+func (r *markdownRenderer) takeLiveMiss() (liveRenderMiss, bool) {
+	if r.miss == nil {
+		return liveRenderMiss{}, false
+	}
+	miss := *r.miss
+	r.miss = nil
+
+	return miss, true
+}
+
+// markLiveStale records when a served frame stops being the current content's.
+// The catch-up render is what paints the newest rows when the stream pauses, so
+// a frame that is never corrected would leave the tail missing for good.
+func (r *markdownRenderer) markLiveStale(slot string, after time.Duration) {
+	if slot == "" {
+		return
+	}
+	if r.stale == nil {
+		r.stale = make(map[string]time.Time, maxLiveFrames)
+	}
+	r.stale[slot] = time.Now().Add(after)
+}
+
+// liveCatchUpDelay reports the earliest outstanding catch-up deadline. No entry
+// means every live slot on screen is exact and nothing needs scheduling.
+func (r *markdownRenderer) liveCatchUpDelay() (time.Duration, bool) {
+	if len(r.stale) == 0 {
+		return 0, false
+	}
+
+	var earliest time.Time
+	for _, deadline := range r.stale {
+		if earliest.IsZero() || deadline.Before(earliest) {
+			earliest = deadline
+		}
+	}
+
+	return max(0, time.Until(earliest)), true
+}
+
+// clearLiveStale marks one slot exact.
+func (r *markdownRenderer) clearLiveStale(slot string) {
+	delete(r.stale, slot)
 }
 
 // renderLiveRowsNow assembles the frame for the current content, paying for the
@@ -156,8 +413,9 @@ func (r *markdownRenderer) renderLiveRowsNow(
 	width, inset int,
 	theme colorTheme,
 	noColor bool,
+	window bool,
 ) (rowSegments, error) {
-	if rows, ok := r.renderLiveIncrementalRows(slot, content, width, inset, theme, noColor); ok {
+	if rows, ok := r.renderLiveIncrementalRows(slot, content, width, inset, theme, noColor, window, 0); ok {
 		r.evictLive(slot)
 
 		return rows, nil
@@ -168,7 +426,16 @@ func (r *markdownRenderer) renderLiveRowsNow(
 		return rowSegments{}, err
 	}
 
-	return rowSegments{frozen: insetRowSlice(splitTranscriptRows(rendered), inset)}, nil
+	rows := rowSegments{
+		frozen: insetRowSlice(splitTranscriptRows(rendered), inset),
+		// An inset is a per-row prefix, so those rows do not alias the render.
+		detached: inset > 0,
+	}
+	if window && rows.count() > maxLiveResidentRows {
+		rows = rows.window(rows.count()-maxLiveResidentRows, rows.count())
+	}
+
+	return rows, nil
 }
 
 // A liveFrame is what the last render of one live slot produced, with what it
@@ -183,6 +450,7 @@ type liveFrame struct {
 	inset    int
 	theme    themeFingerprint
 	noColor  bool
+	window   bool
 	cost     time.Duration
 	rendered time.Time
 }
@@ -214,7 +482,44 @@ const (
 	// case; the bound only stops a long session's settled slots from pinning their
 	// last tail.
 	maxLiveFrames = 8
+	// liveExactVersions bounds the exact row sets a background render leaves
+	// behind. Two versions are enough to paint the newest result and the one the
+	// stream outgrew before the next result lands, and they keep at most two
+	// bodies' rows instead of the whole stream.
+	liveExactVersions = 2
+	// liveRenderQueue is the background renderer's pending-request depth. One
+	// executing task plus one waiting request is the whole bound: a newer version
+	// replaces the waiting one, and the executing one always completes.
+	liveRenderQueue = 1
 )
+
+// liveExactEntry is one row set a background render produced for exactly the
+// content it was asked about.
+type liveExactEntry struct {
+	slot    string
+	content string
+	width   int
+	inset   int
+	theme   colorTheme
+	noColor bool
+	window  bool
+	rows    rowSegments
+}
+
+// liveRenderMiss is one live version the event loop declined to render. It is
+// immutable plain data, so the background renderer never reads Model state.
+type liveRenderMiss struct {
+	slot    string
+	content string
+	width   int
+	inset   int
+	// theme is the resolved snapshot the version was formatted for. colorTheme is
+	// an immutable value, so the background renderer may hold it without sharing
+	// any mutable state with the event loop.
+	theme   colorTheme
+	noColor bool
+	window  bool
+}
 
 // cooldown is how long a live frame stands. It is never shorter than one render
 // frame, so a tail that fits inside the frame budget renders exactly as often as
@@ -238,33 +543,6 @@ func (frame liveFrame) reusable() bool {
 // was rendered for, so a new message, a rewound draft, a resize or a theme change
 // always renders. The rows it returns are the frame's own, so the composed view
 // stays internally consistent even though its tail is one render behind.
-func (r *markdownRenderer) reuseLiveFrame(
-	slot, content string,
-	width, inset int,
-	theme colorTheme,
-	noColor bool,
-) (rowSegments, bool) {
-	if slot == "" {
-		return rowSegments{}, false
-	}
-	frame, ok := r.liveFrames[slot]
-	if !ok || !frame.reusable() {
-		return rowSegments{}, false
-	}
-	if frame.width != width || frame.inset != inset || frame.noColor != noColor ||
-		frame.theme != themeFingerprint(theme.fingerprint) {
-		return rowSegments{}, false
-	}
-	if len(content) <= len(frame.content) || !strings.HasPrefix(content, frame.content) {
-		return rowSegments{}, false
-	}
-	if time.Since(frame.rendered) >= frame.cooldown() {
-		return rowSegments{}, false
-	}
-
-	return frame.rows, true
-}
-
 func (r *markdownRenderer) rememberLiveFrame(
 	slot, content string,
 	width, inset int,
@@ -272,6 +550,7 @@ func (r *markdownRenderer) rememberLiveFrame(
 	noColor bool,
 	rows rowSegments,
 	cost time.Duration,
+	window bool,
 ) {
 	if slot == "" {
 		return
@@ -283,7 +562,7 @@ func (r *markdownRenderer) rememberLiveFrame(
 	r.liveFrames[slot] = liveFrame{
 		content: content, rows: rows, width: width, inset: inset,
 		theme: themeFingerprint(theme.fingerprint), noColor: noColor,
-		cost: cost, rendered: time.Now(),
+		window: window, cost: cost, rendered: time.Now(),
 	}
 }
 
@@ -310,13 +589,20 @@ func (r *markdownRenderer) renderLiveIncrementalRows(
 	width, inset int,
 	theme colorTheme,
 	noColor bool,
+	window bool,
+	maxBytes int,
 ) (rowSegments, bool) {
 	prefixEnd, block, ok := liveMarkdownBoundary(content)
 	if !ok || prefixEnd <= 0 || block == "" || prefixEnd > len(content) {
 		return rowSegments{}, false
 	}
+	if maxBytes > 0 && r.liveIncrementalBytes(slot, content, prefixEnd, block, width, inset, theme, noColor, window) > maxBytes {
+		return rowSegments{}, false
+	}
 
-	head, ok := r.markdownFrozenRows(slot, content, prefixEnd, block, width, inset, theme, noColor)
+	head, base, ok := r.markdownFrozenRows(
+		slot, content, prefixEnd, block, width, inset, theme, noColor, window,
+	)
 	if !ok {
 		return rowSegments{}, false
 	}
@@ -338,10 +624,47 @@ func (r *markdownRenderer) renderLiveIncrementalRows(
 		return rowSegments{}, false
 	}
 
-	return rowSegments{
+	rows := rowSegments{
 		frozen: head,
 		tail:   insetRowSlice(splitTranscriptRows(tail), inset),
-	}, true
+		base:   base,
+		// The frozen rows carry the inset already and the tail was inset above.
+		detached: inset > 0,
+	}
+	if window && rows.count() > maxLiveResidentRows {
+		rows = rows.window(rows.count()-maxLiveResidentRows, rows.count())
+	}
+
+	return rows, true
+}
+
+// liveIncrementalBytes bounds the engine inputs before any frozen state is
+// changed. The seam includes the preceding block as context; extending the
+// frozen prefix can require a second render of newly completed blocks.
+func (r *markdownRenderer) liveIncrementalBytes(
+	slot, content string,
+	prefixEnd int,
+	block string,
+	width, inset int,
+	theme colorTheme,
+	noColor, window bool,
+) int {
+	seamBytes := len(block) + 2 + len(content) - prefixEnd
+	states := r.frozen
+	if window {
+		states = r.frozenRows
+	}
+	frozen := states[slot]
+	if frozen == nil || frozen.width != width || frozen.inset != inset ||
+		frozen.theme != themeFingerprint(theme.fingerprint) || frozen.noColor != noColor ||
+		len(frozen.source) > prefixEnd || !strings.HasPrefix(content, frozen.source) {
+		return seamBytes + prefixEnd
+	}
+	if len(frozen.source) < prefixEnd {
+		return seamBytes + prefixEnd - len(frozen.source) + len(frozen.block) + 2
+	}
+
+	return seamBytes
 }
 
 // evictLive drops the live version stored for a slot, so a fallback render's
@@ -651,7 +974,7 @@ func (r *markdownRenderer) insert(entry markdownEntry) {
 	if previous := r.entries[entry.key]; previous != nil {
 		r.remove(previous)
 	}
-	if len(entry.value) > r.maxBytes {
+	if len(entry.value) > r.maxBytes || len(entry.value) > markdownEntryBytes {
 		return
 	}
 	for r.recent.Len() >= r.capacity || r.bytes+len(entry.value) > r.maxBytes {

@@ -300,6 +300,20 @@ func TestEventSnapshotsMutablePayload(t *testing.T) {
 	streamed := requireType[agent.ModelStreamEvent](t, streamEvent.Payload())
 	require.NotNil(t, streamed.Event.Usage)
 	assert.Equal(t, 7, streamed.Event.Usage.InputTokens)
+
+	summary := &ai.ResponseError{Model: "original"}
+	retryEvent, err := agent.NewEvent(
+		agent.RunMetadata{RunID: "run"}, time.Now().UTC(),
+		agent.ModelStreamEvent{Turn: 1, Event: ai.StreamEvent{
+			Type: ai.StreamRetry, Retry: &ai.RetryNotice{Attempt: 1, MaxRetries: 2, Response: summary},
+		}},
+	)
+	require.NoError(t, err)
+
+	summary.Model = "mutated"
+	retried := requireType[agent.ModelStreamEvent](t, retryEvent.Payload())
+	require.NotNil(t, retried.Event.Retry.Response)
+	assert.Equal(t, "original", retried.Event.Retry.Response.Model)
 }
 
 func TestEventSnapshotsIsolateObserverStreamAndSession(t *testing.T) {

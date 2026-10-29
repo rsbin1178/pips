@@ -66,6 +66,7 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 	case IncompleteReply:
 		return value
 	case ModelRetry:
+		value.Response = cloneModelResponseFailure(value.Response)
 		return value
 	case ToolStarted:
 		value.Call = cloneToolCall(value.Call)
@@ -122,9 +123,10 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 	case StatusChanged:
 		return value
 	case IntegrationDiagnostic:
+		value.Response = cloneModelResponseFailure(value.Response)
 		return value
 	case RuntimeError:
-		return value
+		return cloneRuntimeError(value)
 	default:
 		return payload
 	}
@@ -250,6 +252,7 @@ func modelRetryFromAI(turn int, notice *ai.RetryNotice) ModelRetry {
 		retry.MaxRetries = notice.MaxRetries
 		retry.DelayMillis = notice.Delay.Milliseconds()
 		retry.Reason = notice.Reason
+		retry.Response = modelResponseFailure(notice.Response)
 	}
 
 	if retry.Attempt < 1 {

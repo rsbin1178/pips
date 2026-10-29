@@ -3,12 +3,18 @@ package openai
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/internal/jsonx"
 )
 
 const responsesPath = "responses"
+
+const (
+	responseStatusCompleted  = "completed"
+	responseStatusIncomplete = "incomplete"
+)
 
 func (m *Model) generateResponses(ctx context.Context, req ai.Request) (*ai.Response, error) {
 	body, warnings, err := m.responsesRequestFrom(req, false)
@@ -23,12 +29,26 @@ func (m *Model) generateResponses(ctx context.Context, req ai.Request) (*ai.Resp
 		return nil, fmt.Errorf("%s: responses: %w", m.label(), err)
 	}
 
-	if parsed.Status == "failed" && parsed.Error != nil {
-		return nil, responsesFailure(m.provider, parsed.Error, raw)
+	if parsed.Status == "failed" {
+		if parsed.Error != nil {
+			return nil, responsesFailure(m.provider, parsed.Error, raw)
+		}
+
+		resp := responseFromResponses(parsed, nil, m.provider)
+
+		return resp, responsesStateError(ai.ErrResponseFailed, resp, parsed.Status)
 	}
 
 	resp := responseFromResponses(parsed, raw, m.provider)
+
 	resp.Warnings = warnings
+	if cause := responsesRejection(parsed); cause != nil {
+		return resp, responsesStateError(cause, resp, parsed.Status)
+	}
+
+	if err := validateResponsesTools(parsed); err != nil {
+		return resp, responsesStateError(err, resp, parsed.Status)
+	}
 
 	return resp, nil
 }
@@ -86,6 +106,11 @@ func emitResponsesStream(provider ai.Provider, events eventSource, yield func(ai
 		provider:        provider,
 		toolSlot:        make(map[int]int),
 		reasoningFlavor: make(map[int]string),
+		text:            make(map[responseTextKey]*strings.Builder),
+		reasoning:       make(map[int]*strings.Builder),
+		items:           make(map[string]int),
+		tools:           make(map[int]*responseToolState),
+		citations:       make(map[responseAnnotation]bool),
 	}
 
 	for event, err := range events {
@@ -108,11 +133,24 @@ func emitResponsesStream(provider ai.Provider, events eventSource, yield func(ai
 			return
 		}
 	}
+
+	if !d.terminal {
+		yield(ai.StreamEvent{}, d.failure(ai.ErrIncompleteStream))
+	}
 }
 
 type responsesStreamState struct {
 	provider  ai.Provider
 	startSent bool
+	terminal  bool
+	response  *responsesResponse
+	id, model string
+	text      map[responseTextKey]*strings.Builder
+	reasoning map[int]*strings.Builder
+	items     map[string]int
+	tools     map[int]*responseToolState
+	citations map[responseAnnotation]bool
+	refused   bool
 	// toolSlot maps a function_call output_index to its ai tool-call index.
 	toolSlot map[int]int
 	nextTool int
@@ -134,7 +172,10 @@ func (d *responsesStreamState) handle(ev responsesStreamEvent, yield func(ai.Str
 	case "response.created":
 		return d.handleCreated(ev, yield)
 	case "response.output_text.delta":
-		return yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: ev.Delta}, nil)
+		return d.handleTextDelta(ev, yield)
+	case "response.refusal.delta":
+		d.refused = true
+		return true
 	case "response.reasoning_summary_text.delta":
 		return d.handleReasoningDelta(ev, reasoningFlavorSummary, yield)
 	case "response.reasoning_text.delta":
@@ -162,12 +203,17 @@ func (d *responsesStreamState) handle(ev responsesStreamEvent, yield func(ai.Str
 // handleFailed surfaces a response that failed mid-stream. A failure without
 // an error object is only observable through its terminal status.
 func (d *responsesStreamState) handleFailed(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {
+	d.response = ev.Response
+
+	d.terminal = true
 	if ev.Response != nil && ev.Response.Error != nil {
 		yield(ai.StreamEvent{}, responsesFailure(d.provider, ev.Response.Error, nil))
 		return false
 	}
 
-	return d.handleTerminal(ev, yield)
+	yield(ai.StreamEvent{}, d.failure(ai.ErrResponseFailed))
+
+	return false
 }
 
 // streamError builds an *ai.Error for a Responses mid-stream error event,
@@ -208,8 +254,10 @@ func (d *responsesStreamState) handleCreated(ev responsesStreamEvent, yield func
 	start := ai.StreamEvent{Type: ai.StreamMessageStart, Provider: d.provider}
 
 	if ev.Response != nil {
+		d.response = ev.Response
 		start.ID = ev.Response.ID
 		start.Model = ev.Response.Model
+		d.id, d.model = start.ID, start.Model
 	}
 
 	return yield(start, nil)
@@ -220,6 +268,10 @@ func (d *responsesStreamState) handleItemAdded(ev responsesStreamEvent, yield fu
 		return true
 	}
 
+	if ev.Item.ID != "" {
+		d.items[ev.Item.ID] = ev.OutputIndex
+	}
+
 	if ev.Item.Type == typeReasoning {
 		return d.handleReasoningItem(ev, yield)
 	}
@@ -228,16 +280,7 @@ func (d *responsesStreamState) handleItemAdded(ev responsesStreamEvent, yield fu
 		return true
 	}
 
-	idx := d.nextTool
-	d.nextTool++
-	d.toolSlot[ev.OutputIndex] = idx
-
-	return yield(ai.StreamEvent{
-		Type:          ai.StreamToolCallStart,
-		ToolCallIndex: idx,
-		ToolCallID:    encodeResponsesToolCallID(ev.Item.CallID, ev.Item.ID),
-		ToolCallName:  ev.Item.Name,
-	}, nil)
+	return d.reconcileTool(ev.OutputIndex, *ev.Item, yield)
 }
 
 // handleReasoningDelta forwards a reasoning text fragment. Providers stream
@@ -255,6 +298,11 @@ func (d *responsesStreamState) handleReasoningDelta(
 	}
 
 	d.reasoningFlavor[ev.OutputIndex] = flavor
+	if d.reasoning[ev.OutputIndex] == nil {
+		d.reasoning[ev.OutputIndex] = &strings.Builder{}
+	}
+
+	_, _ = d.reasoning[ev.OutputIndex].WriteString(ev.Delta)
 
 	return yield(ai.StreamEvent{Type: ai.StreamReasoningDelta, Text: ev.Delta}, nil)
 }
@@ -277,33 +325,7 @@ func (d *responsesStreamState) handleOutputItemDone(ev responsesStreamEvent, yie
 		return true
 	}
 
-	if ev.Item.Type == typeReasoning {
-		return d.handleReasoningItem(ev, yield)
-	}
-
-	if ev.Item.Type == typeMessage {
-		for _, c := range ev.Item.Content {
-			for _, ann := range c.Annotations {
-				if ann.Type == "url_citation" {
-					cit := ai.Citation{
-						URL:   ann.URL,
-						Title: ann.Title,
-						Index: d.nextCitation,
-						TextRange: &ai.TextRange{
-							Start: ann.StartIndex,
-							End:   ann.EndIndex,
-						},
-					}
-					d.nextCitation++
-					if !yield(ai.StreamEvent{Type: ai.StreamCitation, Citation: &cit}, nil) {
-						return false
-					}
-				}
-			}
-		}
-	}
-
-	return true
+	return d.reconcileItem(ev.OutputIndex, *ev.Item, yield)
 }
 
 func (d *responsesStreamState) handleArgsDelta(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {
@@ -312,45 +334,164 @@ func (d *responsesStreamState) handleArgsDelta(ev responsesStreamEvent, yield fu
 		return true
 	}
 
+	_, _ = d.tools[ev.OutputIndex].args.WriteString(ev.Delta)
+
 	return yield(ai.StreamEvent{Type: ai.StreamToolCallDelta, ToolCallIndex: idx, ArgsDelta: ev.Delta}, nil)
 }
 
 func (d *responsesStreamState) handleArgsDone(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {
-	idx, ok := d.toolSlot[ev.OutputIndex]
+	tool, ok := d.tools[ev.OutputIndex]
 	if !ok {
 		return true
 	}
 
-	return yield(ai.StreamEvent{Type: ai.StreamToolCallEnd, ToolCallIndex: idx}, nil)
+	tool.complete = true
+
+	if ev.Arguments == nil {
+		return true
+	}
+
+	return d.reconcileToolArgs(ev.OutputIndex, tool, *ev.Arguments, yield)
 }
 
 func (d *responsesStreamState) handleTerminal(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {
+	if d.terminal {
+		return false
+	}
+
+	d.terminal = true
+	ev = normalizeResponsesTerminal(ev)
+
 	end := ai.StreamEvent{Type: ai.StreamMessageEnd, FinishReason: ai.FinishStop}
+	if ev.Response != nil && !d.reconcileTerminal(ev, &end, yield) {
+		return false
+	}
 
-	if ev.Response != nil {
-		end.FinishReason = finishReasonFromResponses(*ev.Response)
+	if d.refused {
+		yield(ai.StreamEvent{}, d.failure(ai.ErrRefused))
+		return false
+	}
 
-		usage := usageFromResponses(ev.Response.Usage)
-		end.Usage = &usage
-
-		var queries []string
-		for _, item := range ev.Response.Output {
-			if item.Type == "web_search_call" && item.Action != nil {
-				if item.Action.Query != "" {
-					queries = append(queries, item.Action.Query)
-				}
-
-				if len(item.Action.Queries) > 0 {
-					queries = append(queries, item.Action.Queries...)
-				}
-			}
-		}
-		if len(queries) > 0 {
-			end.Grounding = &ai.GroundingMetadata{
-				WebSearchQueries: queries,
+	if end.FinishReason != ai.FinishLength {
+		for _, tool := range d.tools {
+			if !validResponseTool(tool) {
+				yield(ai.StreamEvent{}, d.failure(ai.ErrIncompleteStream))
+				return false
 			}
 		}
 	}
 
-	return yield(end, nil)
+	if end.FinishReason == ai.FinishStop && len(d.tools) > 0 {
+		end.FinishReason = ai.FinishToolCalls
+	}
+
+	for index := range d.nextTool {
+		if !yield(ai.StreamEvent{Type: ai.StreamToolCallEnd, ToolCallIndex: index}, nil) {
+			return false
+		}
+	}
+
+	yield(end, nil)
+
+	return false
+}
+
+func normalizeResponsesTerminal(ev responsesStreamEvent) responsesStreamEvent {
+	if ev.Type != "response.incomplete" {
+		return ev
+	}
+
+	body := responsesResponse{}
+	if ev.Response != nil {
+		body = *ev.Response
+	}
+
+	body.Status = responseStatusIncomplete
+	ev.Response = &body
+
+	return ev
+}
+
+func (d *responsesStreamState) failure(cause error) error {
+	resp := &ai.Response{Provider: d.provider, ID: d.id, Model: d.model}
+	for _, text := range d.text {
+		resp.Message.Parts = append(resp.Message.Parts, ai.TextPart{Text: text.String()})
+	}
+
+	for range d.tools {
+		resp.Message.Parts = append(resp.Message.Parts, ai.ToolCallPart{})
+	}
+
+	for range d.reasoning {
+		resp.Message.Parts = append(resp.Message.Parts, ai.ReasoningPart{})
+	}
+
+	err := ai.NewResponseError(cause, resp, d.terminal)
+	if d.response != nil {
+		final := ai.NewResponseError(cause, responseFromResponses(*d.response, nil, d.provider), d.terminal)
+		err.FinishReason, err.Usage, err.Status = final.FinishReason, final.Usage, d.response.Status
+		err.TextBytes, err.ToolCalls = max(err.TextBytes, final.TextBytes), max(err.ToolCalls, final.ToolCalls)
+		err.HasReasoning = err.HasReasoning || final.HasReasoning
+	}
+
+	return err
+}
+
+func (d *responsesStreamState) reconcileTerminal(ev responsesStreamEvent, end *ai.StreamEvent, yield func(ai.StreamEvent, error) bool) bool {
+	d.response = ev.Response
+	resp := responseFromResponses(*ev.Response, nil, d.provider)
+
+	cause := responsesRejection(*ev.Response)
+	if d.refused {
+		cause = ai.ErrRefused
+	}
+
+	if cause == nil {
+		cause = validateResponsesTools(*ev.Response)
+	}
+
+	if cause != nil {
+		yield(ai.StreamEvent{}, d.failure(cause))
+		return false
+	}
+
+	if !d.startSent && !d.handleCreated(ev, yield) {
+		return false
+	}
+
+	end.FinishReason = resp.FinishReason
+	usage := resp.Usage
+	end.Usage, end.Grounding = &usage, resp.Grounding
+
+	for index, item := range ev.Response.Output {
+		index = d.outputIndex(index, item)
+		if !d.reconcileItem(index, item, yield) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (d *responsesStreamState) outputIndex(index int, item responseItem) int {
+	if original, ok := d.items[item.ID]; item.ID != "" && ok {
+		index = original
+	}
+
+	if item.Type == typeFunctionCall {
+		return d.toolIndex(index, item)
+	}
+
+	return index
+}
+
+func (d *responsesStreamState) handleTextDelta(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {
+	key := responseTextKey{ev.OutputIndex, ev.ContentIndex}
+	if d.text[key] == nil {
+		d.text[key] = &strings.Builder{}
+	}
+
+	_, _ = d.text[key].WriteString(ev.Delta)
+
+	return yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: ev.Delta}, nil)
 }

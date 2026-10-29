@@ -230,14 +230,17 @@ type Runtime struct {
 	// childResults is the live predicate over this session's children: which
 	// child's terminal record a Tool read already carries, so a completion that
 	// a read answered does not wake the model a second time.
-	childResults    *childResultLedger
-	children        map[string]*childProjection
-	agentDrafts     map[string]agentDraftRecord
-	teamGuard       teamCapabilityGuard
-	admission       *teamAdmission
-	team            *teamCoordinator
-	teamRecovery    []TeamRecoveryCandidate
-	teamRecoveryErr error
+	childResults *childResultLedger
+	children     map[string]*childProjection
+	// finishedChildren orders the bounded cache of finished child projections,
+	// oldest first, so a long-lived session does not pin every child transcript.
+	finishedChildren []string
+	agentDrafts      map[string]agentDraftRecord
+	teamGuard        teamCapabilityGuard
+	admission        *teamAdmission
+	team             *teamCoordinator
+	teamRecovery     []TeamRecoveryCandidate
+	teamRecoveryErr  error
 
 	writer      *eventWriter
 	publisher   *eventPublisher
@@ -410,6 +413,8 @@ func openRuntime(
 		if err != nil {
 			return nil, err
 		}
+	} else {
+		baseModel = model.RequireOutput(baseModel)
 	}
 	if baseModel.Provider() != resolved.Ref.Provider ||
 		baseModel.ModelID() != resolved.Ref.Model {
@@ -738,6 +743,8 @@ func openRuntime(
 		Path:                runtime.session.Path(),
 		HasPendingToolCalls: len(pending) > 0,
 		Tree:                treeSnapshot,
+		TranscriptLimit:     runtime.config.TUI.TranscriptMessages,
+		TranscriptBytes:     runtime.config.TUI.TranscriptBytes,
 	}
 	bootstrap, err := BootstrapState(bootstrapOptions)
 	if err != nil {
@@ -1440,6 +1447,25 @@ func (r *Runtime) Snapshot() State {
 	defer r.mu.Unlock()
 
 	return r.state.Clone()
+}
+
+// SnapshotReadOnly returns the current projection as a read-only view. Its
+// immutable slices are shared with the Runtime's private State, which the
+// reducer only replaces through copy-on-write transitions, so a retained view
+// keeps the projection it was taken from.
+//
+// The caller must not mutate the returned State or anything reachable from it.
+// Use [Runtime.Snapshot] when the caller retains the State for mutation or hands
+// it to a holder that does not accept this contract.
+func (r *Runtime) SnapshotReadOnly() State {
+	if r == nil {
+		return State{}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.state
 }
 
 func (r *Runtime) currentOperatingMode() OperatingMode {

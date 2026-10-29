@@ -34,9 +34,10 @@ type transcriptModeState struct {
 	// over already, for the progress hint.
 	page  int
 	wrote int
-	// rows is the snapshot taken on entry. Taking it once keeps the printed
-	// document stable even while a streaming reply keeps growing.
-	rows []string
+	// document is the stable snapshot taken on entry. It stores identities,
+	// row counts and block pointers, never the whole flattened row set, so a
+	// long conversation costs one page of rows while the mode is open.
+	document *transcriptDocument
 	// The saved reading position, restored when the fullscreen view returns.
 	follow    bool
 	hasAnchor bool
@@ -72,7 +73,7 @@ func (m *Model) enterTranscriptMode() tea.Cmd {
 	m.transcriptMode = transcriptModeState{
 		active:    true,
 		sequence:  m.transcriptMode.sequence + 1,
-		rows:      m.transcript.flatten(),
+		document:  m.transcript.snapshotDocument(),
 		follow:    m.transcriptScroll.follow,
 		hasAnchor: row >= 0,
 		anchor:    anchor,
@@ -123,12 +124,16 @@ func (m *Model) transcriptPageCmd() tea.Cmd {
 		return nil
 	}
 
-	for m.transcriptMode.page*transcriptPageRows < len(m.transcriptMode.rows) {
+	for m.transcriptMode.page*transcriptPageRows < m.transcriptMode.document.rowCount() {
 		start := m.transcriptMode.page * transcriptPageRows
 		m.transcriptMode.page++
-		end := min(len(m.transcriptMode.rows), start+transcriptPageRows)
+		end := min(m.transcriptMode.document.rowCount(), start+transcriptPageRows)
 		m.transcriptMode.wrote = end
-		body := strings.Join(m.transcriptMode.rows[start:end], "\n")
+		rows := m.transcriptMode.document.rowsIn(start, end)
+		// The page owns its strings only until the write is queued; the next page
+		// renders its own window.
+		m.transcriptMode.document.release()
+		body := strings.Join(rows, "\n")
 		if body == "" {
 			continue
 		}
@@ -148,7 +153,7 @@ func (m *Model) transcriptPageCmd() tea.Cmd {
 // written.
 func (m *Model) transcriptModePending() bool {
 	return m.transcriptMode.active &&
-		m.transcriptMode.page*transcriptPageRows < len(m.transcriptMode.rows)
+		m.transcriptMode.page*transcriptPageRows < m.transcriptMode.document.rowCount()
 }
 
 // updateTranscriptPage continues a paged write. A page whose sequence no longer
@@ -188,7 +193,7 @@ func (m *Model) transcriptModeView() tea.View {
 // pending input, because a prompt raised while the user reads would otherwise be
 // invisible until they return.
 func (m *Model) transcriptModeHint() string {
-	total := len(m.transcriptMode.rows)
+	total := m.transcriptMode.document.rowCount()
 	hint := ""
 	switch {
 	case m.transcriptMode.page*transcriptPageRows < total:
@@ -211,14 +216,14 @@ func (m *Model) transcriptModeHint() string {
 	return ansi.Truncate(hint, max(1, m.width), "…")
 }
 
-// transcriptExitRows returns the rows to hand to the terminal after a normal
-// exit, or nil when the exit should leave the main screen alone.
+// transcriptExitDocument returns the paged handoff document, or nil when the
+// exit should leave the main screen alone.
 //
 // A fullscreen session owns the conversation and the alternate screen is
 // discarded on exit, so the rows have to be written out or they are lost.
 // Inline mode already wrote them, and a session that ended while the escape
 // hatch was open has them in the main buffer already.
-func (m *Model) transcriptExitRows() []string {
+func (m *Model) transcriptExitDocument() *transcriptDocument {
 	if m.transcriptMode.active || m.transcriptHanded {
 		return nil
 	}
@@ -229,20 +234,30 @@ func (m *Model) transcriptExitRows() []string {
 		return nil
 	}
 
-	return m.transcript.flatten()
+	return m.transcript.snapshotDocument()
+}
+
+// transcriptExitRows materialises the exit handoff. Tests and small diagnostic
+// reads use it; the process exit path pages the document instead.
+func (m *Model) transcriptExitRows() []string {
+	return m.transcriptExitDocument().all()
 }
 
 // writeExitTranscript appends the conversation to the main screen after the
-// terminal has been restored. It writes in bounded pages rather than building the
-// whole document, so a long session does not materialise twice.
-func writeExitTranscript(output io.Writer, rows []string) error {
-	if output == nil || len(rows) == 0 {
+// terminal has been restored. It materialises one page at a time and releases
+// the page's rows before rendering the next, so a long session never holds the
+// whole document twice.
+func writeExitTranscript(output io.Writer, document *transcriptDocument) error {
+	if output == nil || document == nil {
 		return nil
 	}
 
-	for start := 0; start < len(rows); start += transcriptPageRows {
-		end := min(len(rows), start+transcriptPageRows)
-		page := strings.Join(rows[start:end], "\n") + "\n"
+	total := document.rowCount()
+	for start := 0; start < total; start += transcriptPageRows {
+		end := min(total, start+transcriptPageRows)
+		rows := document.rowsIn(start, end)
+		document.release()
+		page := strings.Join(rows, "\n") + "\n"
 		written, err := io.WriteString(output, page)
 		if err != nil {
 			return err

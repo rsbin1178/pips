@@ -838,7 +838,7 @@ func (r *Repository) validateForkSource(source *Handle, atEntryID string) error 
 		source.transcriptPath == "" || !strings.HasPrefix(source.sessionDir, r.dir+string(filepath.Separator)) {
 		return fmt.Errorf("%w: source session does not belong to repository", ErrInvalid)
 	}
-	if len(source.session.Entries()) == 0 {
+	if len(source.session.EntriesView()) == 0 {
 		return fmt.Errorf("%w: cannot fork provisional session", ErrInvalid)
 	}
 	if atEntryID != "" {

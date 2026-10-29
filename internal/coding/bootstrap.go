@@ -18,6 +18,12 @@ type BootstrapOptions struct {
 	Path                []harness.Entry
 	HasPendingToolCalls bool
 	Tree                harness.TreeSnapshot
+	// TranscriptLimit bounds the live transcript window. Zero or a value above
+	// the event protocol cap selects the default (maxEventItems).
+	TranscriptLimit int
+	// TranscriptBytes bounds the live transcript and Tool payload. Zero or a
+	// value above the protocol cap selects the default (retainedTranscriptBytes).
+	TranscriptBytes int
 }
 
 // BootstrapResult contains restart state and the interaction journal projection.
@@ -35,7 +41,30 @@ type BootstrapResult struct {
 // BootstrapState reconstructs durable frontend state without allocating live
 // event sequence numbers.
 //
+// transcriptWindowLimitOption resolves a configured cap to the concrete live
+// window. Values above the event protocol bound fall back to the default so a
+// hand-written Config literal cannot create a State the protocol rejects.
+//
 //nolint:gocyclo // Harness kinds and journal recovery form one explicit replay pass.
+func transcriptWindowLimitOption(configured int) int {
+	if configured <= 0 || configured > maxEventItems {
+		return retainedTranscriptItems
+	}
+
+	return configured
+}
+
+// transcriptByteLimitOption resolves a configured byte window to the concrete
+// cap. Values outside the configured range fall back to the default so a
+// hand-written Config literal cannot disable the bound.
+func transcriptByteLimitOption(configured int) int {
+	if configured <= 0 || configured > maxTranscriptBytes {
+		return retainedTranscriptBytes
+	}
+
+	return configured
+}
+
 func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	if err := validateEventID("session id", options.SessionID, true); err != nil {
 		return BootstrapResult{}, err
@@ -67,10 +96,19 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 		return BootstrapResult{}, err
 	}
 
+	limit := transcriptWindowLimitOption(options.TranscriptLimit)
+	byteLimit := transcriptByteLimitOption(options.TranscriptBytes)
 	state := State{
 		SessionID: options.SessionID, SessionOpen: true,
 		Provider: options.Provider, ModelID: options.ModelID, ContextWindow: options.ContextWindow,
 		Mode: mode, PlanMode: options.PlanMode, Phase: PhaseIdle,
+		transcriptLimit:     limit,
+		transcriptByteLimit: byteLimit,
+		toolsByteLimit:      byteLimit,
+		// State.Clone normalized an empty Tool projection to a non-nil slice;
+		// returning the locally built State keeps that shape stable across
+		// bootstrap and later snapshots.
+		Tools: make([]ToolState, 0),
 	}
 	if options.Tree.SessionID != "" {
 		state.Tree, err = sessionTreeFromHarness(options.Tree)
@@ -78,6 +116,22 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 			return BootstrapResult{}, protocolError("invalid durable session tree")
 		}
 	}
+
+	// Only the retained window is materialized into State. The durable path can
+	// be much longer; building the full transcript first and trimming it after
+	// the loop doubled open memory and left the dropped messages reachable until
+	// the temporary slice was collected.
+	messageCount := 0
+	for _, entry := range options.Path {
+		if entry.Kind == harness.KindMessage {
+			messageCount++
+		}
+	}
+	firstKept := max(0, messageCount-limit)
+	state.transcriptBase = firstKept
+	state.Transcript = make(ai.Messages, 0, min(messageCount, limit))
+
+	messageIndex := 0
 	for _, entry := range options.Path {
 		switch entry.Kind {
 		case harness.KindMessage:
@@ -85,7 +139,10 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 				return BootstrapResult{}, protocolError("invalid durable message entry %q", entry.ID)
 			}
 
-			state.Transcript = append(state.Transcript, cloneMessage(entry.Message))
+			if messageIndex >= firstKept {
+				state.Transcript = append(state.Transcript, cloneMessage(entry.Message))
+			}
+			messageIndex++
 			if update, ok := tasklist.FromMessage(entry.Message); ok {
 				// A call that cannot be folded leaves the plan alone, the way a
 				// malformed call is ignored.
@@ -117,15 +174,13 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 			return BootstrapResult{}, protocolError("unknown Harness entry kind %q", entry.Kind)
 		}
 	}
-	if len(state.Transcript) > maxEventItems {
-		state.Transcript = state.Transcript[len(state.Transcript)-maxEventItems:]
-	}
-	if compaction, ok := fullCompactionStateFromPath(options.Path); ok {
+	if compaction, ok := fullCompactionStateFromPath(options.Path, limit); ok {
 		state.Compaction = compaction
 	}
 	state.MessageCandidates = make([]CandidateIdentity, len(state.Transcript))
 	state.SyntheticMessages = syntheticMessageIndexes(state.Transcript)
 	state.IncompleteReplies = incompleteReplies
+	state.transcriptBytes = messagesByteSize(state.Transcript)
 	state.ContextTokens = harness.EstimateContext(options.Path)
 
 	if recovery.LastID != "" {
@@ -142,7 +197,7 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	state.rebuildIndexes()
 
 	return BootstrapResult{
-		State:             state.Clone(),
+		State:             state,
 		Recovery:          recovery.Clone(),
 		OrphanedToolCalls: orphanedToolCalls,
 	}, nil

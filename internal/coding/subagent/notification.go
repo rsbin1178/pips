@@ -458,7 +458,7 @@ func (i *NotificationInbox) replayLocked() (notificationReplay, error) {
 		messages:        make(map[string]ParentMessage),
 		pendingMessages: make(map[string]ParentMessage),
 	}
-	for _, entry := range i.session.Entries() {
+	for _, entry := range i.session.EntriesView() {
 		if entry.Kind != harness.KindCustom || entry.Custom != notificationCustomType {
 			continue
 		}

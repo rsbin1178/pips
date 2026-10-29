@@ -226,7 +226,7 @@ func TestStreamingWaitsForMatchingDurableAssistantPromotion(t *testing.T) {
 	model.state.MessageCandidates = []coding.CandidateIdentity{{RunID: "run-1", Turn: 1}}
 	model.scrollback.messages = 0
 
-	writes := model.streamingScrollbackWrites(nil)
+	writes := drainScrollbackSources(model, model.streamingScrollbackSources(nil))
 	assert.Empty(t, writes)
 	assert.True(t, model.streaming.active)
 	assert.True(t, model.hasPendingStreamingAssistant())
@@ -236,7 +236,7 @@ func TestStreamingWaitsForMatchingDurableAssistantPromotion(t *testing.T) {
 	assert.Contains(t, active, "second row")
 
 	stable := []timelineBlock{{kind: blockAssistant, id: "run-1:1", body: source}}
-	finalWrites := model.streamingScrollbackWrites(stable)
+	finalWrites := drainScrollbackSources(model, model.streamingScrollbackSources(stable))
 
 	finalParts := make([]string, len(finalWrites))
 	for index := range finalWrites {
@@ -264,7 +264,7 @@ func TestPlanStreamingCandidateIsRetractableAndCommitsExactlyOnce(t *testing.T) 
 		Kind: ai.StreamTextDelta, Text: "provisional Plan that must remain retractable",
 	})
 
-	writes := model.streamingScrollbackWrites(nil)
+	writes := drainScrollbackSources(model, model.streamingScrollbackSources(nil))
 	assert.Empty(t, writes)
 	assert.True(t, model.streaming.active)
 	assert.True(t, model.streaming.retractable)
@@ -272,7 +272,7 @@ func TestPlanStreamingCandidateIsRetractableAndCommitsExactlyOnce(t *testing.T) 
 
 	model.state.Draft = coding.StreamDraft{}
 	model.state.DraftCandidate = coding.CandidateIdentity{}
-	writes = model.streamingScrollbackWrites(nil)
+	writes = drainScrollbackSources(model, model.streamingScrollbackSources(nil))
 	assert.Empty(t, writes)
 	assert.False(t, model.streaming.active)
 
@@ -280,11 +280,11 @@ func TestPlanStreamingCandidateIsRetractableAndCommitsExactlyOnce(t *testing.T) 
 
 	model.state.DraftCandidate = coding.CandidateIdentity{RunID: "plan-run", Turn: 2}
 	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: accepted})
-	assert.Empty(t, model.streamingScrollbackWrites(nil))
+	assert.Empty(t, drainScrollbackSources(model, model.streamingScrollbackSources(nil)))
 	model.state.Draft = coding.StreamDraft{}
 	model.state.DraftCandidate = coding.CandidateIdentity{}
 	stable := []timelineBlock{{kind: blockAssistant, id: "plan-run:2", body: accepted}}
-	writes = model.streamingScrollbackWrites(stable)
+	writes = drainScrollbackSources(model, model.streamingScrollbackSources(stable))
 
 	var rendered strings.Builder
 	for _, write := range writes {

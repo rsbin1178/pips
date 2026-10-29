@@ -230,7 +230,7 @@ func responseAssistantItems(parts []ai.AssistantPart) []responseItem {
 		items = append(items, responseItem{
 			Type:    typeMessage,
 			Role:    "assistant",
-			Status:  "completed",
+			Status:  responseStatusCompleted,
 			Content: text,
 		})
 		text = nil
@@ -511,26 +511,23 @@ func appendOutputItem(msg *ai.AssistantMessage, item responseItem) {
 }
 
 func finishReasonFromResponses(body responsesResponse) ai.FinishReason {
+	if body.IncompleteDetails != nil {
+		switch body.IncompleteDetails.Reason {
+		case "max_output_tokens":
+			return ai.FinishLength
+		case string(ai.FinishContentFilter):
+			return ai.FinishContentFilter
+		}
+	}
+	if body.Status == "failed" || body.Status == responseStatusIncomplete {
+		return ai.FinishOther
+	}
 	for _, item := range body.Output {
 		if item.Type == typeFunctionCall {
 			return ai.FinishToolCalls
 		}
 	}
-
-	if body.IncompleteDetails != nil && body.IncompleteDetails.Reason == "max_output_tokens" {
-		return ai.FinishLength
-	}
-
-	switch body.Status {
-	case "completed":
-		return ai.FinishStop
-	case "incomplete":
-		return ai.FinishLength
-	case "failed":
-		return ai.FinishOther
-	default:
-		return ai.FinishStop
-	}
+	return ai.FinishStop
 }
 
 func usageFromResponses(u *responsesUsage) ai.Usage {

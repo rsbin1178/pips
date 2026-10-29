@@ -25,6 +25,12 @@ import (
 // have to re-render the record that is about to enter the window.
 const transcriptWindowMargin = 64
 
+// maxResidentRowsPerRecord bounds one record's resident rows. A single long
+// answer or tool output can be far taller than the window; keeping its whole
+// rendering would bypass the residency bound. A window of rows around the
+// reading position stays resident and the rest is rendered again on demand.
+const maxResidentRowsPerRecord = 4096
+
 // transcriptRecord is one settled or growing conversation entry.
 type transcriptRecord struct {
 	// id is the stable identity used for anchoring and row reuse. It is empty
@@ -47,14 +53,27 @@ type transcriptRecord struct {
 	live bool
 	// block is the projection this record renders, kept so the rows can be
 	// reproduced after a release.
-	block timelineBlock
+	block *timelineBlock
 	// tool is the projection this record renders when it is a Tool entry, kept so
 	// an addressed interaction can open that exact call's detail.
 	tool *timelineBlock
 }
 
-func (r transcriptRecord) height() int {
+func (r *transcriptRecord) height() int {
 	return r.lines
+}
+
+// hasLive reports whether the store still owns a record that may change without
+// a settled rebuild. Its renderer keeps the corresponding live rows; once no
+// such record remains they are stale and can be released.
+func (s *transcriptStore) hasLive() bool {
+	for index := range s.records {
+		if s.records[index].live {
+			return true
+		}
+	}
+
+	return false
 }
 
 // release drops the rendered rows, keeping the row count and the projection so
@@ -119,7 +138,7 @@ type transcriptStore struct {
 type transcriptEntry struct {
 	id    string
 	live  bool
-	block timelineBlock
+	block *timelineBlock
 }
 
 // resetRenders clears the render and eviction counters.
@@ -216,8 +235,7 @@ func (s *transcriptStore) newRecord(id string, entry transcriptEntry) transcript
 	record := transcriptRecord{id: id, live: entry.live, block: entry.block}
 	if (entry.block.kind == blockTool || entry.block.kind == blockSubagent ||
 		entry.block.kind == blockQuestion) && len(entry.block.tools) > 0 {
-		tool := entry.block
-		record.tool = &tool
+		record.tool = entry.block
 	}
 
 	s.materialize(&record)
@@ -432,25 +450,101 @@ func hashTranscriptRow(hash uint64, row string) uint64 {
 	return hash
 }
 
-// loadRecord returns one record's rows, rendering them if they were released.
-// Rows are only ever reused inside one rendering key, so a record that reloads
-// renders to the same rows it did before.
+// loadRecord returns one record's complete rows, rendering them if they were
+// released or had been reduced to a window. Callers that scan or flatten the
+// document need every logical row; the windowed frame path uses
+// [transcriptStore.loadRecordRange].
 func (s *transcriptStore) loadRecord(index int) rowSegments {
 	record := &s.records[index]
-	if !record.loaded {
-		s.materialize(record)
+	if !record.loaded || record.rows.base != 0 ||
+		record.rows.residentCount() != record.lines {
+		s.materializeFull(record)
 	}
 
 	return record.rows
 }
 
-// materialize renders one record's rows in place.
+// loadRecordRange returns the rows needed for logical record rows [from, to).
+// A resident window that already covers the range is reused; otherwise the
+// record is rendered in full and only a bounded window around the request is
+// kept.
+func (s *transcriptStore) loadRecordRange(index, from, to int) rowSegments {
+	record := &s.records[index]
+	if from >= to {
+		return rowSegments{base: from}
+	}
+
+	residentStart := record.rows.base
+	residentEnd := residentStart + record.rows.residentCount()
+	if record.loaded && from >= residentStart && to <= residentEnd {
+		return record.rows
+	}
+
+	s.materializeFull(record)
+	s.retainRecordRange(record, from, to)
+
+	return record.rows
+}
+
+// materialize renders one live record's rows in place. A managed live block
+// already returns a bounded tail window; a settled oversized record is trimmed
+// by [transcriptStore.trim] once the reading window is known.
 func (s *transcriptStore) materialize(record *transcriptRecord) {
-	record.rows = s.render(record.block)
+	record.rows = s.render(*record.block)
 	record.lines = record.rows.count()
 	record.loaded = true
 	s.materializations++
 	s.rowsMaterialized += record.lines
+}
+
+// materializeFull renders every row of one record, bypassing the live row
+// window. It is used when the reader or a full-document scan asks for rows the
+// resident window no longer holds.
+func (s *transcriptStore) materializeFull(record *transcriptRecord) {
+	record.rows = s.renderFull(*record.block)
+	record.lines = record.rows.count()
+	record.loaded = true
+	s.materializations++
+	s.rowsMaterialized += record.lines
+}
+
+// retainRecordRange reduces one oversized record to a bounded window covering
+// the requested logical range. from and to are record-relative and clamped.
+func (s *transcriptStore) retainRecordRange(record *transcriptRecord, from, to int) {
+	if record.lines <= maxResidentRowsPerRecord {
+		return
+	}
+
+	from = min(max(0, from), record.lines)
+	to = min(max(from, to), record.lines)
+	if from >= to {
+		from, to = 0, min(record.lines, maxResidentRowsPerRecord)
+	}
+
+	residentStart := record.rows.base
+	residentEnd := residentStart + record.rows.residentCount()
+	if record.rows.residentCount() <= maxResidentRowsPerRecord &&
+		from >= residentStart && to <= residentEnd {
+		return
+	}
+	if from < residentStart || to > residentEnd {
+		s.materializeFull(record)
+	}
+
+	span := maxResidentRowsPerRecord
+	start := max(0, from-transcriptWindowMargin)
+	if to-start > span {
+		start = max(0, to-span)
+	}
+	if start+span < to {
+		start = max(0, to-span)
+	}
+	end := min(record.lines, start+span)
+	if end-start < span && end == record.lines {
+		start = max(0, end-span)
+	}
+
+	record.rows = record.rows.window(start, end)
 }
 
 // render produces one block's rows at the store's current geometry. A live
@@ -468,6 +562,27 @@ func (s *transcriptStore) render(block timelineBlock) rowSegments {
 	))}
 }
 
+// renderFull renders a block without the live row window. Drafts and the live
+// thinking section are rendered through their settled shape; the body and its
+// styling are identical, only the source of the rows differs.
+func (s *transcriptStore) renderFull(block timelineBlock) rowSegments {
+	full := block
+	switch full.kind {
+	case blockDraft:
+		full.kind = blockAssistant
+	case blockThinking:
+		if full.id == draftThinkingID {
+			full.id = ""
+		}
+	default:
+		// Settled blocks already have their complete render shape.
+	}
+
+	return rowSegments{frozen: splitTranscriptRows(renderTimelineEntry(
+		full, s.markdown, max(1, s.width), s.theme, s.noColor, timelineRenderOptions{},
+	))}
+}
+
 // rowCount reports the region's row count, including the leading rows.
 func (s *transcriptStore) rowCount() int {
 	s.reindex()
@@ -482,8 +597,9 @@ func (s *transcriptStore) setKeep(start, end int) {
 	s.hasKeep = true
 }
 
-// trim releases the rows of every record outside the retention window. The row
-// counts stay, so scrolling, anchors and hit testing keep working.
+// trim releases the rows of every record outside the retention window and
+// reduces an oversized record inside it to a bounded window. The row counts
+// stay, so scrolling, anchors and hit testing keep working.
 func (s *transcriptStore) trim() {
 	if !s.hasKeep {
 		return
@@ -496,10 +612,20 @@ func (s *transcriptStore) trim() {
 		}
 
 		start := s.starts[index]
-		if start+record.height() <= s.keepFrom || start >= s.keepTo {
+		end := start + record.height()
+		if end <= s.keepFrom || start >= s.keepTo {
 			record.release()
 			s.evictions++
+
+			continue
 		}
+		if record.lines <= maxResidentRowsPerRecord {
+			continue
+		}
+
+		from := max(0, s.keepFrom-start)
+		to := min(record.lines, s.keepTo-start)
+		s.retainRecordRange(record, from, to)
 	}
 }
 
@@ -540,13 +666,13 @@ func (s *transcriptStore) rowsIn(start, end int) []string {
 			continue
 		}
 
-		recordRows := s.loadRecord(index)
 		from := max(0, position-recordStart)
-		to := min(recordRows.count(), end-recordStart)
+		to := min(s.records[index].lines, end-recordStart)
 		if from >= to {
 			continue
 		}
 
+		recordRows := s.loadRecordRange(index, from, to)
 		rows = recordRows.appendWindow(rows, from, to)
 		position = recordStart + to
 	}
@@ -557,9 +683,75 @@ func (s *transcriptStore) rowsIn(start, end int) []string {
 	return rows
 }
 
-// flatten returns every region row. Transcript mode, export and the exit handoff
-// read the document once, so they materialise it and then hand the residency
-// window back to the reader.
+// transcriptDocument is a stable, paged snapshot of the conversation. It keeps
+// the record identities, row counts and block pointers but no rendered rows, so
+// the escape hatch and the exit handoff materialise one page at a time instead
+// of retaining the whole flattened document.
+type transcriptDocument struct {
+	store transcriptStore
+}
+
+// snapshotDocument captures the current record set and geometry. The source
+// store keeps its reading window; the document re-renders only the records a
+// page touches and releases them immediately.
+func (s *transcriptStore) snapshotDocument() *transcriptDocument {
+	s.reindex()
+
+	snapshot := transcriptStore{
+		width: s.width, theme: s.theme, themeKey: s.themeKey, noColor: s.noColor,
+		markdown: s.markdown, leading: s.leading, total: s.total,
+		records: make([]transcriptRecord, len(s.records)),
+		starts:  slices.Clone(s.starts),
+	}
+	for index, record := range s.records {
+		record.rows = rowSegments{}
+		record.loaded = false
+		snapshot.records[index] = record
+	}
+
+	return &transcriptDocument{store: snapshot}
+}
+
+func (d *transcriptDocument) rowCount() int {
+	if d == nil {
+		return 0
+	}
+
+	return d.store.leading + d.store.total
+}
+
+func (d *transcriptDocument) rowsIn(start, end int) []string {
+	if d == nil {
+		return nil
+	}
+
+	return d.store.rowsIn(start, end)
+}
+
+// release drops every rendered row the last page materialised.
+func (d *transcriptDocument) release() {
+	if d == nil {
+		return
+	}
+
+	for index := range d.store.records {
+		d.store.records[index].release()
+	}
+}
+
+// all materialises the whole document. Tests and small diagnostic reads use it;
+// the escape hatch and the exit handoff always page.
+func (d *transcriptDocument) all() []string {
+	if d == nil {
+		return nil
+	}
+
+	return d.store.flatten()
+}
+
+// flatten returns every region row. Export and small diagnostic reads read the
+// document once, so they materialise it and then hand the residency window back
+// to the reader.
 func (s *transcriptStore) flatten() []string {
 	total := s.rowCount()
 	if total == 0 {
@@ -630,7 +822,7 @@ func (s *transcriptStore) residentRowCount() int {
 	resident := 0
 	for index := range s.records {
 		if s.records[index].loaded {
-			resident += s.records[index].height()
+			resident += s.records[index].rows.residentCount()
 		}
 	}
 

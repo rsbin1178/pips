@@ -18,8 +18,8 @@ func TestReaderReadImageReturnsDetachedBytes(t *testing.T) {
 		initialized++
 
 		return nil
-	}, func() []byte {
-		return source
+	}, func(context.Context) ([]byte, error) {
+		return source, nil
 	})
 
 	data, err := reader.ReadImage(t.Context())
@@ -49,7 +49,7 @@ func TestReaderReadImageRejectsUnavailableEmptyAndPanic(t *testing.T) {
 			name: "initialization failure",
 			reader: newReader(
 				func() error { return errors.New("display missing") },
-				func() []byte { return []byte{1} },
+				func(context.Context) ([]byte, error) { return []byte{1}, nil },
 			),
 			err: ErrUnavailable,
 		},
@@ -57,15 +57,23 @@ func TestReaderReadImageRejectsUnavailableEmptyAndPanic(t *testing.T) {
 			name: "empty",
 			reader: newReader(
 				func() error { return nil },
-				func() []byte { return nil },
+				func(context.Context) ([]byte, error) { return nil, nil },
 			),
 			err: ErrEmpty,
+		},
+		{
+			name: "read failure",
+			reader: newReader(
+				func() error { return nil },
+				func(context.Context) ([]byte, error) { return nil, errors.New("backend missing") },
+			),
+			err: ErrUnavailable,
 		},
 		{
 			name: "initialization panic",
 			reader: newReader(
 				func() error { panic("private backend value") },
-				func() []byte { return nil },
+				func(context.Context) ([]byte, error) { return nil, nil },
 			),
 			err: ErrUnavailable,
 		},
@@ -73,7 +81,7 @@ func TestReaderReadImageRejectsUnavailableEmptyAndPanic(t *testing.T) {
 			name: "read panic",
 			reader: newReader(
 				func() error { return nil },
-				func() []byte { panic("private clipboard bytes") },
+				func(context.Context) ([]byte, error) { panic("private clipboard bytes") },
 			),
 			err: ErrUnavailable,
 		},
@@ -101,10 +109,10 @@ func TestReaderReadImageHonorsCancellation(t *testing.T) {
 		called = true
 
 		return nil
-	}, func() []byte {
+	}, func(context.Context) ([]byte, error) {
 		called = true
 
-		return []byte{1}
+		return []byte{1}, nil
 	})
 
 	_, err := reader.ReadImage(canceled)

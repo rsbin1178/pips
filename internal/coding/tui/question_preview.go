@@ -124,8 +124,7 @@ func insertQuestionPreviews(blocks, previews []timelineBlock) []timelineBlock {
 	for _, preview := range slices.Backward(previews) {
 		insertAt := len(result)
 		for position := range result {
-			if blockIsUnsettled(result[position]) ||
-				result[position].position >= preview.position {
+			if questionPreviewPrecedes(result[position], preview) {
 				insertAt = position
 
 				break
@@ -136,6 +135,31 @@ func insertQuestionPreviews(blocks, previews []timelineBlock) []timelineBlock {
 	}
 
 	return result
+}
+
+// questionPreviewPrecedes reports whether a preview must be inserted before the
+// block: the first unsettled block or the first block at or after its position.
+func questionPreviewPrecedes(block, preview timelineBlock) bool {
+	return blockIsUnsettled(block) || block.position >= preview.position
+}
+
+// rebaseQuestionPreviews moves preview positions into a projection window that
+// starts at messageStart. Preview positions are absolute transcript positions;
+// an inline delta's blocks are projected from a slice, so their positions are
+// window-relative. A preview that belongs before the window's first message is
+// clamped to its front.
+func rebaseQuestionPreviews(previews []timelineBlock, messageStart int) []timelineBlock {
+	if len(previews) == 0 {
+		return nil
+	}
+
+	rebased := make([]timelineBlock, 0, len(previews))
+	for _, preview := range previews {
+		preview.position = max(1, preview.position-max(0, messageStart))
+		rebased = append(rebased, preview)
+	}
+
+	return rebased
 }
 
 // takeOptimisticQuestionBlocks consumes the preview cards that are about to be
@@ -211,5 +235,5 @@ func projectQuestionPreview(preview questionPreview) (timelineBlock, bool) {
 		activity.result = string(result)
 	}
 
-	return projectQuestionToolActivity(activity)
+	return projectQuestionToolActivity(&activity)
 }

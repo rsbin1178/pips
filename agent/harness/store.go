@@ -28,8 +28,22 @@ type Store interface {
 	// Append persists one entry. ErrStoreAppendNotAttempted may be wrapped only
 	// when no bytes were written; write/flush/sync errors must not use it.
 	Append(e Entry) error
-	// Entries returns all entries in append order.
+	// Entries returns all entries in append order. The result is independent of
+	// the store's retained history: the caller may retain or modify it. Stores
+	// that expose [StoreView] serve the hot read path without this copy.
 	Entries() ([]Entry, error)
+}
+
+// StoreView is an optional [Store] capability: the store keeps the session's
+// entry history and can expose it without a defensive copy. A [Session] over a
+// StoreView therefore holds no second copy of the conversation.
+//
+// EntryView returns the store's retained entries in append order. The caller
+// must not modify the slice or any entry reachable from it. An append never
+// changes an already-published entry or its position, so a view remains valid
+// for the entries it covers after the store grows.
+type StoreView interface {
+	EntryView() []Entry
 }
 
 // MemoryStore is an in-memory [Store] for tests and ephemeral sessions.
@@ -70,6 +84,14 @@ func (m *MemoryStore) Entries() ([]Entry, error) {
 	defer m.mu.Unlock()
 
 	return cloneEntries(m.entries), nil
+}
+
+// EntryView implements [StoreView]. The returned slice is read-only.
+func (m *MemoryStore) EntryView() []Entry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.entries
 }
 
 // NewMemoryStoreWithMetadata returns an empty in-memory store with explicit

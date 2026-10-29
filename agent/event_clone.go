@@ -45,6 +45,11 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 
 		if value.Event.Retry != nil {
 			notice := *value.Event.Retry
+			if notice.Response != nil {
+				summary := *notice.Response
+				notice.Response = &summary
+			}
+
 			value.Event.Retry = &notice
 		}
 

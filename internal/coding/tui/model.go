@@ -8,6 +8,7 @@ import (
 	"iter"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -60,24 +61,11 @@ type bootstrapResult struct {
 	err        error
 }
 
-type controllerCommand string
-
-const (
-	commandSteer    controllerCommand = "steer"
-	commandFollowUp controllerCommand = "follow_up"
-)
-
-type controllerCommandMsg struct {
-	snapshot composerSnapshot
-	err      error
-}
-
 type submissionKind uint8
 
 const (
 	submissionPrompt submissionKind = iota
-	submissionSteer
-	submissionFollowUp
+	submissionQueued
 )
 
 type composerResolvedMsg struct {
@@ -90,6 +78,7 @@ type composerResolvedMsg struct {
 
 type cancelResultMsg struct {
 	bridge      *eventBridge
+	generation  uint64
 	beforeStart bool
 	err         error
 }
@@ -148,10 +137,23 @@ type Model struct {
 	streaming        streamProjection
 	renderWait       bool
 	renderDirty      bool
+	// liveRender is the single background renderer for an expensive live
+	// Markdown tail; liveRenderWait reports one result delivery is already armed.
+	// liveRenderEpoch is bumped when the projection is replaced so a late result
+	// cannot reach the new frame. liveCatchUpWait/liveCatchUpGen bound the one-shot
+	// catch-up that repaints a stale live frame.
+	liveRender      *liveRenderWorker
+	liveRenderWait  bool
+	liveRenderEpoch uint64
+	liveGeometry    liveGeometry
+	liveCatchUpWait bool
+	liveCatchUpGen  uint64
 	// viewStable marks an update that did not change what the frame renders: a
 	// deferred delta the reader cannot see yet, or a delivery the subscription
 	// already owns and the operation iterator only repeats. View() then reuses the
-	// last composition instead of re-styling the whole frame for it.
+	// last composition instead of re-styling the whole frame for it. The OSC 7501
+	// report is part of that composition, so a status change must clear this flag
+	// as well.
 	// viewStale records that the cached composition was invalidated outside an
 	// Update - a direct rerenderTranscript - and no View call has adopted that
 	// invalidation yet, so no update may reuse the cache until it has.
@@ -162,13 +164,18 @@ type Model struct {
 	viewCached   bool
 	viewCache    tea.View
 	viewComposes int
+	// statusReport is the current OSC 7501 report and statusFields its comparable
+	// identity. Reusing the pointer while the fields hold lets Bubble Tea emit
+	// nothing for an unchanged state.
+	statusReport *tea.ProgramStatus
+	statusFields programStatusFields
 	// frameCache reuses the committed prefix of the managed timeline between
 	// frames, and frameEntries is the buffer the volatile tail is named in.
 	// toolActivities is the activity list that prefix was projected from, so the
 	// volatile tail can be rebuilt without rescanning the transcript.
 	frameCache     timelineFrameCache
 	frameEntries   []transcriptEntry
-	toolActivities []toolActivity
+	toolActivities []*toolActivity
 	// pending holds drained stream items whose events only touch the live draft.
 	// They are applied once per frame at the render tick instead of once per
 	// event, so a burst of deltas costs one state advance and one render. Durable
@@ -206,6 +213,7 @@ type Model struct {
 	// to report a silent model instead of looking merely slow.
 	lastModelEventAt    time.Time
 	starting            bool
+	streamSeq           uint64
 	cancelStart         bool
 	waiting             bool
 	streamErr           error
@@ -216,6 +224,7 @@ type Model struct {
 	clipboardGeneration uint64
 	clipboardCancel     context.CancelFunc
 	queued              int
+	requests            requestQueue
 	canceling           bool
 	exitArmed           bool
 	bannerPrinted       bool
@@ -256,6 +265,14 @@ type Model struct {
 	prompt               promptState
 	promptSeq            uint64
 	completionMarkers    []completionMarker
+	// interactionRuns holds the run each interaction is in, keyed by interaction
+	// id and bounded to maxCompletionMarkers. Events are delivered contiguously,
+	// so the last run an interaction started is its final run even when the
+	// Runtime snapshot is ahead of the event being consumed. That run is the
+	// stable anchor a completion marker follows; a message count or a content
+	// digest cannot tell two identical answers apart.
+	interactionRuns    map[string]string
+	interactionRunKeys []string
 	// questionPreviews holds the cards the user just answered or canceled while
 	// the Runtime is still publishing the durable Tool result.
 	questionPreviews   map[string]questionPreview
@@ -465,11 +482,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.observedSequence = m.state.Sequence
 		m.rebaseCompletionMarkers()
 		if previousSessionID != m.state.SessionID {
+			m.resetRequestQueue()
 			m.stopTeamWorkerRouteSubscription()
 			m.resetTeamProjection(m.state.SessionID)
 			m.resetTasksPane()
 		}
-		m.childStates = cloneChildStates(message.observation.Children)
+		m.childStates = liveChildStates(message.observation.Children)
 		m.resetSubagentInteractions()
 		m.syncTasksPane(time.Now())
 		m.syncApprovalPrompt()
@@ -482,11 +500,17 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.loadPausedSubagentControls(),
 			m.loadPlanViewIfNeeded(),
 			m.startActivityClock(activityWasVisible),
+			m.requestAdvanceCommand(),
 		)
 		return m, m.afterScrollback(commit, wait)
 	case subscriptionEventMsg:
 		return m.updateSubscription(message)
 	case bridgeStartedMsg:
+		if message.generation != m.streamSeq {
+			message.bridge.once.Do(message.bridge.cancel)
+
+			return m, nil
+		}
 		m.starting = false
 		if m.bridge != nil {
 			message.bridge.once.Do(message.bridge.cancel)
@@ -501,6 +525,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.setLayout()
 		if m.cancelStart {
 			m.cancelStart = false
+			m.waiting = false
 
 			return m, tea.Batch(m.stopBridge(message.bridge), m.activity.Tick())
 		}
@@ -508,20 +533,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(message.bridge.wait(), m.activity.Tick())
 	case streamItemMsg:
 		return m.updateStream(message)
-	case controllerCommandMsg:
-		if message.err != nil {
-			m.streamErr = message.err
-			if m.composer.Value() == "" {
-				m.streamErr = errors.Join(m.streamErr, m.composer.Restore(message.snapshot))
-			}
-		} else {
-			m.queued++
-			if err := m.composer.RecordHistory(message.snapshot); err != nil {
-				m.streamErr = errors.Join(m.streamErr, err)
-			}
-		}
-		m.setLayout()
-		return m, m.commitStableTimeline()
+	case requestAdvanceMsg:
+		return m, m.advanceRequestQueue(message)
 	case composerResolvedMsg:
 		if !m.composerResolving || message.generation != m.composerResolveSeq {
 			return m, nil
@@ -535,7 +548,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamErr = message.err
 			m.setLayout()
 
-			return m, m.commitStableTimeline()
+			return m, m.afterScrollback(m.commitStableTimeline(), m.requestAdvanceCommand())
 		}
 
 		return m, m.dispatchSubmission(message.kind, message.snapshot, message.message)
@@ -560,6 +573,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case goalControlResultMsg:
 		return m.applyGoalControl(message)
 	case cancelResultMsg:
+		if message.generation != m.streamSeq {
+			return m, nil
+		}
 		if message.beforeStart {
 			m.streamErr = errors.Join(m.streamErr, message.err)
 			if !m.subscriptionMode {
@@ -571,8 +587,32 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.setLayout()
 			return m, m.commitStableTimeline()
 		}
-		if m.bridge != nil && message.bridge != nil && message.bridge != m.bridge {
-			return m, nil
+		if message.bridge != nil && message.bridge != m.bridge {
+			if !m.canceling || m.bridge != nil {
+				return m, nil
+			}
+			m.canceling = false
+			m.streamErr = errors.Join(m.streamErr, message.err)
+			m.setLayout()
+
+			return m, m.afterScrollback(m.commitStableTimeline(), m.requestAdvanceCommand())
+		}
+		if message.bridge != nil {
+			select {
+			case <-message.bridge.stopped():
+			default:
+				m.canceling = false
+				m.streamErr = errors.Join(m.streamErr, message.err)
+				m.setLayout()
+				commit := m.commitStableTimeline()
+				if !m.waiting {
+					m.waiting = true
+
+					return m, m.afterScrollback(commit, message.bridge.wait())
+				}
+
+				return m, commit
+			}
 		}
 		m.bridge = nil
 		m.waiting = false
@@ -585,6 +625,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.syncApprovalPrompt()
 		m.clearCompletedDirectAgent()
+		m.finishRequestOperation()
 		m.setLayout()
 		return m, m.commitStableTimeline()
 	case subagentRouteDataMsg:
@@ -844,6 +885,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			for index := range m.presentation.writes {
 				m.presentation.writes[index].after = nil
 			}
+			m.dropPendingScrollback()
 			m.presentation.pendingRoute = routeOpenRequest{}
 			m.stopTeamWorkerRouteSubscription()
 			m.stopSubscription()
@@ -872,6 +914,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch message.operation {
 		case operationNew, operationResume, operationFork:
+			m.resetRequestQueue()
 			m.completionMarkers = nil
 			m.transcriptHanded = false
 			m.resetTeamProjection(m.state.SessionID)
@@ -1076,7 +1119,27 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshToolDetailRoute()
 
-		return m, commit
+		return m, tea.Batch(commit, m.armLiveWork())
+	case liveRenderReadyMsg:
+		return m, m.acceptLiveRender(message.result)
+	case liveCatchUpMsg:
+		if message.generation != m.liveCatchUpGen {
+			return m, nil
+		}
+		m.liveCatchUpWait = false
+		if _, stale := m.markdown.liveCatchUpDelay(); !stale {
+			return m, nil
+		}
+		// The stalled frame must reach the newest content, so this render pays for
+		// the tail rather than serving the frame it already has. A background
+		// render in flight already owns that work, and forcing here would compete
+		// with it on the event loop.
+		if !m.liveRender.pending() {
+			m.markdown.forceExact = true
+		}
+		m.rerenderTranscript(false)
+
+		return m, m.armLiveWork()
 	case scrollbackWriteDoneMsg:
 		return m, m.finishScrollbackWrite(message.sequence)
 	case transcriptPageMsg:
@@ -1133,6 +1196,7 @@ func (m *Model) View() tea.View {
 
 	m.viewComposes++
 	m.viewCache = m.composeView()
+	m.viewCache.ProgramStatus = m.programStatus()
 	m.viewCached = true
 	m.viewStale = false
 
@@ -1299,6 +1363,8 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.composerResolving = false
 			m.composerResolveSeq++
 			m.setLayout()
+
+			return m, m.afterScrollback(m.commitStableTimeline(), m.requestAdvanceCommand())
 		}
 
 		return m, nil
@@ -1415,7 +1481,7 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case actionSubmit:
 			return m, m.submit(context)
 		case actionFollowUp:
-			return m, m.queueMessage(commandFollowUp)
+			return m, m.queueMessage()
 		case actionToggleTool:
 			return m, m.toggleLatestTool()
 		case actionToggleMouseCapture:
@@ -1980,6 +2046,9 @@ func (m *Model) statusExtras() []string {
 	}
 	if m.queued > 0 {
 		extras = append(extras, fmt.Sprintf("%d queued", m.queued))
+		if m.requests.paused {
+			extras = append(extras, "queue paused · /queue resume or discard")
+		}
 	}
 	// While the runtime is idle and something is still running, the cue stands
 	// in for the tasks pane the automatic rule may have closed (or that a short
@@ -2203,9 +2272,36 @@ func (m *Model) rerenderTranscript(forceBottom bool) {
 	m.renderTranscriptContent(forceBottom)
 }
 
+// liveGeometry is what a live frame was rendered for. A frame rendered at
+// another width, inset, theme or colour mode cannot be extended, so the work in
+// flight for it is retired instead of being installed into the new frame.
+type liveGeometry struct {
+	width   int
+	inset   int
+	theme   themeFingerprint
+	noColor bool
+}
+
+// noteLiveGeometry retires background work when the frame's geometry changed.
+// Geometry is part of every frame, so this is checked once per rebuild rather
+// than at each place that can change it.
+func (m *Model) noteLiveGeometry() {
+	geometry := liveGeometry{
+		width: m.width, inset: timelineInset(m.width),
+		theme: m.themeFingerprint(), noColor: m.options.NoColor,
+	}
+	if m.liveGeometry == geometry {
+		return
+	}
+	m.liveGeometry = geometry
+	m.retireLiveRenderState()
+}
+
 func (m *Model) renderTranscriptContent(forceBottom bool) {
 	m.renderDirty = false
 	m.frameRenders++
+	m.noteLiveGeometry()
+	m.rebaseScrollbackWindow()
 	// The transcript region changed, so a composed view is stale whatever the last
 	// update was, and this invalidation outlives the update until View adopts it.
 	m.viewStable = false
@@ -2270,6 +2366,12 @@ func (m *Model) finishTranscriptFrame(forceBottom bool) {
 	if forceBottom {
 		m.transcriptScroll.gotoBottom()
 	}
+	if m.fullscreen() && !m.transcript.hasLive() {
+		// Inline mode releases its live frame when streamProjection settles; the
+		// managed store has no live record once the draft or thinking block
+		// settles, and the committed record has its own rows.
+		m.retireLiveRenderState()
+	}
 	// Matches are row indexes, so a reflow, a prepended page or new output has to
 	// re-resolve them; the reader's match is kept by identity. The store
 	// fingerprints everything a scan reads, so an unchanged frame is skipped.
@@ -2283,11 +2385,11 @@ func (m *Model) finishTranscriptFrame(forceBottom bool) {
 // a streaming delta costs one entry.
 func (m *Model) syncTranscriptStore(blocks []timelineBlock, leading int) {
 	entries := make([]transcriptEntry, 0, len(blocks))
-	for _, block := range blocks {
+	for index := range blocks {
 		entries = append(entries, transcriptEntry{
-			id:    m.blockIdentity(block),
-			live:  blockIsUnsettled(block),
-			block: block,
+			id:    m.blockIdentity(blocks[index]),
+			live:  blockIsUnsettled(blocks[index]),
+			block: &blocks[index],
 		})
 	}
 
@@ -2602,6 +2704,87 @@ func (m *Model) requestRender() tea.Cmd {
 	})
 }
 
+// armLiveWork publishes the newest live version the event loop declined to
+// render and bounds the one-shot catch-up. An exact live slot arms nothing, so an
+// idle session runs no timer and no repeated repaint.
+func (m *Model) armLiveWork() tea.Cmd {
+	if m.markdown == nil {
+		return nil
+	}
+
+	commands := make([]tea.Cmd, 0, 2)
+
+	if miss, ok := m.markdown.takeLiveMiss(); ok {
+		if m.liveRender == nil {
+			m.liveRender = newLiveRenderWorker()
+		}
+		m.liveRender.submit(liveRenderRequest{epoch: m.liveRenderEpoch, miss: miss})
+	}
+	if m.liveRender.pending() && !m.liveRenderWait {
+		m.liveRenderWait = true
+		commands = append(commands, m.liveRender.wait())
+	}
+
+	// A background render in flight is already the repaint. Only a stale frame no
+	// worker is correcting needs the fallback, which is why a stray timer cannot
+	// block the event loop behind the same render the worker is doing.
+	if m.liveRender.pending() || m.liveCatchUpWait {
+		return tea.Batch(commands...)
+	}
+	if delay, ok := m.markdown.liveCatchUpDelay(); ok {
+		m.liveCatchUpWait = true
+		m.liveCatchUpGen++
+		generation := m.liveCatchUpGen
+		commands = append(commands, tea.Tick(delay, func(time.Time) tea.Msg {
+			return liveCatchUpMsg{generation: generation}
+		}))
+	}
+
+	return tea.Batch(commands...)
+}
+
+// acceptLiveRender installs one background result and repaints. A result from a
+// replaced projection, or one that failed, is dropped; the newest version is
+// still requested, so the final content is always rendered.
+func (m *Model) acceptLiveRender(result liveRenderResult) tea.Cmd {
+	if result.worker != nil && result.worker != m.liveRender {
+		return nil
+	}
+	m.liveRenderWait = false
+	if m.liveRender != nil {
+		m.liveRender.delivered(result.sequence)
+	}
+	if result.err == nil && result.epoch == m.liveRenderEpoch &&
+		m.markdown.installExactRows(result.miss, result.rows, result.cost) {
+		m.rerenderTranscript(false)
+	}
+
+	return m.armLiveWork()
+}
+
+// retireLiveRenderState invalidates paint ownership without cancelling the
+// worker's existing receiver. Even an obsolete result must be drained before
+// newer submitted work can finish; only shutdown cancels that receive command.
+func (m *Model) retireLiveRenderState() {
+	m.liveRenderEpoch++
+	m.liveCatchUpWait = false
+	m.liveCatchUpGen++
+	m.markdown.releaseLiveState()
+}
+
+// shutdownLiveRender stops the background renderer. A program that never streamed
+// an expensive tail never started it.
+func (m *Model) shutdownLiveRender() {
+	m.liveRenderEpoch++
+	m.liveRenderWait = false
+	m.liveCatchUpWait = false
+	m.liveCatchUpGen++
+	if m.liveRender != nil {
+		m.liveRender.shutdown()
+		m.liveRender = nil
+	}
+}
+
 // publishRefusal records an operator-facing refusal and publishes it in the same
 // update. setLayout only resizes the Composer, and the refusal is drawn from the
 // transcript, so a refusal that does not commit leaves the draft on screen with
@@ -2698,7 +2881,7 @@ func actionContextFor(state coding.State) actionContext {
 }
 
 func (m *Model) actionContext() actionContext {
-	if m.starting || m.bridge != nil {
+	if m.starting || m.bridge != nil || m.canceling {
 		return contextRunning
 	}
 
@@ -2725,24 +2908,18 @@ func (m *Model) submit(actionCtx actionContext) tea.Cmd {
 			return nil
 		}
 
-		return m.prepareSubmission(submissionSteer, snapshot)
+		return m.prepareSubmission(submissionQueued, snapshot)
 	default:
 		return nil
 	}
 }
 
-func (m *Model) queueMessage(kind controllerCommand) tea.Cmd {
+func (m *Model) queueMessage() tea.Cmd {
 	if m.directAgent != nil && m.directAgent.running {
 		return nil
 	}
 
-	snapshot := m.composer.Snapshot()
-	submission := submissionSteer
-	if kind == commandFollowUp {
-		submission = submissionFollowUp
-	}
-
-	return m.prepareSubmission(submission, snapshot)
+	return m.prepareSubmission(submissionQueued, m.composer.Snapshot())
 }
 
 func (m *Model) prepareSubmission(
@@ -2760,6 +2937,7 @@ func (m *Model) prepareSubmission(
 		m.composerResolveSeq++
 		generation := m.composerResolveSeq
 		resolveCtx, cancel := context.WithCancel(m.ctx)
+		resolveFile := m.controller.ResolveWorkspaceFile
 		m.composerCancel = cancel
 		m.composerResolving = true
 		m.streamErr = nil
@@ -2770,7 +2948,7 @@ func (m *Model) prepareSubmission(
 				resolveCtx,
 				snapshot,
 				vision,
-				m.controller.ResolveWorkspaceFile,
+				resolveFile,
 			)
 
 			return composerResolvedMsg{
@@ -2800,47 +2978,38 @@ func (m *Model) dispatchSubmission(
 	snapshot composerSnapshot,
 	message ai.Message,
 ) tea.Cmd {
-	if kind == submissionPrompt {
-		if err := m.composer.RecordHistory(snapshot); err != nil {
-			return m.publishRefusal(err)
-		}
-		m.composer.Reset()
-		m.setLayout()
-		m.streamErr = nil
-
-		return m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
-			return m.controller.Prompt(ctx, message)
-		})
+	if kind == submissionQueued || m.queued > 0 || m.canceling {
+		return m.enqueueRequest(snapshot, message)
 	}
-
+	if err := m.composer.RecordHistory(snapshot); err != nil {
+		return m.publishRefusal(err)
+	}
 	m.composer.Reset()
 	m.setLayout()
+	m.streamErr = nil
+	m.requests.paused = false
+	controller := m.controller
 
-	return func() tea.Msg {
-		var commandErr error
-		if kind == submissionFollowUp {
-			commandErr = m.controller.FollowUp(message)
-		} else {
-			commandErr = m.controller.Steer(message)
-		}
-
-		return controllerCommandMsg{
-			snapshot: snapshot, err: commandErr,
-		}
-	}
+	return m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
+		return controller.Prompt(ctx, message)
+	})
 }
 
 func (m *Model) startStream(operation streamOperation) tea.Cmd {
-	if m.bridge != nil || m.starting {
+	if m.bridge != nil || m.starting || m.canceling {
 		return nil
 	}
 	m.activity.Reset()
+	m.requests.operationFailed = false
 	m.canceling = false
 	m.starting = true
+	m.streamSeq++
+	generation := m.streamSeq
+	parent := m.ctx
 	m.setLayout()
 
 	return func() tea.Msg {
-		return bridgeStartedMsg{bridge: startBridge(m.ctx, operation)}
+		return bridgeStartedMsg{bridge: startBridge(parent, operation), generation: generation}
 	}
 }
 
@@ -2867,6 +3036,7 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 	if !message.ok {
 		return m, m.finishStream()
 	}
+	m.observeRequestEvent(message.item.event)
 
 	if m.subscriptionMode && message.item.err == nil {
 		// The subscription is the parent projection's source and already received
@@ -2885,6 +3055,9 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 	batch = append(batch, message.item)
 	batch = append(batch, message.bridge.drainBatch(streamBatchMax-1, streamBatchBudget)...)
 	m.streamItems += len(batch)
+	for _, item := range batch[1:] {
+		m.observeRequestEvent(item.event)
+	}
 
 	advanced := m.queueStreamBatch(batch)
 	if advanced {
@@ -2933,19 +3106,31 @@ func (m *Model) queueStreamBatch(batch []streamItem) bool {
 
 // flushPending applies the deltas accumulated since the last frame as one batch,
 // so a frame advances the parent state once however many deltas it carried.
+//
+// The buffer is released with its events: a drained coding.Event carries the
+// delta payload, and truncating the slice alone would keep the last burst's
+// payloads reachable until the next burst overwrote them.
 func (m *Model) flushPending() {
 	if len(m.pending) == 0 {
 		return
 	}
 
 	items := m.pending
-	m.pending = m.pending[:0]
+	m.pending = nil
 	m.reduceStreamBatch(items)
+	clear(items)
+	if m.pending == nil {
+		m.pending = items[:0]
+	}
 }
 
 // dropPending discards deltas that belong to a projection the model is about to
 // replace, so they cannot be applied to the replacement.
 func (m *Model) dropPending() {
+	if len(m.pending) == 0 {
+		return
+	}
+	clear(m.pending)
 	m.pending = m.pending[:0]
 }
 
@@ -2969,11 +3154,13 @@ func (m *Model) reduceStreamBatch(items []streamItem) {
 	if !m.advanceParentState(valid) {
 		return
 	}
+	m.rebaseScrollbackWindow()
 	if len(m.state.Transcript) != previousMessages {
 		m.rebaseCompletionMarkers()
 	}
 
 	if previousSessionID != m.state.SessionID {
+		m.resetRequestQueue()
 		m.stopTeamWorkerRouteSubscription()
 		m.resetTeamProjection(m.state.SessionID)
 		m.resetSubagentInteractions()
@@ -3124,11 +3311,31 @@ func (m *Model) checkParentSequence(events []coding.Event) error {
 	return nil
 }
 
+// readOnlySnapshotter is the optional Controller capability that hands the
+// model a read-only projection without a defensive deep copy. The Runtime's
+// reducer is copy-on-write, so a retained view keeps the projection it was
+// taken from.
+type readOnlySnapshotter interface {
+	SnapshotReadOnly() coding.State
+}
+
+// projectionSnapshot takes the authoritative parent projection. A Controller
+// that offers the read-only view is preferred: the streaming path calls this
+// once per frame, and the deep Snapshot would copy the whole conversation each
+// time. Controllers without the capability keep the defensive contract.
+func (m *Model) projectionSnapshot() coding.State {
+	if reader, ok := m.controller.(readOnlySnapshotter); ok {
+		return reader.SnapshotReadOnly()
+	}
+
+	return m.controller.Snapshot()
+}
+
 // adoptRuntimeState takes the parent projection from the Runtime that already
-// applied these events. The snapshot is a defensive copy, and the Runtime
-// sequence must be at least as advanced as the last event observed here.
+// applied these events. The Runtime sequence must be at least as advanced as the
+// last event observed here.
 func (m *Model) adoptRuntimeState(last coding.Event) bool {
-	snapshot := m.controller.Snapshot()
+	snapshot := m.projectionSnapshot()
 	if snapshot.Sequence < last.Sequence {
 		m.failStream(fmt.Errorf(
 			"coding tui: runtime snapshot at sequence %d lags event %d",
@@ -3145,6 +3352,7 @@ func (m *Model) adoptRuntimeState(last coding.Event) bool {
 
 // failStream records a stream failure and stops the running bridge.
 func (m *Model) failStream(err error) {
+	m.requests.operationFailed = true
 	m.streamErr = err
 	if m.bridge != nil {
 		m.bridge.once.Do(m.bridge.cancel)
@@ -3163,8 +3371,10 @@ func (m *Model) observeStreamEvent(event coding.Event) {
 	m.updateSubagentRouteSummary(event)
 	m.trackTeamLifecycleEvent(event)
 	m.applyTeamInteractionEvent(event)
+	m.trackInteractionRun(event)
 	switch event.Type {
 	case coding.EventSessionNavigated:
+		m.resetRequestQueue()
 		// A new conversation replaces what the main buffer holds, so the exit
 		// handoff may write it again. Compaction keeps the flag: the rows the
 		// escape hatch already printed are still on the screen.
@@ -3188,6 +3398,7 @@ func (m *Model) recordCompletion(event coding.Event) {
 	case coding.EventSessionNavigated, coding.EventCompactionCompleted:
 		m.completionMarkers = nil
 		m.questionPreviews = nil
+		m.clearInteractionRuns()
 
 		return
 	case coding.EventInteractionCompleted:
@@ -3205,25 +3416,171 @@ func (m *Model) recordCompletion(event coding.Event) {
 		}
 	}
 
-	afterDigest := uint64(0)
-	if len(m.state.Transcript) > 0 {
-		afterDigest = projectionMessageDigest(
-			projectionHashSeed, m.state.Transcript[len(m.state.Transcript)-1],
-		)
-	}
-
-	m.completionMarkers = appendMarker(m.completionMarkers, completionMarker{
-		interactionID:  event.InteractionID,
+	marker := completionMarker{
+		interactionID: event.InteractionID,
+		// The tail is the fallback hint only; the run identity below decides when
+		// the snapshot already holds a later interaction.
 		afterMessages:  len(m.state.Transcript),
-		afterDigest:    afterDigest,
+		afterRunID:     m.interactionRun(event.InteractionID),
 		outcome:        completed.Outcome,
 		stop:           completed.Stop,
 		durationMillis: completed.DurationMillis,
 		model:          m.modelLabel(),
-	})
+	}
+	m.forgetInteractionRun(event.InteractionID)
+
+	// The anchor comes from the marker's own identity, not from the transcript
+	// tail: the subscription path adopts a snapshot that may already hold a later
+	// interaction, and its tail would place this row after that interaction.
+	m.anchorCompletionMarker(&marker)
+
+	m.completionMarkers = appendMarker(m.completionMarkers, marker)
 	if len(m.completionMarkers) > maxCompletionMarkers {
 		first := len(m.completionMarkers) - maxCompletionMarkers
+		for _, dropped := range m.completionMarkers[:first] {
+			delete(m.scrollback.completions, dropped.interactionID)
+		}
 		m.completionMarkers = append([]completionMarker(nil), m.completionMarkers[first:]...)
+	}
+}
+
+// trackInteractionRun remembers which run an interaction is in. The Runtime
+// delivers parent events contiguously, so this is the interaction's own run
+// identity recorded at event time, independent of how far the snapshot has
+// advanced.
+func (m *Model) trackInteractionRun(event coding.Event) {
+	if event.InteractionID == "" {
+		return
+	}
+
+	switch event.Type {
+	case coding.EventInteractionStarted:
+		m.rememberInteractionRun(event.InteractionID, "")
+	case coding.EventRunStarted, coding.EventMessageCommitted:
+		if event.RunID != "" {
+			m.rememberInteractionRun(event.InteractionID, event.RunID)
+		}
+	default:
+		// Other events carry no new interaction-to-run ownership.
+	}
+}
+
+func (m *Model) rememberInteractionRun(interactionID, runID string) {
+	if m.interactionRuns == nil {
+		m.interactionRuns = make(map[string]string, maxCompletionMarkers)
+	}
+	if _, exists := m.interactionRuns[interactionID]; !exists {
+		m.interactionRunKeys = append(m.interactionRunKeys, interactionID)
+		for len(m.interactionRunKeys) > maxCompletionMarkers {
+			delete(m.interactionRuns, m.interactionRunKeys[0])
+			m.interactionRunKeys = append([]string(nil), m.interactionRunKeys[1:]...)
+		}
+	}
+	m.interactionRuns[interactionID] = runID
+}
+
+func (m *Model) interactionRun(interactionID string) string {
+	return m.interactionRuns[interactionID]
+}
+
+func (m *Model) forgetInteractionRun(interactionID string) {
+	if _, exists := m.interactionRuns[interactionID]; !exists {
+		return
+	}
+	delete(m.interactionRuns, interactionID)
+	for index, key := range m.interactionRunKeys {
+		if key == interactionID {
+			m.interactionRunKeys = append(m.interactionRunKeys[:index], m.interactionRunKeys[index+1:]...)
+
+			break
+		}
+	}
+}
+
+func (m *Model) clearInteractionRuns() {
+	clear(m.interactionRuns)
+	m.interactionRuns = nil
+	m.interactionRunKeys = nil
+}
+
+// completionAnchor resolves a marker's conversation position from the current
+// window. It indexes the window once so several markers cost one scan.
+type completionAnchor struct {
+	runs    map[string]int
+	digests map[uint64][]int
+}
+
+func (m *Model) newCompletionAnchor() completionAnchor {
+	transcript := m.state.Transcript
+	anchor := completionAnchor{
+		runs:    make(map[string]int, len(transcript)),
+		digests: make(map[uint64][]int, len(transcript)),
+	}
+
+	// The reducer keeps candidates parallel across durable transcript replacement.
+	// Defend against external controller snapshots that predate that invariant.
+	aligned := len(m.state.MessageCandidates) == len(transcript)
+
+	for index, message := range transcript {
+		position := index + 1
+		if aligned {
+			if runID := m.state.MessageCandidates[index].RunID; runID != "" {
+				// The last message a run committed is the one the marker follows.
+				anchor.runs[runID] = position
+			}
+		}
+
+		digest := projectionMessageDigest(projectionHashSeed, message)
+		anchor.digests[digest] = append(anchor.digests[digest], position)
+	}
+
+	return anchor
+}
+
+// position resolves where a marker belongs. The run identity is exact: a run
+// commits one assistant message per turn, so it names the interaction's final
+// answer and survives both a leading Runtime snapshot and a message inserted
+// ahead of that answer. The content digest is the fallback for a transcript the
+// durable path rebuilt without candidate identities; it resolves to the nearest
+// occurrence from the marker's last position, so an identical later answer
+// cannot capture an earlier marker.
+func (anchor completionAnchor) position(marker completionMarker) int {
+	if position, ok := anchor.runs[marker.afterRunID]; ok && marker.afterRunID != "" {
+		return position
+	}
+
+	if marker.afterDigest != 0 {
+		best, bestDistance := 0, 0
+		for _, position := range anchor.digests[marker.afterDigest] {
+			distance := position - marker.afterMessages
+			if distance < 0 {
+				distance = -distance
+			}
+			if best == 0 || distance < bestDistance {
+				best, bestDistance = position, distance
+			}
+		}
+		if best > 0 {
+			return best
+		}
+	}
+
+	// No identity resolved: the recorded position is the anchor. It is never
+	// clamped down, because a count beyond the window renders at the tail exactly
+	// like the window's own length would.
+	return max(0, marker.afterMessages)
+}
+
+// anchorCompletionMarker resolves a marker and records the digest of the message
+// it now follows, so the next re-anchor has a fallback when the identity is gone.
+func (m *Model) anchorCompletionMarker(marker *completionMarker) {
+	position := m.newCompletionAnchor().position(*marker)
+	marker.afterMessages = position
+	marker.afterDigest = 0
+	if position > 0 && position <= len(m.state.Transcript) {
+		marker.afterDigest = projectionMessageDigest(
+			projectionHashSeed, m.state.Transcript[position-1],
+		)
 	}
 }
 
@@ -3236,19 +3593,32 @@ func (m *Model) rebaseCompletionMarkers() {
 		return
 	}
 
-	positions := make(map[uint64]int, len(m.state.Transcript))
-	for index, message := range m.state.Transcript {
-		positions[projectionMessageDigest(projectionHashSeed, message)] = index + 1
-	}
+	anchor := m.newCompletionAnchor()
+	changed := false
 
 	for index := range m.completionMarkers {
-		digest := m.completionMarkers[index].afterDigest
-		if digest == 0 {
-			continue
+		marker := &m.completionMarkers[index]
+		position := anchor.position(*marker)
+		if position != marker.afterMessages {
+			marker.afterMessages = position
+			changed = true
 		}
-		if position, ok := positions[digest]; ok {
-			m.completionMarkers[index].afterMessages = position
+		if position > 0 && position <= len(m.state.Transcript) {
+			digest := projectionMessageDigest(projectionHashSeed, m.state.Transcript[position-1])
+			if digest != marker.afterDigest {
+				marker.afterDigest = digest
+				changed = true
+			}
 		}
+	}
+
+	if changed {
+		// A resolved position can reorder two markers; the projection and the
+		// prefix split both require the list ordered by position.
+		sort.SliceStable(m.completionMarkers, func(left, right int) bool {
+			return m.completionMarkers[left].afterMessages <
+				m.completionMarkers[right].afterMessages
+		})
 	}
 }
 
@@ -3279,6 +3649,7 @@ func (m *Model) finishStream() tea.Cmd {
 				m.state.Sequence,
 				snapshot.Sequence,
 			)
+			m.requests.operationFailed = true
 		}
 		m.state = snapshot
 	}
@@ -3287,14 +3658,21 @@ func (m *Model) finishStream() tea.Cmd {
 	m.bridge = nil
 	m.starting = false
 	m.waiting = false
-	m.queued = 0
+	m.finishRequestOperation()
 	m.setLayout()
 
-	return m.commitStableTimeline()
+	return m.afterScrollback(m.commitStableTimeline(), m.requestAdvanceCommand())
 }
 
 func (m *Model) cancelStream() tea.Cmd {
+	if m.canceling {
+		return nil
+	}
+	m.requests.paused = true
 	bridge := m.bridge
+	generation := m.streamSeq
+	controller := m.controller
+	parent := m.ctx
 	beforeStart := bridge == nil && m.starting
 	if beforeStart {
 		m.cancelStart = true
@@ -3303,29 +3681,36 @@ func (m *Model) cancelStream() tea.Cmd {
 	m.setLayout()
 
 	return func() tea.Msg {
-		err := m.controller.Cancel()
+		if beforeStart {
+			return cancelResultMsg{generation: generation, beforeStart: true}
+		}
+		err := controller.Cancel()
 		if bridge != nil {
 			stopCtx, cancel := context.WithTimeout(
-				context.WithoutCancel(m.ctx),
+				context.WithoutCancel(parent),
 				controllerCloseTimeout,
 			)
 			err = errors.Join(err, bridge.stop(stopCtx))
 			cancel()
 		}
 
-		return cancelResultMsg{bridge: bridge, beforeStart: beforeStart, err: err}
+		return cancelResultMsg{bridge: bridge, generation: generation, beforeStart: beforeStart, err: err}
 	}
 }
 
 func (m *Model) stopBridge(bridge *eventBridge) tea.Cmd {
+	generation := m.streamSeq
+	parent := m.ctx
+	controller := m.controller
 	return func() tea.Msg {
+		err := controller.Cancel()
 		stopCtx, cancel := context.WithTimeout(
-			context.WithoutCancel(m.ctx),
+			context.WithoutCancel(parent),
 			controllerCloseTimeout,
 		)
 		defer cancel()
 
-		return cancelResultMsg{bridge: bridge, err: bridge.stop(stopCtx)}
+		return cancelResultMsg{bridge: bridge, generation: generation, err: errors.Join(err, bridge.stop(stopCtx))}
 	}
 }
 
@@ -3406,7 +3791,7 @@ func (m *Model) updateSubscription(message subscriptionEventMsg) (tea.Model, tea
 		commit = m.commitStableTimeline()
 	}
 
-	return m, m.afterScrollback(commit, wait, render, refresh)
+	return m, m.afterScrollback(commit, wait, render, refresh, m.requestAdvanceCommand())
 }
 
 // reduceObservedEvent applies one already-observed event. Batched updates use
@@ -3422,7 +3807,17 @@ func (m *Model) reduceObservedEvent(event coding.Event) {
 // scroll region re-anchors when the fresh rows are installed, so appending content
 // keeps the tail visible while the reader follows it.
 func (m *Model) reduceChildEvent(event coding.Event) {
-	state := m.childStates[event.SessionID]
+	state, known := m.childStates[event.SessionID]
+	if !known {
+		// A terminal child projection is released once its final status lands.
+		// A late bookkeeping event cannot extend it; a fresh SessionOpened starts
+		// the next execution that reuses the child Session.
+		if event.Type != coding.EventSessionOpened || event.SessionID == "" {
+			return
+		}
+
+		state = coding.State{}
+	}
 	// An authoritative snapshot adopted for an open page can already include
 	// events still queued on the subscription: the snapshot is read after they
 	// were published. Replaying one is a no-op, so its sequence is not a
@@ -3444,27 +3839,61 @@ func (m *Model) reduceChildEvent(event coding.Event) {
 		child := next.Clone()
 		m.route.childState = &child
 	}
+	if childStatusFinished(event) {
+		delete(m.childStates, event.SessionID)
+	}
+}
+
+// childProjectionFinished reports a child projection whose interaction has
+// completed. The final idle status can still be queued at this point; it is
+// applied to the open page before the map entry is released.
+func childProjectionFinished(state coding.State) bool {
+	return state.SessionID != "" && !state.Interaction.Active &&
+		state.Interaction.Outcome != ""
+}
+
+// childStatusFinished reports the child event that closes a projection: the idle
+// status finishChildProjection emits last, or an explicit SessionClosed.
+func childStatusFinished(event coding.Event) bool {
+	if event.Type == coding.EventSessionClosed {
+		return true
+	}
+	if event.Type != coding.EventStatusChanged {
+		return false
+	}
+	status, ok := event.Payload.(coding.StatusChanged)
+
+	return ok && status.Phase == coding.PhaseIdle
 }
 
 // adoptChildState records the Runtime's authoritative child State as this model's
 // own copy. A child that continued another child's conversation inherits its
 // history, which the child's own event stream does not carry, so keeping the two
 // copies the same is what lets later events extend the inherited transcript
-// instead of replacing it with a shorter one.
+// instead of replacing it with a shorter one. A terminal child is owned by its
+// open page only; releasing it here is what keeps the map bounded by live
+// children.
 func (m *Model) adoptChildState(childSessionID string, state coding.State) {
-	if childSessionID == "" {
+	if childSessionID == "" || childProjectionFinished(state) {
 		return
 	}
 	m.childStates[childSessionID] = state.Clone()
 }
 
-func cloneChildStates(values map[string]coding.State) map[string]coding.State {
-	cloned := make(map[string]coding.State, len(values))
+// liveChildStates takes ownership of an EventObservation's child projections.
+// The observation is exclusive to this subscription and already holds a
+// defensive clone, so the model keeps the map instead of cloning every child a
+// second time. Terminal projections are dropped.
+func liveChildStates(values map[string]coding.State) map[string]coding.State {
+	live := make(map[string]coding.State, len(values))
 	for childSessionID, state := range values {
-		cloned[childSessionID] = state.Clone()
+		if childProjectionFinished(state) {
+			continue
+		}
+		live[childSessionID] = state
 	}
 
-	return cloned
+	return live
 }
 
 func (m *Model) stopSubscription() {

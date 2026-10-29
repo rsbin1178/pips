@@ -20,12 +20,17 @@ const historyPageLimit = coding.HistoryPageDefaultLimit
 // messages, so the window holds four pages before the oldest is dropped.
 const maxHistoryMessages = 4 * historyPageLimit
 
+// maxHistoryBytes is the second bound on the same window. A page of a few very
+// large messages must not pin the byte budget the message count would allow.
+const maxHistoryBytes = 32 << 20
+
 // historyState is the browsable conversation older than the bootstrap window. The
 // managed viewport owns the whole conversation, so a session whose durable
 // history is longer than the transcript cap would otherwise be unreachable.
 type historyState struct {
 	messages []ai.Message // oldest first
 	start    int          // absolute index of messages[0]
+	bytes    int          // payload bytes retained by messages
 	more     bool         // older durable messages may exist
 	loading  bool
 	sequence uint64
@@ -110,14 +115,17 @@ func (m *Model) applyHistoryPage(message historyPageMsg) {
 	wasFollowing := m.transcriptScroll.follow
 	anchor, resolved := m.transcript.captureAnchor(m.transcriptScroll.offset)
 	m.history.messages = append(slices.Clone(page.Messages), m.history.messages...)
-	if len(m.history.messages) > maxHistoryMessages {
-		// The dropped page can be read again from the Runtime, so the window keeps
-		// its bound instead of growing with every load.
-		drop := len(m.history.messages) - maxHistoryMessages
-		kept := make([]ai.Message, maxHistoryMessages)
-		copy(kept, m.history.messages[drop:])
-		m.history.messages = kept
-		m.history.start += drop
+	for _, message := range page.Messages {
+		m.history.bytes += historyMessageBytes(message)
+	}
+	// The dropped page can be read again from the Runtime, so the window keeps
+	// its bound instead of growing with every load. The newest message stays even
+	// when it alone exceeds the byte budget: it is the window the reader reached.
+	for len(m.history.messages) > 1 &&
+		(len(m.history.messages) > maxHistoryMessages || m.history.bytes > maxHistoryBytes) {
+		m.history.bytes -= historyMessageBytes(m.history.messages[0])
+		m.history.messages = m.history.messages[1:]
+		m.history.start++
 		m.history.more = true
 	}
 	m.rerenderTranscript(false)
@@ -130,6 +138,41 @@ func (m *Model) applyHistoryPage(message historyPageMsg) {
 			m.transcriptScroll.scrollTo(row)
 		}
 	}
+}
+
+// historyMessageBytes reports the payload one browsable message retains. It
+// mirrors the reducer's accounting so the window bound is about content, not
+// slice headers.
+func historyMessageBytes(message ai.Message) int {
+	return historyPartsBytes(portableMessageParts(message))
+}
+
+func historyPartsBytes(parts []ai.Part) int {
+	total := 0
+	for _, part := range parts {
+		switch value := part.(type) {
+		case ai.TextPart:
+			total += len(value.Text)
+		case ai.ReasoningPart:
+			total += len(value.Text) + len(value.Signature)
+		case ai.ImagePart:
+			total += len(value.Source.Data)
+		case ai.FilePart:
+			total += len(value.Source.Data) + len(value.Name)
+		case ai.ToolCallPart:
+			total += len(value.Args) + len(value.Name)
+		case ai.ToolResultPart:
+			total += len(value.Name) + len(value.ToolCallID) + historyPartsBytes(value.Content)
+		case ai.StructuredContentPart:
+			total += len(value.Data)
+		case ai.ResourceLinkPart:
+			total += len(value.URI) + len(value.Name) + len(value.Title) + len(value.Description)
+		case ai.EmbeddedResourcePart:
+			total += len(value.Text) + len(value.Blob) + len(value.URI)
+		}
+	}
+
+	return total
 }
 
 // historyBlocks projects the browsable history ahead of the loaded window.

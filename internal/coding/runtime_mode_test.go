@@ -219,7 +219,7 @@ func TestRuntimeSetModePublishesPlanModeTransitions(t *testing.T) {
 	assert.Equal(t, planmode.StatePending, state.PlanMode)
 	assert.Equal(t, ModePlan, state.Mode)
 
-	events := drainRuntimeRecords(observation.Subscription.Events())
+	events := drainRuntimeRecords(observation.Subscription)
 	assert.Equal(t,
 		[]PlanModeChanged{{State: planmode.StatePending}},
 		payloadsOfType[PlanModeChanged](events, EventPlanModeChanged),
@@ -240,7 +240,7 @@ func TestRuntimeSetModePublishesPlanModeTransitions(t *testing.T) {
 	assert.Equal(t, planmode.StateInactive, state.PlanMode)
 	assert.Equal(t, ModeAgent, state.Mode)
 
-	events = drainRuntimeRecords(observation.Subscription.Events())
+	events = drainRuntimeRecords(observation.Subscription)
 	assert.Equal(t,
 		[]PlanModeChanged{{State: planmode.StateInactive}},
 		payloadsOfType[PlanModeChanged](events, EventPlanModeChanged),
@@ -386,15 +386,15 @@ func openPlanConfiguredRuntimeWithModel(
 
 // drainRuntimeRecords collects every event already broadcast to the
 // subscription without waiting for more.
-func drainRuntimeRecords(events <-chan EventRecord) []Event {
+func drainRuntimeRecords(subscription *EventSubscription) []Event {
 	var collected []Event
 	for {
-		select {
-		case record := <-events:
-			collected = append(collected, record.Event)
-		default:
+		record, ok := subscription.TryReceive()
+		if !ok {
 			return collected
 		}
+
+		collected = append(collected, record.Event)
 	}
 }
 

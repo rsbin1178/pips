@@ -1645,6 +1645,8 @@ alt_screen = "auto"        # auto | always | never
 mouse = true
 exit_output = "resume-hint" # transcript | resume-hint
 show_thinking_blocks = true # render model reasoning as dimmed Thinking blocks
+transcript_messages = 4096 # live transcript window (256..4096)
+transcript_bytes = 33554432 # live transcript/Tool byte window (1048576..268435456)
 ```
 
 Theme and status-line selection are file-only: there is no `PIPS_THEME`,
@@ -1773,6 +1775,23 @@ wait for the turn to finish and say so, and `/plan`, `/mode`, `/permissions`,
 `/model`, `/new`, `/resume`, `/fork`, `/reload`, `/compact`, `/review` and
 `Shift+Tab` remain idle-only.
 
+While a request runs, `Enter` and `Tab` put composer messages into a FIFO
+queue. Each message starts a separate request after the preceding request has
+finished, including its final answer and cleanup. Tool completion and model
+retries do not send the next message. `N queued` includes a queued message while
+it runs: if B and C are queued behind A, it stays at 2 while B runs, falls to 1
+when B finishes, and reaches 0 when C finishes. Waiting for an approval or a
+question keeps that request counted.
+The queue accepts up to 64 outstanding messages; reaching the limit leaves the
+composer draft available for editing or later submission.
+
+Failure or cancellation pauses automatic sending and preserves unsent messages.
+Use `/queue` to inspect the queue, `/queue resume` to continue sending, or
+`/queue discard` to remove unsent messages. Resuming does not repeat a request
+that has already run; discarding does not cancel a running request. The queue
+belongs to the current interactive Session and is cleared when switching
+Sessions. Pending messages are held in memory and do not survive exit.
+
 Every model request also carries the session ID as the provider's prompt-cache
 routing key, so requests from one conversation stay on the same cache and a
 resumed session keeps reusing the cache it built. It is sent as
@@ -1820,7 +1839,22 @@ reference agents, and `"transcript"` writes the whole conversation back so it st
 scrollable after quitting (use `Ctrl+O` or `/export` to get the conversation back
 otherwise). Neither
 mode ever clears the terminal's scrollback, and both restore terminal state before
-the session is released.
+the session is released. `transcript_messages` bounds the live in-memory window:
+the default 4096 keeps the newest messages, and older messages remain in the
+durable session where `History`, `Ctrl+O` and `/export` page them back. Lowering
+it (minimum 256) caps retained memory sooner; the durable transcript is never
+truncated. The window trims to 75% of its cap, so a batch of commits costs one
+copy rather than one copy per message. `transcript_bytes` (default 32 MiB) adds a
+byte bound to the same window and to the live Tool projection, so a handful of
+very large messages cannot pin hundreds of megabytes; the newest message is kept
+even when it alone exceeds the bound.
+
+Inline mode hands stable conversation to the terminal in writes of at most 256 KiB,
+and the bytes waiting for that terminal are capped at 4 MiB. Content beyond the cap
+waits as a pager that renders one page at a time rather than as a rendered copy per
+page, so a single large payload costs the queue plus one page instead of a second
+copy of itself. Nothing is dropped: a slow terminal holds the conversation back in
+memory until it catches up.
 
 The composer scrolls its own draft. When the draft is taller than the box — more
 lines than rows, or one line that soft-wraps past it — a wheel notch over the
@@ -2219,6 +2253,17 @@ iterators—there is no CLI header, synthetic session event, or result record.
 The first sequence number can therefore be greater than one after open or
 resume. If a later operation or close fails, stdout remains a valid JSONL
 prefix and the process exits nonzero.
+
+`message.committed` is not a complete transcript feed. A Tool result produced by
+resolving a pending call — a question answered through `ask_user`, a settlement
+after an approval — is recorded in the durable session outside the paused run, so
+no `message.committed` is emitted for it; a consumer that reconstructs the
+conversation from this stream sees that row only when the next
+`session.tree_changed` replaces the transcript at the interaction boundary. The
+durable transcript is authoritative: read the session file (or `session show`) for
+a row you need immediately. Child sessions never emit a correcting
+`session.tree_changed`, so a child's resolved result must be read from the child
+session on demand.
 
 ### Agent Plugins
 

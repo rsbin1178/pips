@@ -156,7 +156,7 @@ func TestChatStreamRequestsUsage(t *testing.T) {
 		assert.Equal(t, true, body["stream"])
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
 	})
 
 	for _, err := range model.Stream(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("x")}}) {

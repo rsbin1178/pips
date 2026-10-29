@@ -242,13 +242,23 @@ func effectiveCompactionSettings(
 	}, ""
 }
 
+// transcriptLimit is the effective live-window cap for structural projections.
+func (r *Runtime) transcriptLimit() int {
+	if r == nil {
+		return retainedTranscriptItems
+	}
+
+	return transcriptWindowLimitOption(r.config.TUI.TranscriptMessages)
+}
+
 func (r *Runtime) emitTreeChanged(ctx context.Context, emitter *eventEmitter) error {
 	tree, err := r.Tree(context.WithoutCancel(ctx))
 	if err != nil {
 		return err
 	}
-	transcript := transcriptFromPath(r.session.Path())
-	compaction, hasCheckpoint := fullCompactionStateFromPath(r.session.Path())
+	limit := r.transcriptLimit()
+	transcript, transcriptBase := transcriptFromPath(r.session.Path(), limit)
+	compaction, hasCheckpoint := fullCompactionStateFromPath(r.session.Path(), limit)
 	if hasCheckpoint {
 		r.mu.Lock()
 		live := r.state.Compaction
@@ -269,15 +279,20 @@ func (r *Runtime) emitTreeChanged(ctx context.Context, emitter *eventEmitter) er
 	}
 
 	return emitter.emit("", "", EventSessionTreeChanged, SessionTreeChanged{
-		Tree: tree, Transcript: transcript, ContextTokens: r.contextTokens(),
-		Tasks: tasksFromPath(r.session.Path()), Compaction: compaction,
+		Tree: tree, Transcript: transcript, TranscriptBase: transcriptBase,
+		ContextTokens: r.contextTokens(),
+		Tasks:         tasksFromPath(r.session.Path()), Compaction: compaction,
 	})
 }
 
 // fullCompactionStateFromPath rebuilds the latest full checkpoint projection
 // from the durable path. BoundaryIndex counts the messages before the checkpoint
 // in the same bounded transcript window [transcriptFromPath] returns.
-func fullCompactionStateFromPath(path []harness.Entry) (CompactionState, bool) {
+func fullCompactionStateFromPath(path []harness.Entry, limit int) (CompactionState, bool) {
+	if limit <= 0 || limit > maxEventItems {
+		limit = maxEventItems
+	}
+
 	messages := 0
 	boundary := 0
 
@@ -298,7 +313,7 @@ func fullCompactionStateFromPath(path []harness.Entry) (CompactionState, bool) {
 		return CompactionState{}, false
 	}
 
-	boundary = max(0, boundary-max(0, messages-maxEventItems))
+	boundary = max(0, boundary-max(0, messages-limit))
 
 	return CompactionState{
 		TokensBefore:  checkpoint.TokensBefore,
@@ -327,18 +342,34 @@ func tasksFromPath(path []harness.Entry) tasklist.Snapshot {
 	return snapshot
 }
 
-func transcriptFromPath(path []harness.Entry) ai.Messages {
-	messages := make(ai.Messages, 0, len(path))
-	for _, entry := range path {
-		if entry.Kind == harness.KindMessage && entry.Message != nil {
-			messages = append(messages, cloneMessage(entry.Message))
-		}
-	}
-	if len(messages) > maxEventItems {
-		messages = messages[len(messages)-maxEventItems:]
+func transcriptFromPath(path []harness.Entry, limit int) (ai.Messages, int) {
+	if limit <= 0 || limit > maxEventItems {
+		limit = maxEventItems
 	}
 
-	return messages
+	messages := 0
+	for _, entry := range path {
+		if entry.Kind == harness.KindMessage && entry.Message != nil {
+			messages++
+		}
+	}
+
+	base := max(0, messages-limit)
+	transcript := make(ai.Messages, 0, min(messages, limit))
+	retained := 0
+
+	for _, entry := range path {
+		if entry.Kind != harness.KindMessage || entry.Message == nil {
+			continue
+		}
+
+		if retained >= base {
+			transcript = append(transcript, cloneMessage(entry.Message))
+		}
+		retained++
+	}
+
+	return transcript, base
 }
 
 func validCompactionConfirmation(value, expected string) bool {

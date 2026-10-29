@@ -139,7 +139,16 @@ type nativeWrite struct {
 type presentationState struct {
 	writeSequence uint64
 	writes        []nativeWrite
-	pendingRoute  routeOpenRequest
+	// queuedBytes is the rendered content waiting for the terminal. It is the
+	// sum of every queued write's content, and gates stable projection commits
+	// once it reaches scrollbackQueueBytes.
+	queuedBytes int
+	// pendingSources hold content that did not fit the queue, oldest first.
+	// They are ordered before anything enqueued later, so new output must wait
+	// behind them rather than overtake them. Each source renders its own pages
+	// on demand, so the deferred content is never a second rendered copy.
+	pendingSources []scrollbackSource
+	pendingRoute   routeOpenRequest
 	// heldInspections carries inspection output that arrived while a full-area
 	// route owned the screen. The route returns it to the parent once its own
 	// deferred conversation output has been committed.
@@ -150,17 +159,100 @@ func (p *presentationState) hasScrollbackWrites() bool {
 	return len(p.writes) > 0
 }
 
-func (m *Model) enqueueScrollback(content string) tea.Cmd {
-	m.presentation.writeSequence++
+func (p *presentationState) hasPendingScrollback() bool {
+	return len(p.pendingSources) > 0
+}
 
+// queueFull reports whether the rendered queue has reached its byte cap.
+func (p *presentationState) queueFull() bool {
+	return p.queuedBytes >= scrollbackQueueBytes
+}
+
+// backpressured reports whether rendered output must wait for the terminal
+// before the stable projection advances again.
+func (p *presentationState) backpressured() bool {
+	return p.queueFull() || p.hasPendingScrollback()
+}
+
+func (m *Model) enqueueScrollback(content string) tea.Cmd {
+	var commands []tea.Cmd
+
+	for index, page := range splitScrollbackPages(content, scrollbackPageBytes) {
+		if command := m.enqueueScrollbackPage(page, index > 0); command != nil {
+			commands = append(commands, command)
+		}
+	}
+
+	return tea.Batch(commands...)
+}
+
+// enqueueScrollbackPage adds one already bounded native write. The terminal's
+// newline after the previous write supplies the line break between pages, so
+// only a new logical block needs a leading gap.
+func (m *Model) enqueueScrollbackPage(content string, continuation bool) tea.Cmd {
+	if content == "" {
+		return nil
+	}
+
+	if m.scrollbackOutput && !continuation {
+		content = "\n" + content
+	}
+
+	m.presentation.writeSequence++
 	m.presentation.writes = append(m.presentation.writes, nativeWrite{
 		sequence: m.presentation.writeSequence, content: content,
 	})
+	m.presentation.queuedBytes += len(content)
+
+	m.scrollbackOutput = true
 	if len(m.presentation.writes) != 1 {
 		return nil
 	}
 
 	return m.dispatchScrollback()
+}
+
+// pumpPendingScrollback moves deferred pages into the write queue while it is
+// below the byte cap. The first page it enqueues into an empty queue owns the
+// dispatch command; later pages only extend the queue.
+func (m *Model) pumpPendingScrollback() tea.Cmd {
+	var dispatch tea.Cmd
+
+	for !m.presentation.queueFull() {
+		if len(m.presentation.pendingSources) == 0 {
+			break
+		}
+
+		source := m.presentation.pendingSources[0]
+
+		write, ok := source.nextPage(m, scrollbackPageBytes)
+		if !ok {
+			// Release the exhausted source: its backing array would otherwise
+			// keep the content it paged alive behind the new slice header.
+			m.presentation.pendingSources[0] = nil
+
+			m.presentation.pendingSources = m.presentation.pendingSources[1:]
+			if len(m.presentation.pendingSources) == 0 {
+				m.presentation.pendingSources = nil
+			}
+
+			continue
+		}
+
+		if command := m.enqueueScrollbackPage(write.content, write.continuation); command != nil &&
+			dispatch == nil {
+			dispatch = command
+		}
+	}
+
+	return dispatch
+}
+
+// dropPendingScrollback releases deferred content that belongs to a projection
+// being replaced. Accepted writes stay: they are already on their way to the
+// terminal and cannot be taken back.
+func (m *Model) dropPendingScrollback() {
+	m.presentation.pendingSources = nil
 }
 
 func (m *Model) dispatchScrollback() tea.Cmd {
@@ -327,22 +419,36 @@ func (m *Model) finishScrollbackWrite(sequence uint64) tea.Cmd {
 	}
 
 	after := m.presentation.writes[0].after
+	m.presentation.queuedBytes = max(0, m.presentation.queuedBytes-len(m.presentation.writes[0].content))
 	m.presentation.writes[0] = nativeWrite{}
 
 	m.presentation.writes = m.presentation.writes[1:]
+
+	// The queue has room again: move deferred pages and the stable projection
+	// that backpressure held back. Pages enqueued into an empty queue own the
+	// dispatch command; an existing head is dispatched here.
+	pump := m.pumpPendingScrollback()
+
+	dispatch := pump
+	if m.presentation.hasScrollbackWrites() && dispatch == nil {
+		dispatch = m.dispatchScrollback()
+	}
+
+	catchUp := m.commitStableTimeline()
+
 	if m.presentation.hasScrollbackWrites() {
-		return tea.Batch(m.dispatchScrollback(), tea.Batch(after...))
+		return tea.Batch(dispatch, catchUp, tea.Batch(after...))
 	}
 
 	m.presentation.writes = nil
-	if !m.presentation.pendingRoute.pending() {
-		return tea.Batch(after...)
+	if m.presentation.hasPendingScrollback() || !m.presentation.pendingRoute.pending() {
+		return tea.Batch(dispatch, catchUp, tea.Batch(after...))
 	}
 
 	request := m.presentation.pendingRoute
 	m.presentation.pendingRoute = routeOpenRequest{}
 
-	return tea.Batch(m.activateRoute(request), tea.Batch(after...))
+	return tea.Batch(dispatch, catchUp, m.activateRoute(request), tea.Batch(after...))
 }
 
 // closeRouteToParent restores the parent as presentation owner before it

@@ -422,7 +422,7 @@ func TestReadyRecordsCompletionMarkerOnceAndClearsInvalidAnchors(t *testing.T) {
 	require.Len(t, model.completionMarkers, maxCompletionMarkers)
 	assert.Equal(t, "interaction-1", model.completionMarkers[0].interactionID)
 
-	detail := newToolDetailView(timelineBlock{kind: blockTool, tools: []toolActivity{{
+	detail := newToolDetailView(timelineBlock{kind: blockTool, tools: []*toolActivity{{
 		id: "tool-1", name: "read", class: toolClassExplore,
 	}}})
 	driveModelCommands(t, model, model.openToolDetailRoute(detail))
@@ -512,7 +512,7 @@ func TestReadyPromptUsesOneBridgeAndFinishes(t *testing.T) {
 	assert.Equal(t, "hello", visibleMessageText(controller.prompts[0]))
 }
 
-func TestReadyRunningEnterSteersAndTabFollowsUp(t *testing.T) {
+func TestReadyRunningEnterAndTabQueueIndependentRequests(t *testing.T) {
 	t.Parallel()
 
 	state := readyState()
@@ -521,19 +521,16 @@ func TestReadyRunningEnterSteersAndTabFollowsUp(t *testing.T) {
 	controller := &interactionController{stubController: stubController{state: state}}
 	model := readyModelWithController(t, controller, true)
 
-	model.composer.SetValue("steer this")
-	_, steer := model.Update(key("enter"))
-	require.NotNil(t, steer)
-	model.Update(steer())
+	model.composer.SetValue("first request")
+	model.Update(key("enter"))
 	model.composer.SetValue("then this")
-	_, follow := model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	require.NotNil(t, follow)
-	model.Update(follow())
+	model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 
-	require.Len(t, controller.steered, 1)
-	require.Len(t, controller.followed, 1)
-	assert.Equal(t, "steer this", visibleMessageText(controller.steered[0]))
-	assert.Equal(t, "then this", visibleMessageText(controller.followed[0]))
+	assert.Empty(t, controller.steered)
+	assert.Empty(t, controller.followed)
+	require.Len(t, model.requests.waiting, 2)
+	assert.Equal(t, "first request", visibleMessageText(model.requests.waiting[0].message))
+	assert.Equal(t, "then this", visibleMessageText(model.requests.waiting[1].message))
 	assert.Equal(t, 2, model.queued)
 }
 
@@ -545,11 +542,10 @@ func TestStartingBridgeAlreadyUsesRunningInputSemantics(t *testing.T) {
 	model.starting = true
 	model.composer.SetValue("redirect before first event")
 
-	_, steer := model.Update(key("enter"))
-	require.NotNil(t, steer)
-	model.Update(steer())
-	require.Len(t, controller.steered, 1)
-	assert.Equal(t, "redirect before first event", visibleMessageText(controller.steered[0]))
+	model.Update(key("enter"))
+	assert.Empty(t, controller.steered)
+	require.Len(t, model.requests.waiting, 1)
+	assert.Equal(t, "redirect before first event", visibleMessageText(model.requests.waiting[0].message))
 	assert.Empty(t, controller.prompts)
 }
 
@@ -770,6 +766,9 @@ func readyModelWithController(
 		},
 	})
 	model.Update(tea.WindowSizeMsg{Width: defaultWidth, Height: defaultHeight})
+	// A model that streams a large tail starts the background renderer; the
+	// cleanup stops it so a test run leaves no goroutine behind.
+	t.Cleanup(model.shutdownLiveRender)
 	_, command := model.Update(bootstrapResult{controller: controller})
 	if model.starting {
 		driveModelCommands(t, model, command)
@@ -1004,6 +1003,7 @@ func fullscreenModel(t *testing.T, controller Controller, noColor bool) *Model {
 		},
 	})
 	model.Update(tea.WindowSizeMsg{Width: defaultWidth, Height: defaultHeight})
+	t.Cleanup(model.shutdownLiveRender)
 	_, command := model.Update(bootstrapResult{controller: controller})
 	if model.starting {
 		driveModelCommands(t, model, command)

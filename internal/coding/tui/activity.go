@@ -450,7 +450,7 @@ func resolveProgressActivity(context activityContext) (activityStatus, bool) {
 				return runningSubagentStatus(context.state.Subagents), true
 			}
 
-			return semanticToolActivityStatus(activity), true
+			return semanticToolActivityStatus(*activity), true
 		}
 
 		if allExplorationActivities(activities) {
@@ -521,15 +521,15 @@ func semanticToolActivityStatus(activity toolActivity) activityStatus {
 	return status
 }
 
-func runningToolActivities(values []coding.ToolState) []toolActivity {
+func runningToolActivities(values []coding.ToolState) []*toolActivity {
 	return runningToolActivitiesInWorkspace(values, "")
 }
 
 func runningToolActivitiesInWorkspace(
 	values []coding.ToolState,
 	workspace string,
-) []toolActivity {
-	var running []toolActivity
+) []*toolActivity {
+	var running []*toolActivity
 
 	for _, value := range values {
 		if value.Status != coding.ToolStatusRunning || value.Call.ID == "" || value.Call.Name == "" {
@@ -545,13 +545,13 @@ func runningToolActivitiesInWorkspace(
 		activity.class, activity.action, activity.subject = describeToolCallInWorkspace(
 			value.Call, workspace,
 		)
-		running = append(running, activity)
+		running = append(running, &activity)
 	}
 
 	return running
 }
 
-func allExplorationActivities(activities []toolActivity) bool {
+func allExplorationActivities(activities []*toolActivity) bool {
 	for _, activity := range activities {
 		if activity.class != toolClassExplore {
 			return false

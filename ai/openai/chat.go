@@ -2,7 +2,9 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/internal/jsonx"
@@ -70,6 +72,10 @@ type chatStreamState struct {
 	startSent         bool
 	endSent           bool
 	finish            ai.FinishReason
+	id, model         string
+	refused           bool
+	toolArgs          map[int]*strings.Builder
+	toolIdentity      map[int]bool
 	usage             *ai.Usage
 	openTools         []int
 	toolOpen          map[int]bool
@@ -80,7 +86,7 @@ type chatStreamState struct {
 // emitChatStream drives the Chat Completions SSE dialect: JSON chunks under
 // "data:" lines, terminated by a [DONE] sentinel.
 func emitChatStream(provider ai.Provider, events eventSource, yield func(ai.StreamEvent, error) bool) {
-	state := &chatStreamState{provider: provider, toolOpen: make(map[int]bool)}
+	state := &chatStreamState{provider: provider, toolOpen: make(map[int]bool), toolArgs: make(map[int]*strings.Builder), toolIdentity: make(map[int]bool)}
 
 	for event, err := range events {
 		if err != nil {
@@ -104,7 +110,7 @@ func emitChatStream(provider ai.Provider, events eventSource, yield func(ai.Stre
 		}
 	}
 
-	// Stream ended without [DONE]; still close out what we saw.
+	// A finish reason is authoritative even when the optional sentinel is absent.
 	state.emitEnd(yield)
 }
 
@@ -115,6 +121,7 @@ const doneSentinel = "[DONE]"
 func (s *chatStreamState) emitChunk(chunk chatResponse, yield func(ai.StreamEvent, error) bool) bool {
 	if !s.startSent {
 		s.startSent = true
+		s.id, s.model = chunk.ID, chunk.Model
 
 		if !yield(ai.StreamEvent{
 			Type:     ai.StreamMessageStart,
@@ -148,6 +155,7 @@ func (s *chatStreamState) emitChunk(chunk chatResponse, yield func(ai.StreamEven
 }
 
 func (s *chatStreamState) emitDelta(delta chatChoiceMessage, yield func(ai.StreamEvent, error) bool) bool {
+	s.refused = s.refused || delta.Refusal != ""
 	switch {
 	case len(delta.ReasoningDetails) > 0:
 		if !s.emitOpenRouterReasoning(delta.ReasoningDetails, yield) {
@@ -188,6 +196,7 @@ func (s *chatStreamState) emitToolCallDelta(call chatToolCall, yield func(ai.Str
 	if !s.toolOpen[index] {
 		s.toolOpen[index] = true
 		s.openTools = append(s.openTools, index)
+		s.toolIdentity[index] = call.ID != "" && call.Function.Name != ""
 
 		start := ai.StreamEvent{
 			Type:          ai.StreamToolCallStart,
@@ -201,6 +210,12 @@ func (s *chatStreamState) emitToolCallDelta(call chatToolCall, yield func(ai.Str
 	}
 
 	if call.Function.Arguments != "" {
+		if s.toolArgs[index] == nil {
+			s.toolArgs[index] = &strings.Builder{}
+		}
+
+		_, _ = s.toolArgs[index].WriteString(call.Function.Arguments)
+
 		delta := ai.StreamEvent{
 			Type:          ai.StreamToolCallDelta,
 			ToolCallIndex: index,
@@ -222,6 +237,32 @@ func (s *chatStreamState) emitEnd(yield func(ai.StreamEvent, error) bool) {
 
 	s.endSent = true
 
+	resp := &ai.Response{Provider: s.provider, ID: s.id, Model: s.model, FinishReason: s.finish}
+	if s.usage != nil {
+		resp.Usage = *s.usage
+	}
+
+	var cause error
+
+	switch {
+	case s.finish == ai.FinishContentFilter:
+		cause = ai.ErrContentFiltered
+	case s.refused:
+		cause = ai.ErrRefused
+	case s.finish == "":
+		cause = ai.ErrIncompleteStream
+	}
+
+	if cause != nil {
+		yield(ai.StreamEvent{}, ai.NewResponseError(cause, resp, s.finish != ""))
+		return
+	}
+
+	if !s.validTools() {
+		yield(ai.StreamEvent{}, ai.NewResponseError(ai.ErrIncompleteStream, resp, true))
+		return
+	}
+
 	for _, index := range s.openTools {
 		if !yield(ai.StreamEvent{Type: ai.StreamToolCallEnd, ToolCallIndex: index}, nil) {
 			return
@@ -233,4 +274,18 @@ func (s *chatStreamState) emitEnd(yield func(ai.StreamEvent, error) bool) {
 		FinishReason: s.finish,
 		Usage:        s.usage,
 	}, nil)
+}
+
+func (s *chatStreamState) validTools() bool {
+	if s.finish == ai.FinishLength {
+		return true
+	}
+
+	for _, index := range s.openTools {
+		if !s.toolIdentity[index] || s.toolArgs[index] == nil || !json.Valid([]byte(s.toolArgs[index].String())) {
+			return false
+		}
+	}
+
+	return true
 }

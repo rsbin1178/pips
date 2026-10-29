@@ -7,6 +7,7 @@ import (
 	"maps"
 	"slices"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/ai"
@@ -20,11 +21,154 @@ import (
 
 const (
 	maxRecentSubagents        = 128
+	maxRecentRuns             = 128
+	maxRecentDiagnostics      = 128
 	maxRecentBackgroundTasks  = 128
 	maxRecentTeamLifecycle    = 256
 	maxRecentTeamControls     = 256
 	maxRecentTeamIntegrations = 64
+	// retainedTranscriptItems is the default live transcript window. A Runtime
+	// may lower it through [TUIConfig.TranscriptMessages]; BootstrapState seeds
+	// the concrete window on State so every later transition uses the same cap.
+	retainedTranscriptItems = maxEventItems
+	// retainedTranscriptLowWater leaves hysteresis below the default cap, so a
+	// long session trims a batch instead of copying the window on every commit.
+	retainedTranscriptLowWater = retainedTranscriptItems - retainedTranscriptItems/4
+	// retainedTranscriptBytes is the default byte window for the live transcript
+	// and the Tool projection. The count cap alone cannot bound a window of a few
+	// very large messages, so both are enforced.
+	retainedTranscriptBytes = 32 << 20
+	// maxTranscriptBytes is the largest byte window a Config may select.
+	maxTranscriptBytes = 256 << 20
+	// maxToolUpdateBytes caps the live progress body one running Tool keeps.
+	// Progress is advisory; the durable Tool result replaces it on completion.
+	maxToolUpdateBytes = 64 << 10
+	// maxToolUpdateParts bounds a progress body made of many tiny parts.
+	maxToolUpdateParts = 64
 )
+
+// updateBudget bounds one progress body across nested result content.
+type updateBudget struct {
+	bytes int
+	parts int
+}
+
+// boundedToolUpdate returns an owned, bounded copy of a live progress body.
+// The reducer keeps only this copy, so a tool that reports a growing snapshot
+// cannot pin an unbounded body in State between frames.
+func boundedToolUpdate(parts []ai.Part) []ai.Part {
+	budget := updateBudget{bytes: maxToolUpdateBytes, parts: maxToolUpdateParts}
+
+	return boundedToolUpdateParts(parts, &budget)
+}
+
+func boundedToolUpdateParts(parts []ai.Part, budget *updateBudget) []ai.Part {
+	if len(parts) == 0 || budget.parts <= 0 || budget.bytes <= 0 {
+		return nil
+	}
+
+	out := make([]ai.Part, 0, min(len(parts), budget.parts))
+
+	for _, part := range parts {
+		if budget.parts <= 0 || budget.bytes <= 0 {
+			break
+		}
+
+		bounded, keep := boundedToolUpdatePart(part, budget)
+		if !keep {
+			continue
+		}
+		out = append(out, bounded)
+
+		budget.parts--
+	}
+
+	return out
+}
+
+func boundedToolUpdatePart(part ai.Part, budget *updateBudget) (ai.Part, bool) {
+	switch value := part.(type) {
+	case ai.TextPart:
+		text, used := truncateToolUpdateText(value.Text, budget.bytes)
+		budget.bytes -= used
+		return ai.TextPart{Text: text}, text != ""
+	case ai.ReasoningPart:
+		text, used := truncateToolUpdateText(value.Text, budget.bytes)
+		budget.bytes -= used
+		// Progress reasoning is display text; never retain its signature.
+		return ai.ReasoningPart{Text: text}, text != ""
+	default:
+		return boundedToolUpdateContent(part, budget)
+	}
+}
+
+func boundedToolUpdateContent(part ai.Part, budget *updateBudget) (ai.Part, bool) {
+	switch value := part.(type) {
+	case ai.ImagePart:
+		if !reserveToolUpdateBytes(len(value.Source.Data), budget, false) {
+			return nil, false
+		}
+		value.Source.Data = slices.Clone(value.Source.Data)
+		return value, true
+	case ai.FilePart:
+		if !reserveToolUpdateBytes(len(value.Source.Data), budget, false) {
+			return nil, false
+		}
+		value.Source.Data = slices.Clone(value.Source.Data)
+		return value, true
+	case ai.StructuredContentPart:
+		if !reserveToolUpdateBytes(len(value.Data), budget, true) {
+			return nil, false
+		}
+		value.Data = slices.Clone(value.Data)
+		return value, true
+	case ai.EmbeddedResourcePart:
+		if !reserveToolUpdateBytes(len(value.Blob), budget, true) {
+			return nil, false
+		}
+		value.Blob = slices.Clone(value.Blob)
+		return value, true
+	case ai.ToolResultPart:
+		value.Content = boundedToolUpdateParts(value.Content, budget)
+		return value, true
+	case ai.ToolCallPart:
+		if !reserveToolUpdateBytes(len(value.Args), budget, true) {
+			return nil, false
+		}
+		value.Args = slices.Clone(value.Args)
+		return value, true
+	default:
+		return part, true
+	}
+}
+
+func reserveToolUpdateBytes(size int, budget *updateBudget, allowEmpty bool) bool {
+	if size > budget.bytes || (!allowEmpty && size == 0) {
+		return false
+	}
+	budget.bytes -= size
+	return true
+}
+
+// truncateToolUpdateText cuts text to at most limit bytes at a UTF-8 boundary.
+func truncateToolUpdateText(text string, limit int) (string, int) {
+	if limit <= 0 {
+		return "", 0
+	}
+	if len(text) <= limit {
+		return text, len(text)
+	}
+
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	if cut == 0 {
+		return "", 0
+	}
+
+	return text[:cut], cut
+}
 
 // appendShared appends to a projection that the caller's State still observes.
 // The three-index slice pins capacity to length first, so append always
@@ -52,6 +196,231 @@ func cloneIndexForWrite(index map[string]int) map[string]int {
 	}
 
 	return maps.Clone(index)
+}
+
+// trimTranscriptWindow releases the oldest part of the live projection once it
+// exceeds the retained count or byte cap. It trims to the low-water mark instead
+// of exactly the cap, so one allocate-and-copy covers a batch of commits. The
+// durable Session is untouched: the base it advances is what History uses to page
+// older messages back.
+func (state *State) trimTranscriptWindow() {
+	limit := state.transcriptWindowLimit()
+	byteLimit := state.transcriptByteWindow()
+	if len(state.Transcript) <= limit && state.transcriptBytes <= byteLimit {
+		return
+	}
+
+	// Low water is 75% of the concrete window, matching the default 4096/3072.
+	lowWater := limit - limit/4
+	drop := max(0, len(state.Transcript)-lowWater)
+
+	// The byte window can bind before the count window: a few very large
+	// messages must not pin the whole budget. Drop whole messages until the
+	// remainder fits the byte low water, but never the newest message: an
+	// oversized message is still the conversation the user is reading.
+	if state.transcriptBytes > byteLimit {
+		byteLowWater := byteLimit - byteLimit/4
+		remaining := state.transcriptBytes
+		byteDrop := 0
+		for remaining > byteLowWater && byteDrop < len(state.Transcript)-1 {
+			remaining -= messageByteSize(state.Transcript[byteDrop])
+			byteDrop++
+		}
+		drop = max(drop, byteDrop)
+	}
+	drop = min(drop, len(state.Transcript))
+	if drop <= 0 {
+		return
+	}
+
+	droppedCalls := toolCallIDsInMessages(state.Transcript[:drop])
+	for index := range state.Transcript[:drop] {
+		state.transcriptBytes -= messageByteSize(state.Transcript[index])
+	}
+	state.transcriptBytes = max(0, state.transcriptBytes)
+
+	state.Transcript = slices.Clone(state.Transcript[drop:])
+	state.transcriptBase += drop
+
+	candidateDrop := min(drop, len(state.MessageCandidates))
+	state.MessageCandidates = slices.Clone(state.MessageCandidates[candidateDrop:])
+
+	synthetic := make([]int, 0, len(state.SyntheticMessages))
+	for _, index := range state.SyntheticMessages {
+		if index >= drop {
+			synthetic = append(synthetic, index-drop)
+		}
+	}
+	state.SyntheticMessages = synthetic
+
+	if state.Compaction.BoundaryIndex > 0 {
+		state.Compaction.BoundaryIndex = max(0, state.Compaction.BoundaryIndex-drop)
+	}
+
+	state.trimTranscriptTools(droppedCalls)
+}
+
+func (state *State) trimTranscriptTools(droppedCalls map[string]struct{}) {
+	if len(droppedCalls) == 0 {
+		return
+	}
+
+	kept := make([]ToolState, 0, len(state.Tools))
+	removed := 0
+
+	for _, tool := range state.Tools {
+		if _, dropped := droppedCalls[tool.Call.ID]; dropped && tool.Status != ToolStatusRunning {
+			state.toolsBytes -= tool.ownedBytes
+			removed++
+
+			continue
+		}
+
+		kept = append(kept, tool)
+	}
+	if removed == 0 {
+		return
+	}
+
+	state.Tools = kept
+	state.toolsBytes = max(0, state.toolsBytes)
+	state.toolsBase += removed
+}
+
+// trimToolsWindow releases the oldest completed Tool projections once the Tools
+// byte window is exceeded. A dropped projection is still reconstructable from
+// the transcript while its call and result messages remain, so pairing is kept;
+// a running Tool is never dropped because its live status has no durable copy.
+func (state *State) trimToolsWindow() {
+	limit := state.toolsByteWindow()
+	if state.toolsBytes <= limit || len(state.Tools) == 0 {
+		return
+	}
+
+	lowWater := limit - limit/4
+	kept := state.Tools
+	removed := 0
+	for len(kept) > 0 && state.toolsBytes > lowWater {
+		tool := kept[0]
+		if tool.Status == ToolStatusRunning {
+			break
+		}
+		state.toolsBytes -= tool.ownedBytes
+		kept = kept[1:]
+		removed++
+	}
+	if removed == 0 {
+		return
+	}
+
+	state.Tools = slices.Clone(kept)
+	state.toolsBytes = max(0, state.toolsBytes)
+	state.toolsBase += removed
+}
+
+// messageByteSize reports the payload bytes one message owns. It counts the
+// content a trim would actually release: text, arguments, media and structured
+// bodies. Fixed struct overhead is deliberately ignored; the bound is about the
+// payload, not the slice headers.
+func messageByteSize(message ai.Message) int {
+	parts, err := ai.MessagePartsView(message)
+	if err != nil {
+		return 0
+	}
+
+	return partsByteSize(parts)
+}
+
+func messagesByteSize(messages ai.Messages) int {
+	total := 0
+	for _, message := range messages {
+		total += messageByteSize(message)
+	}
+
+	return total
+}
+
+func partsByteSize(parts []ai.Part) int {
+	total := 0
+	for _, part := range parts {
+		total += partByteSize(part)
+	}
+
+	return total
+}
+
+func partByteSize(part ai.Part) int {
+	switch value := part.(type) {
+	case ai.TextPart:
+		return len(value.Text)
+	case ai.ReasoningPart:
+		return len(value.Text) + len(value.Signature)
+	case ai.ImagePart:
+		return len(value.Source.Data)
+	case ai.FilePart:
+		return len(value.Source.Data) + len(value.Name)
+	case ai.ToolCallPart:
+		return len(value.Args) + len(value.Name)
+	case ai.ToolResultPart:
+		return len(value.Name) + len(value.ToolCallID) + partsByteSize(value.Content)
+	case ai.StructuredContentPart:
+		return len(value.Data)
+	case ai.ResourceLinkPart:
+		return len(value.URI) + len(value.Name) + len(value.Title) + len(value.Description)
+	case ai.EmbeddedResourcePart:
+		return len(value.Text) + len(value.Blob) + len(value.URI)
+	default:
+		return 0
+	}
+}
+
+func toolMessageByteSize(message ai.ToolMessage) int {
+	total := 0
+	for _, part := range message.Parts {
+		total += partByteSize(part)
+	}
+
+	return total
+}
+
+func toolCallByteSize(call ToolCall) int {
+	return len(call.Arguments) + len(call.Name)
+}
+
+// toolCallIDsInMessages collects the call and result identities carried by the
+// messages leaving the window. Only the tool projections those calls owned can be
+// released with them.
+func toolCallIDsInMessages(messages ai.Messages) map[string]struct{} {
+	var ids map[string]struct{}
+
+	for _, message := range messages {
+		parts, err := ai.MessagePartsView(message)
+		if err != nil {
+			continue
+		}
+		for _, part := range parts {
+			switch value := part.(type) {
+			case ai.ToolCallPart:
+				if value.ID == "" {
+					continue
+				}
+				if ids == nil {
+					ids = make(map[string]struct{})
+				}
+				ids[value.ID] = struct{}{}
+			case ai.ToolResultPart:
+				if value.ToolCallID == "" {
+					continue
+				}
+				if ids == nil {
+					ids = make(map[string]struct{})
+				}
+				ids[value.ToolCallID] = struct{}{}
+			}
+		}
+	}
+
+	return ids
 }
 
 // InteractionState is the current or most recently completed user interaction.
@@ -129,6 +498,10 @@ type ToolState struct {
 	Status ToolStatus     `json:"status"`
 	Update []ai.Part      `json:"update"`
 	Result ai.ToolMessage `json:"result"`
+	// ownedBytes is how much payload this projection owns rather than shares
+	// with the transcript. The Tools byte window is measured on it, so a result
+	// that shares the committed transcript part is not counted twice.
+	ownedBytes int
 }
 
 // SubagentState is the bounded recent lifecycle projection used by live
@@ -281,8 +654,8 @@ type State struct {
 	LastError        *RuntimeError                   `json:"last_error,omitempty"`
 	Tree             SessionTree                     `json:"tree"`
 	Compaction       CompactionState                 `json:"compaction"`
-	// Retry is the live retry notice for the run in flight; the next event of
-	// any other kind clears it, because any of them ends the wait.
+	// Retry is the live retry notice for the run in flight. Its accompanying
+	// response diagnostic preserves the wait; the next attempt's events clear it.
 	Retry         RetryState        `json:"retry,omitzero"`
 	ContextTokens int               `json:"context_tokens"`
 	Tasks         tasklist.Snapshot `json:"tasks"`
@@ -290,6 +663,75 @@ type State struct {
 	activeRuns  map[string]int
 	openTurns   map[string]int
 	activeTools map[string]int
+	// transcriptBase is the absolute index of Transcript[0] in the durable
+	// conversation, and toolsBase how many historical Tool projections the live
+	// window has released. Both are projection metadata: they are maintained by
+	// BootstrapState, SessionTreeChanged and the live trim, and they let a
+	// frontend rebase its own cursor after the window moves.
+	transcriptBase int
+	toolsBase      int
+	// transcriptLimit is the live window cap seeded by BootstrapState from the
+	// effective configuration. Zero keeps the package default.
+	transcriptLimit int
+	// transcriptByteLimit and toolsByteLimit are the byte windows seeded by
+	// BootstrapState, and transcriptBytes/toolsBytes are the running totals the
+	// trim reads. A zero limit keeps the package default.
+	transcriptByteLimit int
+	toolsByteLimit      int
+	transcriptBytes     int
+	toolsBytes          int
+}
+
+// TranscriptBase reports the absolute conversation index of
+// [State.Transcript]'s first message. It is zero for a complete transcript.
+func (state State) TranscriptBase() int {
+	return state.transcriptBase
+}
+
+// transcriptWindowLimit is the concrete live-window cap for this State.
+func (state *State) transcriptWindowLimit() int {
+	if state.transcriptLimit > 0 {
+		return min(state.transcriptLimit, maxEventItems)
+	}
+
+	return retainedTranscriptItems
+}
+
+// transcriptByteWindow is the concrete byte cap for Transcript.
+func (state *State) transcriptByteWindow() int {
+	if state.transcriptByteLimit > 0 {
+		return min(state.transcriptByteLimit, maxTranscriptBytes)
+	}
+
+	return retainedTranscriptBytes
+}
+
+// toolsByteWindow is the concrete byte cap for Tools.
+func (state *State) toolsByteWindow() int {
+	if state.toolsByteLimit > 0 {
+		return min(state.toolsByteLimit, maxTranscriptBytes)
+	}
+
+	return retainedTranscriptBytes
+}
+
+// ToolsBase reports how many historical Tool projections the live window has
+// released from the front of [State.Tools].
+func (state State) ToolsBase() int {
+	return state.toolsBase
+}
+
+// CloneReadOnly returns a view of State that copies no payload bytes. Message
+// parts, Tool arguments, media data, embedded blobs and structured content are
+// shared with the receiver; the Runtime's copy-on-write transitions never
+// modify a published payload, so the view stays valid while the Runtime keeps
+// reducing.
+//
+// The caller must treat the result as immutable. Use [State.Clone] when the
+// caller retains the State for mutation or hands it across a boundary that
+// expects a deep defensive copy.
+func (state State) CloneReadOnly() State {
+	return state
 }
 
 // Clone returns a deep defensive copy of State.
@@ -345,9 +787,12 @@ func (state State) Clone() State {
 	}
 
 	cloned.Diagnostics = slices.Clone(state.Diagnostics)
+	for index := range cloned.Diagnostics {
+		cloned.Diagnostics[index].Response = cloneModelResponseFailure(cloned.Diagnostics[index].Response)
+	}
 	cloned.Tree = state.Tree.Clone()
 	if state.LastError != nil {
-		lastError := *state.LastError
+		lastError := cloneRuntimeError(*state.LastError)
 		cloned.LastError = &lastError
 	}
 
@@ -478,9 +923,12 @@ func (state *State) reduce(event Event) error {
 		return protocolError("session changed from %q to %q", state.SessionID, event.SessionID)
 	}
 
-	// A retry notice stands only until the next event: whatever follows ends
-	// the wait it announced.
-	if event.Type != EventModelRetry {
+	// The diagnostic accompanying a retry describes the failed attempt; the
+	// next attempt's output or lifecycle event ends the announced wait.
+	diagnostic, retryDiagnostic := event.Payload.(IntegrationDiagnostic)
+	preservesRetry := retryDiagnostic && diagnostic.Component == "model" &&
+		diagnostic.Response != nil && diagnostic.Response.Attempt > 0
+	if event.Type != EventModelRetry && !preservesRetry {
 		state.Retry = RetryState{}
 	}
 
@@ -530,6 +978,68 @@ func (state *State) reduceDeltas(events []Event) error {
 	return nil
 }
 
+// shareToolResultParts points every matching ToolState at the committed tool
+// message's part. The part header is copied; its content parts are shared with
+// the transcript, which is the single immutable owner from this point on.
+func (state *State) shareToolResultParts(message ai.ToolMessage) {
+	if len(state.Tools) == 0 || len(message.Parts) == 0 {
+		return
+	}
+
+	var detached []ToolState
+
+	for _, part := range message.Parts {
+		if part.ToolCallID == "" {
+			continue
+		}
+
+		for index := range state.Tools {
+			if state.Tools[index].Call.ID != part.ToolCallID {
+				continue
+			}
+			if detached == nil {
+				detached = cloneBeforeWrite(state.Tools)
+			}
+
+			// The committed part now owns the bytes; the ToolState keeps only a
+			// view, so the Tools byte window stops counting them twice.
+			released := toolMessageByteSize(detached[index].Result)
+			detached[index].ownedBytes -= released
+			state.toolsBytes = max(0, state.toolsBytes-released)
+			detached[index].Result = ai.ToolMessage{Parts: []ai.ToolResultPart{part}}
+		}
+	}
+
+	if detached != nil {
+		state.Tools = detached
+	}
+}
+
+// transcriptToolArguments returns the committed call's argument bytes for one
+// call ID, scanning from the newest message. Tool calls are committed just
+// before their Tool starts, so the scan is short in practice and never copies.
+func transcriptToolArguments(messages ai.Messages, callID string) ai.JSON {
+	if callID == "" {
+		return nil
+	}
+
+	for _, message := range slices.Backward(messages) {
+		parts, err := ai.MessagePartsView(message)
+		if err != nil {
+			continue
+		}
+
+		for _, part := range parts {
+			call, ok := part.(ai.ToolCallPart)
+			if ok && call.ID == callID {
+				return call.Args
+			}
+		}
+	}
+
+	return nil
+}
+
 // runningTool returns the index of one running tool call, preferring the index
 // and falling back to the projection.
 func (state *State) runningTool(runID, callID string) int {
@@ -574,7 +1084,10 @@ func (state *State) apply(event Event) error {
 			return protocolError("session tree does not match the open session")
 		}
 		state.Tree = payload.Tree.Clone()
+		state.replaceMessageCandidates(payload.Transcript)
 		state.Transcript = cloneMessages(payload.Transcript)
+		state.transcriptBytes = messagesByteSize(state.Transcript)
+		state.transcriptBase = max(0, payload.TranscriptBase)
 		state.SyntheticMessages = syntheticMessageIndexes(state.Transcript)
 		state.SyntheticMessages = append(state.SyntheticMessages, goalSyntheticMessageIndexes(state.Transcript, state.Goal.ID)...)
 		state.ContextTokens = payload.ContextTokens
@@ -589,6 +1102,8 @@ func (state *State) apply(event Event) error {
 		// has, so the divider must disappear until a resumed checkpoint rebuilds
 		// the projection.
 		state.Compaction = CompactionState{}
+		// A new branch can contain byte-identical messages with different owners.
+		state.MessageCandidates = make([]CandidateIdentity, len(state.Transcript))
 	case SessionForked:
 		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active ||
 			payload.SourceSessionID != state.SessionID {
@@ -612,6 +1127,7 @@ func (state *State) apply(event Event) error {
 			CheckpointID: payload.CheckpointID, Strategy: payload.Strategy,
 		}
 		state.ContextTokens = payload.TokensAfter
+		state.MessageCandidates = make([]CandidateIdentity, len(state.Transcript))
 	case ModeChanged:
 		// Plan-mode tools move the effective operating mode mid-turn, so the
 		// mode transition only requires an open session.
@@ -666,6 +1182,7 @@ func (state *State) apply(event Event) error {
 		})
 		state.activeRuns = cloneIndexForWrite(state.activeRuns)
 		state.activeRuns[event.RunID] = len(state.Runs) - 1
+		state.trimRuns()
 	case RunCompleted:
 		index, err := state.activeRun(event.RunID)
 		if err != nil {
@@ -760,7 +1277,16 @@ func (state *State) apply(event Event) error {
 		if _, isAssistant := payload.Message.(ai.AssistantMessage); isAssistant {
 			candidate = CandidateIdentity{RunID: event.RunID, Turn: state.openTurn(event.RunID)}
 		}
-		state.Transcript = appendShared(state.Transcript, cloneMessage(payload.Message))
+		committed := cloneMessage(payload.Message)
+		state.Transcript = appendShared(state.Transcript, committed)
+		state.transcriptBytes += messageByteSize(committed)
+		if toolMessage, ok := committed.(ai.ToolMessage); ok {
+			// A completed Tool keeps its own result only until the durable tool
+			// message commits. From here the transcript is the single owner of the
+			// result parts; each ToolState shares the matching part instead of
+			// pinning a second clone of the same output.
+			state.shareToolResultParts(toolMessage)
+		}
 		if update, ok := tasklist.FromMessage(payload.Message); ok {
 			// A call that cannot be folded leaves the plan alone, the way a
 			// malformed call is ignored.
@@ -772,6 +1298,8 @@ func (state *State) apply(event Event) error {
 		if payload.Synthetic {
 			state.SyntheticMessages = appendShared(state.SyntheticMessages, len(state.Transcript)-1)
 		}
+		state.trimTranscriptWindow()
+		state.trimToolsWindow()
 		state.Draft = StreamDraft{}
 		state.DraftCandidate = CandidateIdentity{}
 	case MessageDelta:
@@ -837,10 +1365,25 @@ func (state *State) apply(event Event) error {
 			return protocolError("tool call %q is already active", payload.Call.ID)
 		}
 
+		call := payload.Call
+		owned := toolCallByteSize(call)
+		if arguments := transcriptToolArguments(state.Transcript, call.ID); bytes.Equal(arguments, call.Arguments) {
+			// The committed tool call already owns the argument bytes. Sharing
+			// them keeps a large write/edit payload single-copy for the life of
+			// the card; State.Clone still detaches both sides. A rewritten tool
+			// input (hook) differs from the committed call and keeps its own copy.
+			call.Arguments = arguments
+			owned = 0
+		} else {
+			call = cloneToolCall(call)
+		}
+
 		state.Tools = appendShared(state.Tools, ToolState{
 			RunID: event.RunID, Turn: payload.Turn,
-			Call: cloneToolCall(payload.Call), Status: ToolStatusRunning,
+			Call: call, Status: ToolStatusRunning, ownedBytes: owned,
 		})
+		state.toolsBytes += owned
+		state.trimToolsWindow()
 		state.activeTools = cloneIndexForWrite(state.activeTools)
 		state.activeTools[key] = len(state.Tools) - 1
 	case ToolUpdated:
@@ -849,8 +1392,12 @@ func (state *State) apply(event Event) error {
 			return err
 		}
 
+		update := boundedToolUpdate(payload.Update)
 		state.Tools = cloneBeforeWrite(state.Tools)
-		state.Tools[index].Update, _ = ai.CloneParts(payload.Update)
+		previous := partsByteSize(state.Tools[index].Update)
+		state.Tools[index].Update = update
+		state.Tools[index].ownedBytes += partsByteSize(update) - previous
+		state.toolsBytes = max(0, state.toolsBytes+partsByteSize(update)-previous)
 	case ToolCompleted:
 		index, err := state.activeTool(event.RunID, payload.Call)
 		if err != nil {
@@ -860,11 +1407,21 @@ func (state *State) apply(event Event) error {
 		state.Tools = cloneBeforeWrite(state.Tools)
 		state.Tools[index].Status = ToolStatusCompleted
 		cloned, cloneErr := ai.CloneMessage(payload.Result)
+		previous := partsByteSize(state.Tools[index].Update)
+		delta := -previous
 		if cloneErr == nil {
 			if result, ok := cloned.(ai.ToolMessage); ok {
 				state.Tools[index].Result = result
+				delta = toolMessageByteSize(result) - previous
 			}
 		}
+		state.Tools[index].ownedBytes += delta
+		state.toolsBytes = max(0, state.toolsBytes+delta)
+		// Progress is live-only. The durable result is the completed Tool's
+		// detail, so keeping the last progress body would pin a second copy of
+		// the same output for the life of the window.
+		state.Tools[index].Update = nil
+		state.trimToolsWindow()
 		state.activeTools = cloneIndexForWrite(state.activeTools)
 		delete(state.activeTools, toolStateKey(event.RunID, payload.Call.ID))
 	case SubagentLifecycle:
@@ -1004,9 +1561,15 @@ func (state *State) apply(event Event) error {
 
 		state.Phase = payload.Phase
 	case IntegrationDiagnostic:
+		payload.Response = cloneModelResponseFailure(payload.Response)
 		state.Diagnostics = appendShared(state.Diagnostics, payload)
+		if len(state.Diagnostics) > maxRecentDiagnostics {
+			state.Diagnostics = appendShared(
+				nil, state.Diagnostics[len(state.Diagnostics)-maxRecentDiagnostics:]...,
+			)
+		}
 	case RuntimeError:
-		lastError := payload
+		lastError := cloneRuntimeError(payload)
 
 		state.LastError = &lastError
 		if payload.Fatal {
@@ -1484,6 +2047,35 @@ func isTerminalSubagentState(state subagent.State) bool {
 		state == subagent.StateCanceled || state == subagent.StateInterrupted
 }
 
+// trimRuns keeps every active run and the newest inactive projections. Run
+// history is display-only once it ends; without this bound a long Session keeps
+// one RunState per interaction forever.
+func (state *State) trimRuns() {
+	if len(state.Runs) <= maxRecentRuns {
+		return
+	}
+
+	drop := len(state.Runs) - maxRecentRuns
+	kept := make([]RunState, 0, maxRecentRuns)
+
+	for _, run := range state.Runs {
+		if drop > 0 && !run.Active {
+			drop--
+
+			continue
+		}
+
+		kept = append(kept, run)
+	}
+
+	if len(kept) == len(state.Runs) {
+		return
+	}
+
+	state.Runs = kept
+	state.rebuildIndexes()
+}
+
 func (state *State) failActiveRun(runID string) {
 	state.Tools = cloneBeforeWrite(state.Tools)
 	state.Runs = cloneBeforeWrite(state.Runs)
@@ -1494,7 +2086,11 @@ func (state *State) failActiveRun(runID string) {
 	for index := range state.Tools {
 		tool := &state.Tools[index]
 		if tool.Status == ToolStatusRunning && (runID == "" || tool.RunID == runID) {
+			released := partsByteSize(tool.Update)
 			tool.Status = ToolStatusCompleted
+			tool.Update = nil
+			tool.ownedBytes -= released
+			state.toolsBytes = max(0, state.toolsBytes-released)
 			delete(state.activeTools, toolStateKey(tool.RunID, tool.Call.ID))
 		}
 	}

@@ -3,6 +3,7 @@ package retry_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -490,4 +491,87 @@ func TestGenerateMaxElapsedStopsReplaying(t *testing.T) {
 	assert.Equal(t, int32(2), base.calls.Load(),
 		"one replay fits before the window is spent, and the next is not started")
 	assert.Len(t, delays, 1)
+}
+
+type controlStreamModel struct {
+	scriptedModel
+	failures int32
+	rawEOF   bool
+}
+
+func (m *controlStreamModel) Stream(context.Context, ai.Request) ai.Stream {
+	attempt := m.calls.Add(1)
+
+	return func(yield func(ai.StreamEvent, error) bool) {
+		if !yield(ai.StreamEvent{Type: ai.StreamMessageStart, ID: "failed"}, nil) {
+			return
+		}
+
+		if attempt <= m.failures {
+			if !m.rawEOF {
+				yield(ai.StreamEvent{}, ai.ErrIncompleteStream)
+			}
+
+			return
+		}
+
+		if !yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: "answer"}, nil) {
+			return
+		}
+
+		yield(ai.StreamEvent{Type: ai.StreamMessageEnd, FinishReason: ai.FinishStop}, nil)
+	}
+}
+
+func TestStreamIsolatesControlStartsAcrossAttempts(t *testing.T) {
+	t.Parallel()
+
+	for _, rawEOF := range []bool{false, true} {
+		t.Run(fmt.Sprintf("raw EOF %t", rawEOF), func(t *testing.T) {
+			t.Parallel()
+
+			base := &controlStreamModel{failures: 2, rawEOF: rawEOF}
+			model := retry.New(retry.WithMaxAttempts(3), noSleep(new([]time.Duration)))(base)
+
+			var events []ai.StreamEventType
+
+			for event, err := range model.Stream(t.Context(), ai.Request{}) {
+				require.NoError(t, err)
+
+				events = append(events, event.Type)
+			}
+
+			assert.Equal(t, []ai.StreamEventType{
+				ai.StreamRetry, ai.StreamRetry, ai.StreamMessageStart, ai.StreamTextDelta, ai.StreamMessageEnd,
+			}, events)
+			assert.Equal(t, int32(3), base.calls.Load())
+		})
+	}
+}
+
+func TestStreamExhaustionNeverPublishesPendingStart(t *testing.T) {
+	t.Parallel()
+
+	base := &controlStreamModel{failures: 10, rawEOF: true}
+	model := retry.New(retry.WithMaxAttempts(3), noSleep(new([]time.Duration)))(base)
+
+	var (
+		terminal error
+		starts   int
+	)
+
+	for event, err := range model.Stream(t.Context(), ai.Request{}) {
+		if err != nil {
+			terminal = err
+			break
+		}
+
+		if event.Type == ai.StreamMessageStart {
+			starts++
+		}
+	}
+
+	require.ErrorIs(t, terminal, ai.ErrIncompleteStream)
+	assert.Zero(t, starts)
+	assert.Equal(t, int32(3), base.calls.Load())
 }

@@ -65,6 +65,7 @@ type responseAction struct {
 type responseContent struct {
 	Type        string               `json:"type"` // "input_text"|"output_text"|"reasoning_text"|"input_image"|"input_file"
 	Text        string               `json:"text,omitempty"`
+	Refusal     string               `json:"refusal,omitempty"`
 	ImageURL    string               `json:"image_url,omitempty"`
 	FileData    string               `json:"file_data,omitempty"`
 	FileID      string               `json:"file_id,omitempty"`
@@ -155,11 +156,14 @@ type responsesUsage struct {
 // Streaming event payloads.
 
 type responsesStreamEvent struct {
-	Type        string             `json:"type"`
-	Delta       string             `json:"delta"`
-	OutputIndex int                `json:"output_index"`
-	Item        *responseItem      `json:"item"`
-	Response    *responsesResponse `json:"response"`
+	Type         string             `json:"type"`
+	Delta        string             `json:"delta"`
+	OutputIndex  int                `json:"output_index"`
+	ContentIndex int                `json:"content_index"`
+	ItemID       string             `json:"item_id"`
+	Arguments    *string            `json:"arguments"`
+	Item         *responseItem      `json:"item"`
+	Response     *responsesResponse `json:"response"`
 	// error events: the Responses dialect names the failure at the top level,
 	// while a router in front of it nests the same fields under "error".
 	Message string          `json:"message"`

@@ -32,6 +32,12 @@ type liveThinking struct {
 	rows   []string
 	styled []string
 	widths []int
+	// maxWidth is the widest row ever frozen. A managed window may drop that
+	// row, but the retained rows must stay padded to the same width the full
+	// block would use.
+	maxWidth int
+	// rowsBase is the number of frozen rows dropped from a managed window.
+	rowsBase int
 	// padded holds the frozen rows padded to the block width and inset, so a frame
 	// hands them to the store without re-padding and re-insetting every frozen
 	// row. paddedWidth is the width they were padded to (-1 for the NO_COLOR
@@ -87,7 +93,7 @@ func (r *markdownRenderer) renderLiveThinking(
 	theme colorTheme,
 	noColor bool,
 ) string {
-	tail := r.freezeLiveThinking(body, glyph, indent, limit, 0, theme, noColor)
+	tail := r.freezeLiveThinking(&r.thinking, body, glyph, indent, limit, 0, theme, noColor, false)
 
 	return r.thinking.compose(tail, theme, noColor)
 }
@@ -95,30 +101,31 @@ func (r *markdownRenderer) renderLiveThinking(
 // renderLiveThinkingRows is [markdownRenderer.renderLiveThinking] for the managed
 // transcript store: it returns the frozen rows and the tail as two segments, each
 // padded and inset, so a frame never joins the whole thought or re-pads the
-// frozen prefix.
+// frozen prefix. The managed state keeps only a tail window.
 func (r *markdownRenderer) renderLiveThinkingRows(
 	body, glyph, indent string,
 	limit, inset int,
 	theme colorTheme,
 	noColor bool,
 ) rowSegments {
-	tail := r.freezeLiveThinking(body, glyph, indent, limit, inset, theme, noColor)
+	tail := r.freezeLiveThinking(&r.thinkingRows, body, glyph, indent, limit, inset, theme, noColor, true)
 
-	return r.thinking.composeRows(tail, theme, noColor, inset)
+	return r.thinkingRows.composeRows(tail, theme, noColor, inset)
 }
 
 // freezeLiveThinking advances the slot's frozen rows to the body's last line
 // break and returns the tail rows, with the glyph or indent applied. inset is
 // part of the geometry, so a caller that wants inset rows keeps its own prefix.
 func (r *markdownRenderer) freezeLiveThinking(
+	frozen *liveThinking,
 	body, glyph, indent string,
 	limit, inset int,
 	theme colorTheme,
 	noColor bool,
+	window bool,
 ) []string {
 	fingerprint := themeFingerprint(theme.fingerprint)
 
-	frozen := &r.thinking
 	if frozen.limit != limit || frozen.inset != inset ||
 		frozen.theme != fingerprint || frozen.noColor != noColor {
 		*frozen = liveThinking{limit: limit, inset: inset, theme: fingerprint, noColor: noColor}
@@ -142,6 +149,9 @@ func (r *markdownRenderer) freezeLiveThinking(
 		region := body[covered:checkpoint]
 		r.thinkingWrapped += len(region)
 		frozen.freeze(thinkingRows(region, lead, indent, limit, true), theme, noColor)
+		if window {
+			frozen.trim(maxLiveResidentRows)
+		}
 		frozen.source = body[:checkpoint]
 		covered = checkpoint
 	}
@@ -173,10 +183,36 @@ func (f *liveThinking) freeze(rows []string, theme colorTheme, noColor bool) {
 
 	style := lipgloss.NewStyle().Foreground(paletteFor(theme).muted)
 	for _, row := range rows {
+		rowWidth := ansi.StringWidth(row)
 		f.rows = append(f.rows, row)
 		f.styled = append(f.styled, style.Render(row))
-		f.widths = append(f.widths, ansi.StringWidth(row))
+		f.widths = append(f.widths, rowWidth)
+		f.maxWidth = max(f.maxWidth, rowWidth)
 	}
+}
+
+// trim drops rows from the front of a managed live thought. maxWidth is kept so
+// the retained rows stay padded to the width the full block would use.
+func (f *liveThinking) trim(limit int) {
+	if limit < 0 || len(f.rows) <= limit {
+		return
+	}
+
+	total := len(f.rows)
+	drop := total - limit
+	f.rows = append([]string(nil), f.rows[drop:]...)
+	f.rows, _ = detachRetainedRows(f.rows, limit, total, false)
+	if len(f.styled) > drop {
+		f.styled = append([]string(nil), f.styled[drop:]...)
+	}
+	if len(f.widths) > drop {
+		f.widths = append([]int(nil), f.widths[drop:]...)
+	}
+	f.rowsBase += drop
+	// The padded cache indexes the old front; rebuild it from the retained rows.
+	f.padded = nil
+	f.paddedWidth = 0
+	f.paddedCount = 0
 }
 
 // compose writes the frozen rows and the tail as one aligned block. The tail is
@@ -241,18 +277,16 @@ func (f *liveThinking) composeRows(tail []string, theme colorTheme, noColor bool
 			f.paddedCount = len(f.rows)
 		}
 
-		return rowSegments{frozen: f.padded, tail: insetRowSlice(tail, inset)}
+		return f.boundedRows(rowSegments{
+			frozen: f.padded, tail: insetRowSlice(tail, inset), base: f.rowsBase,
+		})
 	}
 
 	style := lipgloss.NewStyle().Foreground(paletteFor(theme).muted)
 
 	styledTail := make([]string, len(tail))
 	widthsTail := make([]int, len(tail))
-	width := 0
-	for _, rowWidth := range f.widths {
-		width = max(width, rowWidth)
-	}
-
+	width := f.maxWidth
 	for index, row := range tail {
 		styledTail[index] = style.Render(row)
 		widthsTail[index] = ansi.StringWidth(row)
@@ -283,7 +317,20 @@ func (f *liveThinking) composeRows(tail []string, theme colorTheme, noColor bool
 		paddedTail[index] = insetThinkingRow(thinkingPaddedRow(row, widthsTail[index], width), prefix)
 	}
 
-	return rowSegments{frozen: f.padded, tail: paddedTail}
+	return f.boundedRows(rowSegments{
+		frozen: f.padded, tail: paddedTail, base: f.rowsBase,
+	})
+}
+
+// boundedRows keeps a managed thought's rendered rows to the same tail window
+// the Markdown live record uses. The frozen source remains in f.source, so a
+// scroll back can re-render the omitted rows.
+func (f *liveThinking) boundedRows(rows rowSegments) rowSegments {
+	if rows.count() <= maxLiveResidentRows {
+		return rows
+	}
+
+	return rows.window(rows.count()-maxLiveResidentRows, rows.count())
 }
 
 // thinkingPaddedRow pads one styled row to width, the way [writeThinkingRows]

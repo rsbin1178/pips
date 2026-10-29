@@ -2,7 +2,9 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"iter"
 	"os"
@@ -395,4 +397,109 @@ func (c *recordingController) Prompt(
 			}
 		}
 	}
+}
+
+// committedToolResult returns the committed transcript part that owns one call's
+// result.
+func committedToolResult(state coding.State, callID string) (ai.ToolResultPart, bool) {
+	for _, message := range state.Transcript {
+		result, ok := message.(ai.ToolMessage)
+		if !ok {
+			continue
+		}
+
+		for _, part := range result.Parts {
+			if part.ToolCallID == callID {
+				return part, true
+			}
+		}
+	}
+
+	return ai.ToolResultPart{}, false
+}
+
+// TestScriptedRuntimeToolSharingKeepsCardDetailAndJSON pins B2 end to end: a real
+// Runtime runs a real read tool, its result commits, and the shared result bytes
+// must leave the card, the detail page and the serialized State exactly as the
+// pre-share ownership shape (a deep copy) does.
+func TestScriptedRuntimeToolSharingKeepsCardDetailAndJSON(t *testing.T) {
+	t.Parallel()
+
+	controller := &recordingController{Controller: openScriptedController(t)}
+	model := readyModelWithController(t, controller, true)
+	model.composer.SetValue("read the fixture")
+
+	_, command := model.Update(key("enter"))
+	driveModelCommandsCapture(t, model, command)
+
+	shared := controller.Snapshot()
+	require.Len(t, shared.Tools, 1)
+	require.Equal(t, coding.ToolStatusCompleted, shared.Tools[0].Status)
+	require.Equal(t, "call-1", shared.Tools[0].Call.ID)
+
+	// The committed transcript message owns the result and the ToolState reads it.
+	committed, ok := committedToolResult(shared, "call-1")
+	require.True(t, ok, "the tool result message committed")
+	require.Len(t, shared.Tools[0].Result.Parts, 1)
+	assert.Equal(t, committed, shared.Tools[0].Result.Parts[0],
+		"the ToolState and the transcript describe the same result")
+	assert.Contains(t, visibleToolParts(shared.Tools[0].Result.Parts[0].Content), "fixture content")
+
+	blocks := projectTimeline(shared)
+	index := -1
+	for position, block := range blocks {
+		for _, activity := range block.tools {
+			if activity.id == "call-1" {
+				index = position
+			}
+		}
+	}
+	require.NotEqual(t, -1, index, "the committed call has a card")
+
+	rendered := model.renderTimelineBlocks(blocks)
+	assert.Contains(t, rendered, "Explored")
+	detail := detailRowsText(newToolDetailView(blocks[index]).rows)
+	assert.Contains(t, detail, "fixture content", "the detail page reads the shared result")
+
+	// The pre-share ownership shape is a deep copy of the same conversation.
+	detached := shared.Clone()
+	detachedBlocks := projectTimeline(detached)
+	require.Len(t, detachedBlocks, len(blocks))
+	assert.Equal(t, rendered, model.renderTimelineBlocks(detachedBlocks),
+		"sharing does not change the rendered conversation")
+	assert.Equal(t,
+		detailRowsText(newToolDetailView(detachedBlocks[index]).rows), detail,
+		"sharing does not change the detail page")
+
+	sharedJSON, err := json.Marshal(shared)
+	require.NoError(t, err)
+	detachedJSON, err := json.Marshal(detached)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(sharedJSON), string(detachedJSON),
+		"sharing is an ownership change, not a protocol change")
+
+	// The JSONL projection of the durable stream names the same call and is
+	// byte-identical across projections, so a stream consumer and a transcript
+	// reader agree.
+	projected := 0
+	for _, event := range controller.events {
+		if event.Type != coding.EventToolCompleted {
+			continue
+		}
+
+		first, projectErr := coding.Project(event, coding.DisclosureSafe)
+		require.NoError(t, projectErr)
+		second, projectErr := coding.Project(event, coding.DisclosureSafe)
+		require.NoError(t, projectErr)
+
+		firstJSON, marshalErr := json.Marshal(first)
+		require.NoError(t, marshalErr)
+		secondJSON, marshalErr := json.Marshal(second)
+		require.NoError(t, marshalErr)
+
+		assert.True(t, bytes.Equal(firstJSON, secondJSON), "the projection is byte-for-byte stable")
+		assert.Contains(t, string(firstJSON), "call-1")
+		projected++
+	}
+	assert.Equal(t, 1, projected, "one tool completion reached the stream")
 }

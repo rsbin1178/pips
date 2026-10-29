@@ -172,6 +172,176 @@ func TestSearchMatchesTheRowsAThinkingBlockRenders(t *testing.T) {
 // the window rather than the conversation: the same frame work for four times the
 // messages, and no settled record re-rendered.
 //
+
+func TestOversizedRecordKeepsABoundedRowWindow(t *testing.T) {
+	t.Parallel()
+
+	body := "OVERSIZED-START " + strings.Repeat(
+		"A long answer paragraph that wraps across the transcript width. ",
+		(512<<10)/64,
+	)
+	state := readyState()
+	state.Transcript = append(state.Transcript, ai.Assistant(ai.Text(body)))
+
+	model := fullscreenModel(t, stubController{state: state}, true)
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model.rerenderTranscript(true)
+	_ = model.View()
+
+	store := &model.transcript
+	index := -1
+	for candidate := range store.records {
+		if store.records[candidate].block.kind == blockAssistant {
+			index = candidate
+
+			break
+		}
+	}
+	require.NotEqual(t, -1, index, "the oversized assistant record is present")
+
+	record := &store.records[index]
+	require.Greater(t, record.lines, maxResidentRowsPerRecord,
+		"the fixture must be taller than one record's budget")
+	assert.LessOrEqual(t, record.rows.residentCount(), maxResidentRowsPerRecord,
+		"only a bounded window of the record stays resident")
+	assert.Positive(t, record.rows.base, "the omitted prefix is recorded")
+	assert.Less(t, store.residentRowBytes(), 2<<20,
+		"the oversized record does not pin its whole rendering")
+
+	start := store.starts[index]
+	rows := store.rowsIn(start, start+1)
+	require.NotEmpty(t, rows)
+	assert.Contains(t, ansi.Strip(rows[0]), "OVERSIZED-START",
+		"scrolling back re-renders the omitted prefix exactly")
+}
+
+func TestOversizedLiveDraftKeepsABoundedWindowAndReleasesOnSettle(t *testing.T) {
+	t.Parallel()
+
+	paragraph := "A streamed answer paragraph that wraps across the transcript width.\n\n"
+	body := "LIVE-START " + strings.Repeat(paragraph, (512<<10)/len(paragraph))
+	state := readyState()
+	state.Phase = coding.PhaseRunning
+	state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: body})
+	state.DraftCandidate = coding.CandidateIdentity{RunID: "run-1", Turn: 1}
+
+	model := fullscreenModel(t, stubController{state: state}, true)
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model.rerenderTranscript(true)
+	_ = model.View()
+
+	store := &model.transcript
+	index := -1
+	for candidate := range store.records {
+		if store.records[candidate].block.kind == blockDraft {
+			index = candidate
+
+			break
+		}
+	}
+	require.NotEqual(t, -1, index, "the live draft record is present")
+	record := &store.records[index]
+	require.Greater(t, record.lines, maxLiveResidentRows)
+	assert.LessOrEqual(t, record.rows.residentCount(), maxLiveResidentRows)
+	assert.Positive(t, record.rows.base)
+	assert.NotEmpty(t, model.markdown.frozenRows)
+
+	model.state.Transcript = append(model.state.Transcript, ai.Assistant(ai.Text(body)))
+	model.state.Draft = coding.StreamDraft{}
+	model.state.MessageCandidates = append(
+		model.state.MessageCandidates,
+		coding.CandidateIdentity{RunID: "run-1", Turn: 1},
+	)
+	model.rerenderTranscript(false)
+	_ = model.View()
+
+	assert.Empty(t, model.markdown.frozenRows, "the settled frame drops the live frozen rows")
+	assert.Empty(t, model.markdown.liveFrames, "the settled frame drops live reuse frames")
+	assert.Empty(t, model.markdown.thinkingRows.rows)
+}
+
+func TestOversizedUnfreezableLiveDraftKeepsABoundedWindow(t *testing.T) {
+	t.Parallel()
+
+	// No blank line: the Markdown live path cannot freeze a prefix and must
+	// window the whole rendered tail instead.
+	body := "LIVE-TAIL " + strings.Repeat("word ", (512<<10)/5)
+	state := readyState()
+	state.Phase = coding.PhaseRunning
+	state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: body})
+
+	model := fullscreenModel(t, stubController{state: state}, true)
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model.rerenderTranscript(true)
+	_ = model.View()
+
+	store := &model.transcript
+	index := -1
+	for candidate := range store.records {
+		if store.records[candidate].block.kind == blockDraft {
+			index = candidate
+
+			break
+		}
+	}
+	require.NotEqual(t, -1, index)
+	record := &store.records[index]
+	require.Greater(t, record.lines, maxLiveResidentRows)
+	assert.LessOrEqual(t, record.rows.residentCount(), maxLiveResidentRows)
+	assert.Positive(t, record.rows.base)
+	assert.NotEmpty(t, model.markdown.liveFrames,
+		"the fallback frame is the bounded live representation for this shape")
+}
+
+func TestOversizedLiveThinkingKeepsABoundedWindowAndReleasesOnSettle(t *testing.T) {
+	t.Parallel()
+
+	body := strings.Repeat(
+		"A reasoning line that wraps across the transcript width and keeps growing.\n",
+		(512<<10)/76,
+	)
+	state := readyState()
+	state.Phase = coding.PhaseRunning
+	state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamReasoningDelta, Text: body})
+
+	model := fullscreenModel(t, stubController{state: state}, true)
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model.rerenderTranscript(true)
+	_ = model.View()
+
+	store := &model.transcript
+	index := -1
+	for candidate := range store.records {
+		if store.records[candidate].block.kind == blockThinking {
+			index = candidate
+
+			break
+		}
+	}
+	require.NotEqual(t, -1, index, "the live thinking record is present")
+	record := &store.records[index]
+	require.Greater(t, record.lines, maxLiveResidentRows)
+	assert.LessOrEqual(t, record.rows.residentCount(), maxLiveResidentRows)
+	assert.Positive(t, record.rows.base)
+	assert.NotEmpty(t, model.markdown.thinkingRows.rows)
+	assert.LessOrEqual(t, len(model.markdown.thinkingRows.rows), maxLiveResidentRows)
+
+	model.state.Transcript = append(model.state.Transcript, ai.Assistant(
+		ai.ReasoningPart{Text: body}, ai.Text("answer"),
+	))
+	model.state.Draft = coding.StreamDraft{}
+	model.state.MessageCandidates = append(
+		model.state.MessageCandidates,
+		coding.CandidateIdentity{RunID: "run-1", Turn: 1},
+	)
+	model.rerenderTranscript(false)
+	_ = model.View()
+
+	assert.Empty(t, model.markdown.thinkingRows.rows,
+		"the settled frame drops the live thinking rows")
+	assert.Zero(t, model.markdown.thinkingRows.rowsBase)
+}
+
 //nolint:paralleltest // AllocsPerRun must not run beside another test.
 func TestTranscriptFrameCostDoesNotTrackTheConversation(t *testing.T) {
 	allocs := make([]float64, 0, 3)

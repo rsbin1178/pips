@@ -15,7 +15,7 @@ func TestDefaultActionsAreUniqueAndDriveHints(t *testing.T) {
 	action, ok := resolveAction(defaultActions, contextRunning, "tab")
 	require.True(t, ok)
 	assert.Equal(t, actionFollowUp, action)
-	assert.Contains(t, actionHints(defaultActions, contextRunning), "tab follow up")
+	assert.Contains(t, actionHints(defaultActions, contextRunning), "tab queue request")
 	// The panel reads the same table, so a binding and its hint cannot disagree.
 	page := helpPageText(fullscreenModel(t, stubController{state: readyState()}, true), helpTabShortcuts)
 	assert.Contains(t, page, "ctrl+j / shift+enter: newline")

@@ -178,10 +178,14 @@ type SessionClosed struct {
 // projection. It is live-only: the transcript is authoritative, so the event
 // is never written to the durable journal.
 type SessionTreeChanged struct {
-	Tree          SessionTree       `json:"tree"`
-	Transcript    ai.Messages       `json:"transcript"`
-	ContextTokens int               `json:"context_tokens"`
-	Tasks         tasklist.Snapshot `json:"tasks"`
+	Tree       SessionTree `json:"tree"`
+	Transcript ai.Messages `json:"transcript"`
+	// TranscriptBase is the absolute conversation index of Transcript[0]. It is
+	// non-zero when the bounded projection starts below the durable first
+	// message, so a frontend can page the messages above it.
+	TranscriptBase int               `json:"transcript_base,omitempty"`
+	ContextTokens  int               `json:"context_tokens"`
+	Tasks          tasklist.Snapshot `json:"tasks"`
 	// Compaction carries the boundary the bounded transcript belongs to. A zero
 	// value means the active branch has no full checkpoint.
 	Compaction CompactionState `json:"compaction,omitzero"`
@@ -346,11 +350,12 @@ type IncompleteReply struct {
 // budget available, DelayMillis is the backoff before it, and Reason is a
 // short, content-free cause.
 type ModelRetry struct {
-	Turn        int    `json:"turn,omitempty"`
-	Attempt     int    `json:"attempt"`
-	MaxRetries  int    `json:"max_retries"`
-	DelayMillis int64  `json:"delay_ms"`
-	Reason      string `json:"reason,omitempty"`
+	Turn        int                   `json:"turn,omitempty"`
+	Attempt     int                   `json:"attempt"`
+	MaxRetries  int                   `json:"max_retries"`
+	DelayMillis int64                 `json:"delay_ms"`
+	Reason      string                `json:"reason,omitempty"`
+	Response    *ModelResponseFailure `json:"response,omitempty"`
 }
 
 // ToolCall is the bounded model request projected into tool lifecycle events.
@@ -628,17 +633,39 @@ type StatusChanged struct {
 
 // IntegrationDiagnostic reports an optional integration failure or suppression.
 type IntegrationDiagnostic struct {
-	Component string `json:"component"`
-	Code      string `json:"code"`
-	Message   string `json:"message,omitempty"`
-	Disabled  bool   `json:"disabled"`
+	Component string                `json:"component"`
+	Code      string                `json:"code"`
+	Message   string                `json:"message,omitempty"`
+	Disabled  bool                  `json:"disabled"`
+	Response  *ModelResponseFailure `json:"response,omitempty"`
 }
 
 // RuntimeError reports a stable user-visible runtime error classification.
 type RuntimeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message,omitempty"`
-	Fatal   bool   `json:"fatal"`
+	Code     string                `json:"code"`
+	Message  string                `json:"message,omitempty"`
+	Fatal    bool                  `json:"fatal"`
+	Response *ModelResponseFailure `json:"response,omitempty"`
+}
+
+// ModelResponseFailure is a bounded, content-free summary of a rejected response.
+// Provider response identifiers are retained only for trusted local diagnostics.
+type ModelResponseFailure struct {
+	Kind             string          `json:"kind"`
+	Turn             int             `json:"turn,omitempty"`
+	Attempt          int             `json:"attempt,omitempty"`
+	MaxRetries       int             `json:"max_retries,omitempty"`
+	Provider         ai.Provider     `json:"provider,omitempty"`
+	Model            string          `json:"model,omitempty"`
+	ResponseID       string          `json:"response_id,omitempty"`
+	TerminalObserved bool            `json:"terminal_observed"`
+	FinishReason     ai.FinishReason `json:"finish_reason,omitempty"`
+	Status           string          `json:"status,omitempty"`
+	TextBytes        int             `json:"text_bytes"`
+	ToolCalls        int             `json:"tool_calls"`
+	HasReasoning     bool            `json:"has_reasoning"`
+	// Usage contains only reported counters; zero may mean unreported usage.
+	Usage TokenUsage `json:"usage"`
 }
 
 func (SessionOpened) eventPayload()            {}
@@ -1146,6 +1173,10 @@ func validateSessionTreeChangedPayload(value SessionTreeChanged) error {
 		return errors.New("session transcript has too many messages")
 	}
 
+	if value.TranscriptBase < 0 {
+		return errors.New("session transcript base must not be negative")
+	}
+
 	if value.ContextTokens < 0 {
 		return errors.New("context tokens must not be negative")
 	}
@@ -1464,7 +1495,7 @@ func validateRuntimeErrorPayload(value RuntimeError) error {
 		return errors.New("invalid error message")
 	}
 
-	return nil
+	return validateModelResponseFailure(value.Response)
 }
 
 func validateTeamControlLifecycle(value TeamControlLifecycle) error {
@@ -2278,7 +2309,7 @@ func validateModelRetryPayload(retry ModelRetry) error {
 		return errors.New("invalid retry reason")
 	}
 
-	return nil
+	return validateModelResponseFailure(retry.Response)
 }
 
 func validateToolCall(call ToolCall) error {
@@ -2435,7 +2466,7 @@ func validateDiagnostic(value IntegrationDiagnostic) error {
 		return errors.New("invalid diagnostic")
 	}
 
-	return nil
+	return validateModelResponseFailure(value.Response)
 }
 
 func payloadMismatch(eventType EventType, payload EventPayload) error {

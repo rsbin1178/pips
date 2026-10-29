@@ -57,7 +57,7 @@ func TestWholeFileEditHeadingUsesTheMutatedPath(t *testing.T) {
 		},
 		body: "M src/main.go\n@@ line 1 @@\n-old\n+new\n",
 	}
-	_, verb, subject := toolActivityHeading(activity.class, activity.state, []toolActivity{activity})
+	_, verb, subject := toolActivityHeading(activity.class, activity.state, []*toolActivity{&activity})
 	assert.Equal(t, "Edited", verb)
 	assert.Equal(t, "src/main.go", subject)
 }
@@ -568,7 +568,7 @@ func TestEditPreviewBoundsLongLinesAndDetailBytes(t *testing.T) {
 	require.Len(t, blocks, 1)
 	require.Len(t, blocks[0].tools, 1)
 
-	detail := patchDetailChanges(blocks[0].tools[0])
+	detail := patchDetailChanges(*blocks[0].tools[0])
 	assert.LessOrEqual(t, len(detail), maximumToolDetailBytes+len("…"))
 	assert.True(t, strings.HasSuffix(detail, "…"))
 }

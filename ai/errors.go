@@ -51,11 +51,88 @@ var (
 	// retryable errors: a peer that never starts answering is worth another
 	// attempt, while a deadline the caller set is not.
 	ErrResponseTimeout = errors.New("ai: response timed out")
+	// ErrIncompleteStream means the provider ended before a complete response.
+	ErrIncompleteStream = errors.New("ai: incomplete stream")
+	// ErrEmptyResponse means a completed response has no deliverable output.
+	ErrEmptyResponse = errors.New("ai: empty response")
+	// ErrContentFiltered means output was blocked by a content filter.
+	ErrContentFiltered = errors.New("ai: response content filtered")
+	// ErrRefused means the provider explicitly refused the request.
+	ErrRefused = errors.New("ai: request refused")
+	// ErrResponseTruncated means the output limit left no usable answer.
+	ErrResponseTruncated = errors.New("ai: output token limit reached")
+	// ErrResponseFailed means the provider reported a failed response.
+	ErrResponseFailed = errors.New("ai: response failed")
 	// ErrMalformedStructuredOutput means a schema-constrained answer was not one
 	// JSON object. Callers treat it as an answer of the wrong shape rather than a
 	// transport failure.
 	ErrMalformedStructuredOutput = errors.New("ai: structured output is not one JSON object")
 )
+
+// ResponseError describes a rejected model response without retaining its content.
+// Error returns a stable cause; identifying fields are available to local diagnostics.
+type ResponseError struct {
+	Cause            error `json:"-"`
+	Provider         Provider
+	Model            string
+	ResponseID       string
+	TerminalObserved bool
+	FinishReason     FinishReason
+	Status           string
+	TextBytes        int
+	ToolCalls        int
+	HasReasoning     bool
+	Usage            Usage
+}
+
+// NewResponseError summarizes a response without copying text or tool arguments.
+func NewResponseError(cause error, resp *Response, terminalObserved bool) *ResponseError {
+	e := &ResponseError{Cause: cause, TerminalObserved: terminalObserved}
+	if resp == nil {
+		return e
+	}
+
+	e.Provider, e.Model, e.ResponseID = resp.Provider, resp.Model, resp.ID
+
+	e.FinishReason, e.Usage = resp.FinishReason, resp.Usage
+	for _, part := range resp.Message.Parts {
+		switch p := part.(type) {
+		case TextPart:
+			e.TextBytes += len(p.Text)
+		case ToolCallPart:
+			e.ToolCalls++
+		case ReasoningPart:
+			e.HasReasoning = true
+		}
+	}
+
+	return e
+}
+
+// Error implements error using only a provider-neutral failure class.
+func (e *ResponseError) Error() string {
+	switch {
+	case e.FinishReason == FinishLength || errors.Is(e.Cause, ErrResponseTruncated):
+		return "ai: output token limit reached"
+	case errors.Is(e.Cause, ErrIncompleteStream):
+		return ErrIncompleteStream.Error()
+	case errors.Is(e.Cause, ErrEmptyResponse):
+		if e.HasReasoning {
+			return "ai: reasoning-only response"
+		}
+
+		return ErrEmptyResponse.Error()
+	case errors.Is(e.Cause, ErrContentFiltered):
+		return ErrContentFiltered.Error()
+	case errors.Is(e.Cause, ErrRefused):
+		return ErrRefused.Error()
+	default:
+		return ErrResponseFailed.Error()
+	}
+}
+
+// Unwrap exposes the response failure class to errors.Is.
+func (e *ResponseError) Unwrap() error { return e.Cause }
 
 // UnsupportedMediaError names the provider and the tool-result part kind a wire
 // shape cannot express. Adapters return it, wrapping [ErrUnsupportedMedia],
@@ -180,10 +257,19 @@ func IsRetryable(err error) bool {
 		return false
 	}
 
+	var responseErr *ResponseError
+	if errors.As(err, &responseErr) && (responseErr.FinishReason == FinishLength || responseErr.FinishReason == FinishContentFilter) {
+		return false
+	}
+
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// The caller's context is gone; retrying under it cannot succeed.
 		return false
+	case errors.Is(err, ErrContentFiltered), errors.Is(err, ErrRefused), errors.Is(err, ErrResponseTruncated):
+		return false
+	case errors.Is(err, ErrIncompleteStream), errors.Is(err, ErrEmptyResponse), errors.Is(err, ErrResponseFailed):
+		return true
 	case errors.Is(err, ErrStreamIdle), errors.Is(err, ErrResponseTimeout):
 		// A stream that went silent, or a peer that never started answering, is
 		// retryable even though the abort itself is local: the provider may
@@ -245,7 +331,14 @@ func NewRetryNotice(attempt, budget int, delay time.Duration, err error) *RetryN
 		budget = attempt
 	}
 
+	var response *ResponseError
+	if errors.As(err, &response) {
+		clone := *response
+		response = &clone
+	}
+
 	return &RetryNotice{
+		Response:   response,
 		Attempt:    attempt,
 		MaxRetries: budget,
 		Delay:      delay,
@@ -258,6 +351,17 @@ func NewRetryNotice(attempt, budget int, delay time.Duration, err error) *RetryN
 // error, which still carries the full chain.
 func retryReason(err error) string {
 	switch {
+	case errors.Is(err, ErrIncompleteStream):
+		return "incomplete stream"
+	case errors.Is(err, ErrEmptyResponse):
+		var responseErr *ResponseError
+		if errors.As(err, &responseErr) && responseErr.HasReasoning {
+			return "reasoning-only response"
+		}
+
+		return "empty response"
+	case errors.Is(err, ErrResponseFailed):
+		return "response failed"
 	case errors.Is(err, ErrRateLimited):
 		return "rate limited"
 	case errors.Is(err, ErrOverloaded):
