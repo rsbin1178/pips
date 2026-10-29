@@ -67,7 +67,6 @@ func (m *Model) resetScrollback() {
 	// writes stay queued because they are already on their way to the terminal.
 	m.dropPendingScrollback()
 	m.streaming.reset()
-	m.timeline = ""
 	// A live version of the replaced projection must not reach the new frame, so
 	// outstanding background work is retired with it.
 	m.retireLiveRenderState()

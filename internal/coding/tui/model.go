@@ -112,7 +112,6 @@ type Model struct {
 	themeBackgroundKnown bool
 	themeIsDark          bool
 	themeDiagnostics     []themeDiagnostic
-	timeline             string
 	transcript           transcriptStore
 	transcriptScroll     scrollRegion
 	// childScroll is the read-only child page's reading position. It is the shared
@@ -2313,22 +2312,15 @@ func (m *Model) renderTranscriptContent(forceBottom bool) {
 	}
 
 	blocks := m.transcriptBlocks()
-	m.timeline = renderTimelineContent(
-		blocks,
-		m.markdown,
-		m.width,
-		m.theme,
-		m.options.NoColor,
-	)
+	// The managed store paints this frame, so no conversation string is built
+	// here. Rendering every active block only to test it for emptiness was work
+	// the frame had no reader for, and in a long un-promoted window it was a
+	// whole-conversation render on every frame.
+	//
 	// The seam between terminal-native history and the mutable region is part of
 	// the managed content, so the region's rows must include it too.
-	gap := m.managedTimelineNeedsLeadingGap(blocks)
-	if gap {
-		m.timeline = strings.Repeat("\n", conversationGapHeight) + m.timeline
-	}
-
 	leading := 0
-	if gap {
+	if m.managedTimelineNeedsLeadingGap(blocks) {
 		leading = conversationGapHeight
 	}
 
@@ -2347,7 +2339,6 @@ func (m *Model) renderManagedTranscript(forceBottom bool) {
 	// path, which fullscreen never runs.
 	if m.streaming.active {
 		blocks := m.transcriptBlocks()
-		m.timeline = ""
 		m.syncTranscriptStore(blocks, 0)
 		m.finishTranscriptFrame(forceBottom)
 
@@ -2355,7 +2346,6 @@ func (m *Model) renderManagedTranscript(forceBottom bool) {
 	}
 
 	frame := m.viewportProjection()
-	m.timeline = ""
 	m.syncTranscriptEntries(frame.prefixEntries, frame.tailEntries, frame.stable, 0)
 	m.finishTranscriptFrame(forceBottom)
 }
@@ -2579,14 +2569,48 @@ func clampFrameTailOffset(content string, height int) int {
 // scrollback and Bubble Tea's mutable tail. Once stream rows have been
 // promoted, the remaining draft is a continuation and must stay adjacent.
 func (m *Model) managedTimelineNeedsLeadingGap(blocks []timelineBlock) bool {
-	if !m.scrollbackOutput || len(blocks) == 0 || m.timeline == "" {
+	if !m.scrollbackOutput || len(blocks) == 0 {
 		return false
 	}
 	if m.streaming.active && m.streaming.emitted > 0 && blocks[0].kind == blockDraft {
 		return false
 	}
 
-	return true
+	return timelineProjectionDrawsRows(blocks)
+}
+
+// timelineProjectionDrawsRows reports whether the projection would draw at least
+// one row. It replaces the "render the conversation, then test the string for
+// emptiness" seam test: that render had no reader, and the active window of a
+// long inline session is where it cost the most.
+//
+// The predicate reads the projection instead of rendering it, so it stays
+// truthful for every block whose body and title are its visible content, and it
+// answers true for the kinds that always draw a row of their own.
+func timelineProjectionDrawsRows(blocks []timelineBlock) bool {
+	return slices.ContainsFunc(blocks, timelineBlockDrawsRows)
+}
+
+// timelineBlockDrawsRows reports whether one block contributes a visible row
+// without rendering it.
+func timelineBlockDrawsRows(block timelineBlock) bool {
+	if block.title != "" || strings.TrimSpace(block.body) != "" {
+		return true
+	}
+	if len(block.tools) > 0 || block.workspaceChanges != nil || block.subagent != nil {
+		return true
+	}
+
+	switch block.kind {
+	case blockUser, blockAssistant, blockDraft, blockDiagnostic:
+		// These kinds draw the title and body tested above and nothing else.
+		return false
+	case blockThinking, blockIncomplete, blockCompaction, blockQuestion, blockCompletion,
+		blockChange, blockTeam, blockTool, blockSubagent, blockPlan, blockError:
+		return true
+	}
+
+	return false
 }
 
 func (m *Model) timelineBlocks() []timelineBlock {

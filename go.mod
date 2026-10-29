@@ -78,7 +78,7 @@ require (
 
 tool golang.org/x/vuln/cmd/govulncheck
 
-replace charm.land/bubbletea/v2 => github.com/rsbin1178/bubbletea/v2 v2.1.1-0.20261020160240-e24449bbcb74
+replace charm.land/bubbletea/v2 => github.com/rsbin1178/bubbletea/v2 v2.1.2-0.20261029052655-9344231ced5e
 
 // Fork patches and upstream contributions: docs/dependency-patches.md.
-replace charm.land/glamour/v2 => github.com/rsbin1178/glamour/v2 v2.0.2-0.20261022123127-1aa8efd0868c
+replace charm.land/glamour/v2 => github.com/rsbin1178/glamour/v2 v2.0.1-0.20261029053231-e205299b3f3a

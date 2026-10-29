@@ -55,7 +55,8 @@ func TestLargeLiveTailIsHandedToTheBackgroundRenderer(t *testing.T) {
 
 	miss, ok := renderer.takeLiveMiss()
 	require.True(t, ok)
-	assert.Equal(t, grown, miss.content)
+	assert.Equal(t, liveMarkdownContent(grown), miss.content,
+		"a live frame renders a large fence without its chroma lexer")
 	_, stale := renderer.liveCatchUpDelay()
 	assert.True(t, stale, "a served frame schedules a catch-up")
 
@@ -257,7 +258,8 @@ func TestLargeStructuralChangeDefersUntilExactBackgroundResult(t *testing.T) {
 	assert.Equal(t, first.all(), second.all())
 	miss, ok := renderer.takeLiveMiss()
 	require.True(t, ok)
-	assert.Equal(t, grown, miss.content)
+	assert.Equal(t, liveMarkdownContent(grown), miss.content,
+		"a live frame renders a large fence without its chroma lexer")
 
 	worker := newLiveRenderWorker()
 	t.Cleanup(worker.shutdown)

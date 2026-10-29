@@ -526,6 +526,118 @@ func markdownFenceCloses(line, fence string) bool {
 	return len(line) >= len(fence) && strings.Trim(line, string(fence[0])) == ""
 }
 
+// liveFencePlainBytes is how large a fenced code block has to be before a live
+// frame renders it unlabelled.
+//
+// Highlighting a fence runs a real chroma lexer over the whole block. That
+// lexer is a backtracking regex engine whose cost grows with the block, and it
+// was the single largest consumer of CPU while a long code answer streamed
+// (measured on a 128 KiB open fence: 52% of the process against 21% for
+// glamour's wrapping writer). Below this size a frame pays little enough to keep
+// the colours on every frame; above it the frame draws the same rows without
+// them, and the settled block renders the labelled source once, cached.
+const liveFencePlainBytes = 8 << 10
+
+// liveMarkdownContent prepares a live body for rendering: every fenced code
+// block at least liveFencePlainBytes long loses the info string that selects its
+// chroma lexer.
+//
+// The fence keeps its marker, so the block structure, the indentation, the
+// padding and the row count are unchanged — only the token colours differ, and
+// those return when the block settles. The transform is deterministic over the
+// content it is given, so frame reuse, the live-frame cache and the background
+// renderer all agree on what one version is.
+func liveMarkdownContent(content string) string {
+	if !strings.Contains(content, "```") && !strings.Contains(content, "~~~") {
+		return content
+	}
+
+	strips := liveFenceStrips(content)
+	if len(strips) == 0 {
+		return content
+	}
+
+	var body strings.Builder
+
+	body.Grow(len(content))
+
+	last := 0
+
+	for _, strip := range strips {
+		body.WriteString(content[last:strip.markerEnd])
+		last = strip.lineEnd
+	}
+
+	body.WriteString(content[last:])
+
+	return body.String()
+}
+
+// liveFenceStrip is one opener line whose info string a live frame drops,
+// recorded as the offset just past the fence marker and the end of the line.
+type liveFenceStrip struct {
+	markerEnd int
+	lineEnd   int
+}
+
+// liveFenceStrips returns the opener line of every large labelled fence in
+// content, in document order.
+func liveFenceStrips(content string) []liveFenceStrip {
+	var (
+		strips    []liveFenceStrip
+		fence     string
+		codeStart int
+		markerEnd int
+		lineEnd   int
+		labelled  bool
+	)
+
+	drop := func(end int) {
+		if labelled && end-codeStart >= liveFencePlainBytes {
+			strips = append(strips, liveFenceStrip{markerEnd: markerEnd, lineEnd: lineEnd})
+		}
+
+		labelled = false
+	}
+
+	for offset := 0; offset <= len(content); {
+		line, end, next := markdownLine(content, offset)
+
+		if fence == "" {
+			if marker, opens := markdownFenceOpens(line); opens {
+				fence = marker
+				codeStart, lineEnd = next, end
+				markerEnd = offset + markdownFenceMarkerWidth(line, marker)
+				labelled = strings.TrimSpace(line[markdownFenceMarkerWidth(line, marker):]) != ""
+			}
+
+			offset = next
+
+			continue
+		}
+
+		if markdownFenceCloses(line, fence) {
+			drop(end)
+
+			fence = ""
+		}
+
+		offset = next
+	}
+
+	if fence != "" {
+		drop(len(content))
+	}
+
+	return strips
+}
+
+// markdownFenceMarkerWidth returns the offset just past a fence's marker run,
+// including the indentation the marker may carry.
+func markdownFenceMarkerWidth(line, marker string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t")) + len(marker)
+}
+
 // markdownThematicBreak reports whether a line is a horizontal rule.
 func markdownThematicBreak(line string) bool {
 	line = strings.ReplaceAll(line, " ", "")
