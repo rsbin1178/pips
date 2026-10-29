@@ -126,9 +126,13 @@ func TestFrameHitMapMatchesThePaintedFrame(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t,
-		strings.TrimRight(withoutIndicator(windowRows[0]), " "),
-		strings.TrimRight(withoutIndicator(frameRows[0]), " "),
+	// The text column is what the map promises: the rail owns the outermost
+	// column, so the frame is cut to the text column before the indicator's cell
+	// is removed from both sides of the comparison.
+	textColumn := func(row string) string {
+		return strings.TrimRight(withoutIndicator(ansi.Truncate(row, model.width-1, "")), " ")
+	}
+	assert.Equal(t, textColumn(windowRows[0]), textColumn(frameRows[0]),
 		"the band is painted at the top of the frame")
 
 	first, ok := model.entryRowAt(0)

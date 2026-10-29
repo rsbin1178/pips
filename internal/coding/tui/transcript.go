@@ -129,6 +129,15 @@ type transcriptStore struct {
 	// so a test can tell a windowed frame from a whole-document one.
 	materializations int
 	rowsMaterialized int
+	// userTurnStarts caches the region row each user turn begins at,
+	// userTurnRevision is the revision it was computed for, and userTurnScans
+	// counts rebuilds since the last reset, so a test can assert that a frame
+	// which changed nothing re-reads no record — the same way renders and
+	// evictions report the work a frame did.
+	userTurnStarts   []int
+	userTurnRevision uint64
+	userTurnsCached  bool
+	userTurnScans    int
 }
 
 // transcriptEntry is one projected entry offered to the store. A record that is
@@ -147,6 +156,7 @@ func (s *transcriptStore) resetRenders() {
 	s.evictions = 0
 	s.materializations = 0
 	s.rowsMaterialized = 0
+	s.userTurnScans = 0
 }
 
 // keyMatches reports whether the resident rows are still valid for this
@@ -382,11 +392,42 @@ func (s *transcriptStore) rowOfPreviousUserTurn(before int) (int, bool) {
 	return 0, false
 }
 
+// userTurns returns the region row each user turn begins at, ascending. It is
+// the rail's whole model of the conversation, so it is cached against the
+// revision: a frame in which nothing changed re-uses the list rather than
+// walking the records. The slice belongs to the store and is rebuilt in place
+// when the revision changes, so a caller must not hold it across frames.
+func (s *transcriptStore) userTurns() []int {
+	s.reindex()
+
+	if s.userTurnsCached && s.userTurnRevision == s.revision {
+		return s.userTurnStarts
+	}
+
+	s.userTurnStarts = s.userTurnStarts[:0]
+	for index := range s.records {
+		if s.records[index].block.kind == blockUser {
+			s.userTurnStarts = append(s.userTurnStarts, s.starts[index])
+		}
+	}
+
+	s.userTurnRevision = s.revision
+	s.userTurnsCached = true
+	s.userTurnScans++
+
+	return s.userTurnStarts
+}
+
 // updateRevision fingerprints the record set, its geometry and the live
 // record's height, so a search scan can skip a frame in which nothing it reads
 // changed. It deliberately does not read the live record's text: only a search
 // looks at that, and hashing a growing thought on every frame is what made the
 // frame cost scale with the stream. [fingerprint] adds the text when asked.
+//
+// The block kind is part of the fingerprint because the rail's user turn cache
+// keys on the same value: two records of equal height can trade places across a
+// rebuild, and a cached turn list that did not see the change would point at the
+// wrong rows.
 func (s *transcriptStore) updateRevision() {
 	hash := uint64(14695981039346656037)
 	mix := func(value uint64) {
@@ -409,6 +450,15 @@ func (s *transcriptStore) updateRevision() {
 
 	for index := range s.records {
 		mix(uint64(s.records[index].lines)) //nolint:gosec // lines is a row count; it is never negative.
+		// The block kind is what tells a user turn from its answer. Two records
+		// with the same height can trade places across a rebuild, and the rail's
+		// cached turn list has to see that as a change.
+		kind := uint64(0)
+		if block := s.records[index].block; block != nil {
+			kind = uint64(block.kind)
+		}
+
+		mix(kind)
 	}
 
 	s.revision = hash

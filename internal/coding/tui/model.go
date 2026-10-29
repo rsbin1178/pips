@@ -114,6 +114,8 @@ type Model struct {
 	themeDiagnostics     []themeDiagnostic
 	transcript           transcriptStore
 	transcriptScroll     scrollRegion
+	// turnRail is the turn rail's window across frames; see turn_rail.go.
+	turnRail turnRailState
 	// childScroll is the read-only child page's reading position. It is the shared
 	// region type, so the page opens on its newest row and follows appended content
 	// exactly as the conversation does.
@@ -2528,7 +2530,10 @@ func (m *Model) transcriptWindow(height int) string {
 		visible = padRows(visible, height)
 	}
 
-	return visible
+	// The rail fills the margin the band already leaves blank. It is drawn on the
+	// composed band, after the selection and search highlights, so a mark is never
+	// painted over and the text column keeps every cell it had.
+	return m.drawTurnRail(visible)
 }
 
 // ownsScreen reports whether the frame is drawn in the alternate buffer, where
