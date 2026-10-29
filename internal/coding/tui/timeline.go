@@ -622,9 +622,7 @@ func projectVolatileBlocks(state coding.State, tail []*toolActivity) []timelineB
 	}
 
 	for _, diagnostic := range state.Diagnostics {
-		// Working outside a Git repository is a supported setup, so the TUI does
-		// not report the change summary as unavailable.
-		if nonRepositoryDiagnostic(diagnostic) {
+		if !conversationDiagnosticVisible(diagnostic) {
 			continue
 		}
 		blocks = append(blocks, timelineBlock{
@@ -814,9 +812,17 @@ func nonRepositoryDiagnostic(diagnostic coding.IntegrationDiagnostic) bool {
 		diagnostic.Code == diagnosticCodeNotRepository
 }
 
+func conversationDiagnosticVisible(diagnostic coding.IntegrationDiagnostic) bool {
+	if nonRepositoryDiagnostic(diagnostic) {
+		return false
+	}
+
+	// Retry progress belongs to the activity row; details remain in /status.
+	return diagnostic.Component != "model" || diagnostic.Response == nil || diagnostic.Response.Attempt <= 0
+}
+
 // visibleDiagnostics returns the integration diagnostics the TUI lists in its
-// status view. The transcript projection applies the same filter inline, so a
-// suppressed diagnostic cannot reappear on another surface.
+// status view, including response retry details omitted from the conversation.
 func visibleDiagnostics(diagnostics []coding.IntegrationDiagnostic) []coding.IntegrationDiagnostic {
 	visible := make([]coding.IntegrationDiagnostic, 0, len(diagnostics))
 	for _, diagnostic := range diagnostics {
