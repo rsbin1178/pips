@@ -42,7 +42,13 @@ const (
 	keyHome       = "home"
 	keyEnd        = "end"
 	keyBackspace  = "backspace"
-	appTitle      = "Pips"
+	// The rail's stepping keys. The brackets are characters, so they yield to a
+	// draft; the Alt arrows are chords and step whichever draft is open.
+	keyPreviousTurn = "["
+	keyNextTurn     = "]"
+	keyAltUp        = "alt+up"
+	keyAltDown      = "alt+down"
+	appTitle        = "Pips"
 	// labelFailed and labelJustNow are shared display words; keeping them as
 	// constants keeps wording identical across the routes that show them.
 	labelFailed  = "Failed"

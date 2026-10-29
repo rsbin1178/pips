@@ -258,11 +258,40 @@ func TestTurnRailWindowKeepsTheActiveMarkInItsComfortBand(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := turnRailWindow(test.start, test.active, test.userTurns, test.capacity)
+			got := turnRailWindowWithin(
+				test.start, test.active, test.userTurns, test.capacity, turnRailComfort,
+			)
 			assert.Equal(t, test.want, got)
 			assert.Equal(t, got,
-				turnRailWindow(got, test.active, test.userTurns, test.capacity),
+				turnRailWindowWithin(got, test.active, test.userTurns, test.capacity, turnRailComfort),
 				"a settled window must not move on the next frame")
+		})
+	}
+}
+
+func TestTurnRailWindowKeepsAFocusedMarkMerelyVisible(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		start     int
+		active    int
+		userTurns int
+		capacity  int
+		want      int
+	}{
+		{name: "a mark inside the window keeps it", start: 4, active: 5, userTurns: 12, capacity: 6, want: 4},
+		{name: "a mark at the last slot keeps it", start: 4, active: 9, userTurns: 12, capacity: 6, want: 4},
+		{name: "a mark past the window brings it along", start: 4, active: 10, userTurns: 12, capacity: 6, want: 5},
+		{name: "a mark before the window brings it back", start: 4, active: 3, userTurns: 12, capacity: 6, want: 3},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := turnRailWindowWithin(test.start, test.active, test.userTurns, test.capacity, 0)
+			assert.Equal(t, test.want, got)
 		})
 	}
 }
@@ -400,13 +429,13 @@ func TestTurnRailDimsTheScrollableEnd(t *testing.T) {
 	t.Parallel()
 
 	model := turnRailModel(t, 30, 80, 30, false)
-	starts := model.transcript.userTurns()
+	turns := model.transcript.userTurns()
 	capacity := railCapacity(model)
 	require.Positive(t, capacity)
 	active := capacity + 2
-	require.Greater(t, len(starts), active+2, "the fixture needs user turns below the active one")
+	require.Greater(t, len(turns), active+2, "the fixture needs user turns below the active one")
 
-	model.transcriptScroll.scrollTo(starts[active])
+	model.transcriptScroll.scrollTo(turns[active].start)
 
 	cells := railCells(model)
 	require.Positive(t, model.turnRail.start, "the window had to scroll to follow the active mark")
@@ -475,7 +504,7 @@ func TestTurnRailReusesTheUserTurnListAcrossFrames(t *testing.T) {
 	model.rerenderTranscript(false)
 	_ = model.View()
 
-	assert.Zero(t, model.transcript.userTurnScans,
+	assert.Zero(t, model.transcript.turnRebuilds,
 		"a frame whose records did not change re-uses the cached user turn list")
 	assert.NotEmpty(t, markedRows(model), "the rail is still painted")
 }
@@ -501,7 +530,7 @@ func TestTurnRailClickJumpsToTheUserTurn(t *testing.T) {
 	t.Parallel()
 
 	model := turnRailModel(t, 30, 80, 30, true)
-	starts := model.transcript.userTurns()
+	turns := model.transcript.userTurns()
 	capacity := railCapacity(model)
 	require.Greater(t, capacity, 2, "the fixture needs a scrolled rail window")
 
@@ -510,11 +539,11 @@ func TestTurnRailClickJumpsToTheUserTurn(t *testing.T) {
 
 	// Following the tail shows the last window, so the first visible mark is the
 	// window's first user turn.
-	clicked := len(starts) - capacity
+	clicked := len(turns) - capacity
 
 	require.NotNil(t, railClick(model, rows[0]))
 
-	assert.Equal(t, starts[clicked], model.transcriptScroll.offset,
+	assert.Equal(t, turns[clicked].start, model.transcriptScroll.offset,
 		"one click puts that user turn's first row at the top")
 	assert.False(t, model.transcriptScroll.follow, "a jump leaves the tail")
 
@@ -532,7 +561,7 @@ func TestTurnRailClickLandsEachEndInOneClick(t *testing.T) {
 	t.Parallel()
 
 	model := turnRailModel(t, 30, 80, 30, true)
-	starts := model.transcript.userTurns()
+	turns := model.transcript.userTurns()
 	capacity := railCapacity(model)
 	rows := markedRows(model)
 	require.Greater(t, len(rows), 2)
@@ -540,10 +569,10 @@ func TestTurnRailClickLandsEachEndInOneClick(t *testing.T) {
 	// Following the tail already puts the newest turn's first row at the top, so
 	// that click cannot move the viewport. What it must do is answer as the rail —
 	// not as a selection — and leave the newest turn current.
-	newest := len(starts) - 1
+	newest := len(turns) - 1
 	require.NotNil(t, railClick(model, rows[len(rows)-1]))
 	assert.False(t, model.selection.visible, "the rail answered the click, not the transcript")
-	assert.Equal(t, min(starts[newest], model.transcriptScroll.maxOffset()),
+	assert.Equal(t, min(turns[newest].start, model.transcriptScroll.maxOffset()),
 		model.transcriptScroll.offset, "the newest mark lands on the newest user turn")
 	assert.True(t, model.transcriptScroll.atBottom(),
 		"and the viewport is at the tail, where that turn is visible")
@@ -558,7 +587,7 @@ func TestTurnRailClickLandsEachEndInOneClick(t *testing.T) {
 	rows = markedRows(model)
 	require.Len(t, rows, capacity)
 	require.NotNil(t, railClick(model, rows[0]))
-	assert.Equal(t, starts[len(starts)-capacity], model.transcriptScroll.offset,
+	assert.Equal(t, turns[len(turns)-capacity].start, model.transcriptScroll.offset,
 		"the first visible mark lands on its own user turn")
 	assert.False(t, model.transcriptScroll.follow, "and the jump leaves the tail")
 }
@@ -568,16 +597,16 @@ func TestTurnRailHitMapMatchesThePaintedMarks(t *testing.T) {
 
 	model := turnRailModel(t, 30, 80, 30, true)
 	capacity := railCapacity(model)
-	starts := model.transcript.userTurns()
+	turns := model.transcript.userTurns()
 	rows := markedRows(model)
 	require.Len(t, rows, capacity)
 
 	for slot, row := range rows {
 		mark, ok := model.frameHit.turnRail.hitAt(row)
 		require.True(t, ok, "row %d holds a mark", row)
-		assert.Equal(t, len(starts)-capacity+slot, mark.turn,
+		assert.Equal(t, len(turns)-capacity+slot, mark.turn,
 			"mark %d stands for its own user turn", slot)
-		assert.Equal(t, starts[mark.turn], mark.startRow,
+		assert.Equal(t, turns[mark.turn].start, mark.startRow,
 			"and carries that turn's first row as the frame painted it")
 	}
 
@@ -683,4 +712,244 @@ func TestTurnRailClickNeedsAPaintedRail(t *testing.T) {
 		assert.True(t, model.selection.visible,
 			"the margin is the transcript's again, so the click selects")
 	})
+}
+
+// frameRowIndex reports the frame row containing a text, or -1.
+func frameRowIndex(model *Model, text string) int {
+	rows := strings.Split(ansi.Strip(model.View().Content), "\n")
+	for index, row := range rows {
+		if strings.Contains(row, text) {
+			return index
+		}
+	}
+
+	return -1
+}
+
+// findFrameRow returns the first frame row containing a text, as the reader sees
+// it.
+func findFrameRow(model *Model, text string) (string, bool) {
+	for row := range strings.SplitSeq(ansi.Strip(model.View().Content), "\n") {
+		if strings.Contains(row, text) {
+			return row, true
+		}
+	}
+
+	return "", false
+}
+
+func TestTurnRailStepKeysWalkTheUserTurns(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 12, 80, 30, true)
+	turns := model.transcript.userTurns()
+	model.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+
+	model.Update(tea.KeyPressMsg{Text: "]"})
+	assert.Equal(t, 1, model.turnRail.focus.turn, "the next turn is focused")
+	assert.Equal(t, turns[1].start, model.transcriptScroll.offset,
+		"and its first row comes to the top")
+
+	model.Update(tea.KeyPressMsg{Text: "]"})
+	assert.Equal(t, 2, model.turnRail.focus.turn)
+	assert.Equal(t, turns[2].start, model.transcriptScroll.offset)
+
+	model.Update(tea.KeyPressMsg{Text: "["})
+	assert.Equal(t, 1, model.turnRail.focus.turn, "the previous key walks back")
+	assert.Equal(t, turns[1].start, model.transcriptScroll.offset)
+
+	assert.Empty(t, model.composer.Value(), "the step never typed into the draft")
+	assert.True(t, model.composer.Focused(), "and the composer keeps the caret")
+}
+
+func TestTurnRailStepKeysTypeIntoADraft(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 12, 80, 30, true)
+	before := model.transcriptScroll.offset
+	model.composer.InsertString("draft")
+
+	model.Update(tea.KeyPressMsg{Text: "["})
+	model.Update(tea.KeyPressMsg{Text: "]"})
+
+	assert.Equal(t, "draft[]", model.composer.Value())
+	assert.Equal(t, before, model.transcriptScroll.offset, "the keys belonged to the draft")
+	assert.False(t, model.turnRail.focus.on)
+}
+
+func TestTurnRailStepKeysClampAtTheEnds(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 12, 80, 30, true)
+	turns := model.transcript.userTurns()
+
+	model.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+
+	for range len(turns) + 2 {
+		model.Update(tea.KeyPressMsg{Text: "["})
+	}
+
+	assert.Equal(t, 0, model.turnRail.focus.turn, "stepping past the first turn stops there")
+	assert.Equal(t, turns[0].start, model.transcriptScroll.offset)
+
+	for range len(turns) + 2 {
+		model.Update(tea.KeyPressMsg{Text: "]"})
+	}
+
+	assert.Equal(t, len(turns)-1, model.turnRail.focus.turn, "stepping past the last turn stops there")
+	assert.True(t, model.transcriptScroll.atBottom())
+}
+
+func TestTurnRailAltKeysStep(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 12, 80, 30, true)
+	turns := model.transcript.userTurns()
+	last := len(turns) - 1
+
+	model.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt})
+	assert.Equal(t, last-1, model.turnRail.focus.turn, "alt+up steps back")
+	assert.Equal(t, min(turns[last-1].start, model.transcriptScroll.maxOffset()),
+		model.transcriptScroll.offset, "and takes the viewport as far up as it goes")
+
+	model.Update(tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModAlt})
+	assert.Equal(t, last, model.turnRail.focus.turn, "alt+down steps on")
+}
+
+func TestTurnRailPreviewNamesTheFocusedTurn(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 12, 80, 30, true)
+	model.Update(tea.KeyPressMsg{Text: "["})
+	_ = model.View()
+
+	assert.Contains(t, ansi.Strip(model.View().Content), "turn 11/12 · TURN-11")
+
+	// Scrolling some other way ends the focus, so the band stops naming a turn the
+	// reader has moved away from.
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
+	_ = model.View()
+
+	assert.False(t, model.turnRail.focus.on)
+	assert.NotContains(t, ansi.Strip(model.View().Content), "turn 11/12")
+}
+
+func TestTurnRailBandKeepsTheScrollHintWithoutFocus(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 12, 80, 30, true)
+	model.Update(tea.KeyPressMsg{Text: "["})
+	require.True(t, model.turnRail.focus.on)
+
+	// A scroll key that is not a rail step ends the focus; the band is the scroll
+	// hint again, not a preview.
+	model.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	_ = model.View()
+
+	assert.False(t, model.turnRail.focus.on)
+	assert.NotContains(t, ansi.Strip(model.View().Content), "turn ")
+	_, hinted := findFrameRow(model, bandScrollIcon)
+	assert.True(t, hinted, "the band is the return-to-newest hint again")
+}
+
+func TestTurnRailPreviewSharesTheBandWithTheCopyNotice(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 12, 60, 30, true)
+	model.Update(tea.KeyPressMsg{Text: "["})
+	model.copiedNotice = "copied 3 lines"
+	_ = model.View()
+
+	row, ok := findFrameRow(model, "turn 11/12")
+	require.True(t, ok, "the band names the focused turn")
+	assert.Contains(t, row, "turn 11/12", "the preview keeps the left of the row")
+	assert.Contains(t, row, "copied 3 lines", "the confirmation keeps the right edge")
+}
+
+func TestTurnRailBracketsTypeWhenThereIsNoRail(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 1, 80, 30, true)
+	require.Zero(t, railMarks(model), "a single prompt draws no rail")
+
+	model.Update(tea.KeyPressMsg{Text: "["})
+	model.Update(tea.KeyPressMsg{Text: "]"})
+
+	assert.Equal(t, "[]", model.composer.Value(),
+		"with nothing to step through, a bracket is an ordinary character")
+	assert.False(t, model.turnRail.focus.on)
+}
+
+func TestTurnRailPreviewOwnsTheBandRow(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 12, 80, 30, true)
+	model.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	model.Update(tea.KeyPressMsg{Text: "]"})
+	_ = model.View()
+
+	require.True(t, model.turnRail.focus.on)
+	require.NotEmpty(t, model.bandScrollHint(), "the fixture is scrolled away from the tail")
+	assert.Equal(t, -1, model.frameHit.band,
+		"the frame drew no arrow, so the band affords no return click")
+
+	row := frameRowIndex(model, "turn 2/12")
+	require.GreaterOrEqual(t, row, 0, "the band names the focused turn")
+
+	before := model.transcriptScroll.offset
+	assert.Nil(t, model.handleMouse(tea.MouseClickMsg{X: 10, Y: row, Button: tea.MouseLeft}))
+	assert.Equal(t, before, model.transcriptScroll.offset, "the click did not return to the newest rows")
+}
+
+func TestTurnRailCopyNoticeWinsATightBand(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 12, composerBoxMinWidth, 30, true)
+	model.Update(tea.KeyPressMsg{Text: "["})
+	model.copiedNotice = "copied 3 lines"
+	_ = model.View()
+
+	row, ok := findFrameRow(model, "copied 3 lines")
+	require.True(t, ok, "the confirmation keeps the row")
+	assert.NotContains(t, row, "turn 11/12", "the preview yields the cells it cannot have")
+}
+
+func TestTurnRailFocusHoldsTheWindow(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 30, 80, 30, true)
+	model.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	_ = model.View()
+
+	capacity := railCapacity(model)
+	require.Greater(t, capacity, 2)
+
+	start := model.turnRail.start
+	require.Zero(t, start, "the fixture's window is at the beginning")
+
+	// Walk the focus to the window's last slot. The ordinary window keeps two
+	// marks of margin and would slide here; a focus session must not.
+	for range capacity - 1 {
+		model.Update(tea.KeyPressMsg{Text: "]"})
+	}
+
+	_ = model.View()
+	assert.Equal(t, start, model.turnRail.start,
+		"a focused step must not slide the window under the reader")
+
+	focused := model.turnRail.focus.turn
+	row, ok := markRowForTurn(model, focused)
+	require.True(t, ok, "the focused turn has a mark in the window")
+	assert.Equal(t, turnRailActiveNoColor, railGlyphs(model)[row],
+		"and that mark is the one the rail calls current")
+}
+
+func TestTurnRailKeysAreInTheHelpPanel(t *testing.T) {
+	t.Parallel()
+
+	model := turnRailModel(t, 12, 80, 30, true)
+	page := pageLinesText(model.helpRoutePageLines(helpTabShortcuts))
+
+	assert.Contains(t, page, "[ / ]")
+	assert.Contains(t, page, "alt+up")
 }

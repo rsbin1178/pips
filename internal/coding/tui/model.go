@@ -1446,6 +1446,9 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if command, handled := m.updateTranscriptScrollKey(message); handled {
 		return m, command
 	}
+	if command, handled := m.updateTurnRailKey(message); handled {
+		return m, command
+	}
 	if m.worktreeLoading && (key == keyCtrlC || key == keyEscape) {
 		m.cancelWorkspaceStatus()
 
@@ -1555,6 +1558,11 @@ func (m *Model) readyView() tea.View {
 	if m.route.kind != routeNone && !m.teamRouteIsInline() {
 		return m.routeView()
 	}
+
+	// A focused rail mark is only current while the viewport still opens on its
+	// turn. Settling it before the footer is composed keeps the band from
+	// describing a position the reader has already scrolled away from.
+	m.settleTurnRailFocus()
 
 	caps := m.layout()
 	footer := make([]string, 0, 5)
@@ -1690,10 +1698,12 @@ func (m *Model) readyView() tea.View {
 	promptTop := frameRowOf(parts, promptIndex, dropped)
 	promptHit.place(promptTop, timelineInset(m.width))
 	m.frameHit = frameHitMap{
-		painted:       m.sizeReady,
-		transcript:    transcriptVisible,
-		topDropped:    min(dropped, transcriptRows),
-		band:          m.bandRowOf(parts, bandIndex, dropped, bandHint != ""),
+		painted:    m.sizeReady,
+		transcript: transcriptVisible,
+		topDropped: min(dropped, transcriptRows),
+		// The band affords a return click only when the frame drew its arrow: a
+		// focused preview leads the row instead, and there is nothing to click.
+		band:          m.bandRowOf(parts, bandIndex, dropped, bandHint != "" && m.turnRailPreview() == ""),
 		turnIndicator: indicator,
 		turnRail:      railHits,
 		question:      promptHit,
@@ -2501,6 +2511,10 @@ func (m *Model) updateTranscriptScrollKey(message tea.KeyPressMsg) (tea.Cmd, boo
 		return nil, false
 	}
 
+	// An ordinary scroll ends a rail focus: the reader moved the window themselves,
+	// so the mark a step placed is no longer where they are.
+	m.endTurnRailFocus()
+
 	// Reaching the top asks for the page above it. The request is bounded and
 	// idempotent, so a reader who keeps scrolling simply gets more history.
 	if atTop && region.offset == 0 {
@@ -2926,6 +2940,7 @@ type scrollbackWriteDoneMsg struct {
 }
 
 func (m *Model) submit(actionCtx actionContext) tea.Cmd {
+	m.endTurnRailFocus()
 	snapshot := m.composer.Snapshot()
 	switch actionCtx {
 	case contextIdle:

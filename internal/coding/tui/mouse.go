@@ -136,6 +136,7 @@ func (m *Model) scrollViewport(message tea.MouseWheelMsg) tea.Cmd {
 	}
 
 	m.transcriptScroll.scrollBy(lines)
+	m.endTurnRailFocus()
 
 	return nil
 }

@@ -109,6 +109,7 @@ func (m *Model) bandMouse(message tea.MouseMsg) (tea.Cmd, bool) {
 	}
 
 	m.transcriptScroll.gotoBottom()
+	m.endTurnRailFocus()
 
 	return redrawFrame(), true
 }

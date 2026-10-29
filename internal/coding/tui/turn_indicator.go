@@ -119,5 +119,7 @@ func (m *Model) jumpToPreviousTurn() tea.Cmd {
 		row = 0
 	}
 
+	m.endTurnRailFocus()
+
 	return m.scrollToRow(row)
 }

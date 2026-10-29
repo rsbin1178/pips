@@ -74,6 +74,8 @@ func (m *Model) resetScrollback() {
 	// identities can collide with different content after a compaction or a
 	// session switch, so the next frame must render the replacement from scratch.
 	m.transcript.reset()
+	// The rail's focus names a turn of the projection being replaced.
+	m.endTurnRailFocus()
 }
 
 func (m *Model) commitStableTimeline() tea.Cmd {

@@ -236,6 +236,8 @@ func (m *Model) helpShortcutLines() []statusPageLine {
 		statusBlank(),
 		statusHeading("Reading the conversation"),
 		statusField("pgup / pgdown", "scroll the conversation"),
+		statusField("[ / ]", "step to the previous / next user turn"),
+		statusField("alt+up / alt+down", "the same step where the terminal sends it"),
 		statusField("ctrl+f", "search the conversation"),
 		statusField("ctrl+o", "hand the transcript to the terminal"),
 		statusField("history", m.conversationOwnerHint()),

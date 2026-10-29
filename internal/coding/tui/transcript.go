@@ -58,6 +58,9 @@ type transcriptRecord struct {
 	// tool is the projection this record renders when it is a Tool entry, kept so
 	// an addressed interaction can open that exact call's detail.
 	tool *timelineBlock
+	// prompt is the first line of a user turn's text, extracted once when the
+	// record is rendered so the rail's preview never re-reads a prompt.
+	prompt string
 }
 
 func (r *transcriptRecord) height() int {
@@ -130,15 +133,14 @@ type transcriptStore struct {
 	// so a test can tell a windowed frame from a whole-document one.
 	materializations int
 	rowsMaterialized int
-	// userTurnStarts caches the region row each user turn begins at,
-	// userTurnRevision is the revision it was computed for, and userTurnScans
-	// counts rebuilds since the last reset, so a test can assert that a frame
-	// which changed nothing re-reads no record — the same way renders and
-	// evictions report the work a frame did.
-	userTurnStarts   []int
-	userTurnRevision uint64
-	userTurnsCached  bool
-	userTurnScans    int
+	// turns caches each prompt's start row and preview text, turnsRevision is the
+	// revision it was computed for, and turnRebuilds counts rebuilds since the last
+	// reset, so a test can assert that a frame which changed nothing re-reads no
+	// record — the same way renders and evictions report the work a frame did.
+	turns         []userTurn
+	turnsRevision uint64
+	turnsCached   bool
+	turnRebuilds  int
 }
 
 // transcriptEntry is one projected entry offered to the store. A record that is
@@ -157,7 +159,7 @@ func (s *transcriptStore) resetRenders() {
 	s.evictions = 0
 	s.materializations = 0
 	s.rowsMaterialized = 0
-	s.userTurnScans = 0
+	s.turnRebuilds = 0
 }
 
 // keyMatches reports whether the resident rows are still valid for this
@@ -247,6 +249,9 @@ func (s *transcriptStore) newRecord(id string, entry transcriptEntry) transcript
 	if (entry.block.kind == blockTool || entry.block.kind == blockSubagent ||
 		entry.block.kind == blockQuestion) && len(entry.block.tools) > 0 {
 		record.tool = entry.block
+	}
+	if entry.block.kind == blockUser {
+		record.prompt = promptLine(entry.block.body)
 	}
 
 	s.materialize(&record)
@@ -393,30 +398,51 @@ func (s *transcriptStore) rowOfPreviousUserTurn(before int) (int, bool) {
 	return 0, false
 }
 
-// userTurns returns the region row each user turn begins at, ascending. It is
-// the rail's whole model of the conversation, so it is cached against the
-// revision: a frame in which nothing changed re-uses the list rather than
-// walking the records. The slice belongs to the store and is rebuilt in place
-// when the revision changes, so a caller must not hold it across frames.
-func (s *transcriptStore) userTurns() []int {
+// userTurn is one prompt in the store: the region row it starts at, and the first
+// line of its text, which is what the rail's preview calls it.
+type userTurn struct {
+	start  int
+	prompt string
+}
+
+// userTurns returns every user turn, ascending. It is the rail's whole model of
+// the conversation, so it is cached against the revision: a frame in which
+// nothing changed re-uses the list rather than walking the records. The slice
+// belongs to the store and is rebuilt in place when the revision changes, so a
+// caller must not hold it across frames.
+func (s *transcriptStore) userTurns() []userTurn {
 	s.reindex()
 
-	if s.userTurnsCached && s.userTurnRevision == s.revision {
-		return s.userTurnStarts
+	if s.turnsCached && s.turnsRevision == s.revision {
+		return s.turns
 	}
 
-	s.userTurnStarts = s.userTurnStarts[:0]
+	s.turns = s.turns[:0]
 	for index := range s.records {
 		if s.records[index].block.kind == blockUser {
-			s.userTurnStarts = append(s.userTurnStarts, s.starts[index])
+			s.turns = append(s.turns, userTurn{start: s.starts[index], prompt: s.records[index].prompt})
 		}
 	}
 
-	s.userTurnRevision = s.revision
-	s.userTurnsCached = true
-	s.userTurnScans++
+	s.turnsRevision = s.revision
+	s.turnsCached = true
+	s.turnRebuilds++
 
-	return s.userTurnStarts
+	return s.turns
+}
+
+// promptLine returns the first non-empty line of a prompt as one row of plain
+// text: the band shows it on a single row, so styling, control characters and
+// tabs have no place in it.
+func promptLine(body string) string {
+	for line := range strings.SplitSeq(body, "\n") {
+		line = strings.TrimSpace(strings.ReplaceAll(sanitizeInspectionText(line), "\t", " "))
+		if line != "" {
+			return line
+		}
+	}
+
+	return ""
 }
 
 // updateRevision fingerprints the record set, its geometry and the live
