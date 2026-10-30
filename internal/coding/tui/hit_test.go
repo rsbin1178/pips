@@ -109,28 +109,14 @@ func TestFrameHitMapMatchesThePaintedFrame(t *testing.T) {
 		"the band fills its allocation when the store is longer")
 
 	// The band is the top of the frame, so the first painted row is the window's
-	// first row. The turn indicator is the one thing the frame draws over that row,
-	// so its span is checked separately and the rest of the row must match.
+	// first row. The rail owns the outermost column, so the comparison stops at the
+	// text column the transcript rows keep.
 	frameRows := strings.Split(view.Content, "\n")
 	windowRows := strings.Split(model.transcriptScroll.visible(), "\n")
 	require.NotEmpty(t, windowRows)
 
-	withoutIndicator := func(row string) string { return row }
-	if model.frameHit.turnIndicator {
-		_, left, right, ok := model.turnIndicator()
-		require.True(t, ok)
-		assert.Equal(t, turnIndicatorIcon, ansi.Strip(ansi.Cut(frameRows[0], left, right)),
-			"the frame draws the indicator in the transcript's first row")
-		withoutIndicator = func(row string) string {
-			return ansi.Truncate(row, left, "") + ansi.TruncateLeft(row, right, "")
-		}
-	}
-
-	// The text column is what the map promises: the rail owns the outermost
-	// column, so the frame is cut to the text column before the indicator's cell
-	// is removed from both sides of the comparison.
 	textColumn := func(row string) string {
-		return strings.TrimRight(withoutIndicator(ansi.Truncate(row, model.width-1, "")), " ")
+		return strings.TrimRight(ansi.Truncate(row, model.railColumn(), ""), " ")
 	}
 	assert.Equal(t, textColumn(windowRows[0]), textColumn(frameRows[0]),
 		"the band is painted at the top of the frame")

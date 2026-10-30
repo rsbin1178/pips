@@ -23,10 +23,6 @@ type frameHitMap struct {
 	// frame drew none. A left click there restores the newest transcript rows,
 	// which is what the arrow the band draws promises.
 	band int
-	// turnIndicator is true when this frame painted the up indicator in its first
-	// row, so a click there can be answered without re-deciding the question
-	// against a scroll position the reader has already left.
-	turnIndicator bool
 	// turnRail is the rail's pointer map: the marks this frame painted, in frame rows.
 	// It is empty unless the frame drew a rail, so a click on a margin the frame
 	// left blank stays the transcript's.
@@ -152,15 +148,10 @@ func (m *Model) handleMouse(message tea.MouseMsg) tea.Cmd {
 		return command
 	}
 
-	// The turn indicator, the turn rail and the reserved band are pointer targets
-	// of their own and need no hit test: the frame that painted each one recorded
-	// where. They are answered before the selection gate because none of them is a
-	// selection gesture — the gesture that owns the transcript would otherwise
-	// drop a click on them.
-	if command, handled := m.turnIndicatorMouse(message); handled {
-		return command
-	}
-
+	// The turn rail and the reserved band are pointer targets of their own and need
+	// no hit test: the frame that painted each one recorded where. They are
+	// answered before the selection gate because neither is a selection gesture —
+	// the gesture that owns the transcript would otherwise drop a click on them.
 	if command, handled := m.turnRailMouse(message); handled {
 		return command
 	}

@@ -135,12 +135,6 @@ func assertBandUnpainted(t *testing.T, model *Model) {
 	require.LessOrEqual(t, len(rows), band)
 
 	for index, row := range rows {
-		if index == 0 && model.frameHit.turnIndicator {
-			// The first row carries the walk-back arrow's overlay until it retires;
-			// that cell is its business, not the rail's.
-			continue
-		}
-
 		assert.Equal(t, strings.TrimRight(ansi.Strip(row), " "),
 			strings.TrimRight(ansi.Strip(frame[index]), " "),
 			"a hidden rail leaves row %d exactly as it was", index)
@@ -376,12 +370,6 @@ func TestTurnRailLeavesTheTextColumnAlone(t *testing.T) {
 	require.Len(t, rows, band)
 
 	for index, row := range rows {
-		if index == 0 && model.frameHit.turnIndicator {
-			// The first row carries the walk-back arrow's overlay until it retires;
-			// that cell is its business, not the rail's.
-			continue
-		}
-
 		assert.Equal(t,
 			strings.TrimRight(ansi.Strip(row), " "),
 			strings.TrimRight(ansi.Strip(ansi.Truncate(frame[index], model.railColumn(), "")), " "),

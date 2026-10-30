@@ -27,10 +27,10 @@ import (
 //     two surfaces therefore never repeat each other.
 const (
 	// bandScrollIcon marks the direction the newest rows are in. It is the filled
-	// triangle rather than the hollow one, which this UI uses as its attention marker;
-	// its up counterpart is the turn indicator at the top of the transcript. The glyph
-	// carries no label: the band is a signpost, and the status line already names the
-	// keys a reader needs.
+	// triangle rather than the hollow one, which this UI uses as its attention
+	// marker; its up counterpart is the turn rail in the transcript's right margin,
+	// which reports position rather than distance. The glyph carries no label: the
+	// band is a signpost, and the status line already names the keys a reader needs.
 	bandScrollIcon = "▼"
 )
 

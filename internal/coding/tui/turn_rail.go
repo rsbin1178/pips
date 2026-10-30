@@ -20,8 +20,8 @@ import (
 // to the rail column before the glyph is written, so a blank or short row still
 // has a cell to replace.
 //
-// A mark is a user turn — the same unit rowOfPreviousUserTurn walks — and never
-// stands for two. When the user turns do not all fit, the window scrolls instead
+// A mark is a user turn — one prompt and everything it caused — and never stands
+// for two. When the user turns do not all fit, the window scrolls instead
 // of compressing, so a click can always be exact. That policy is transplanted
 // from DeepSeek Harness's web TurnNavigator; only the policy, never the pixels.
 const (

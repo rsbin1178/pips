@@ -1685,15 +1685,10 @@ func (m *Model) readyView() tea.View {
 	// transcript rows and the hit map has to account for them.
 	dropped := clampFrameTailOffset(content, m.height)
 	transcriptVisible := max(0, transcriptRows-min(dropped, transcriptRows))
-	// The turn indicator is drawn into the top row of the frame rather than into a
-	// band of its own; see turn_indicator.go for why that row is the only free one,
-	// and why a frame with no visible transcript row draws none.
-	indicator := transcriptVisible > 0 && m.turnIndicatorShown()
-	content = m.drawTurnIndicator(clampFrameTail(content, m.height), indicator)
 	// The rail fills the margin the transcript band leaves blank. It is painted on
-	// the clamped frame, after the indicator, so its marks and the pointer map they
-	// carry are already in the frame's own coordinates.
-	content, railHits := m.drawTurnRail(content, transcriptVisible)
+	// the clamped frame, so its marks and the pointer map they carry are already in
+	// the frame's own coordinates.
+	content, railHits := m.drawTurnRail(clampFrameTail(content, m.height), transcriptVisible)
 	view := m.presentationView(content)
 	promptTop := frameRowOf(parts, promptIndex, dropped)
 	promptHit.place(promptTop, timelineInset(m.width))
@@ -1703,12 +1698,11 @@ func (m *Model) readyView() tea.View {
 		topDropped: min(dropped, transcriptRows),
 		// The band affords a return click only when the frame drew its arrow: a
 		// focused preview leads the row instead, and there is nothing to click.
-		band:          m.bandRowOf(parts, bandIndex, dropped, bandHint != "" && m.turnRailPreview() == ""),
-		turnIndicator: indicator,
-		turnRail:      railHits,
-		question:      promptHit,
-		composerTop:   frameRowOf(parts, composerIndex, dropped),
-		composerRows:  lipgloss.Height(footer[composerFooterIndex]),
+		band:         m.bandRowOf(parts, bandIndex, dropped, bandHint != "" && m.turnRailPreview() == ""),
+		turnRail:     railHits,
+		question:     promptHit,
+		composerTop:  frameRowOf(parts, composerIndex, dropped),
+		composerRows: lipgloss.Height(footer[composerFooterIndex]),
 	}
 	m.tasksPaneHit.top = frameRowOf(parts, tasksPaneFrameIndex, dropped)
 	// presentationView installs the pointer handler for every frame, so the ready

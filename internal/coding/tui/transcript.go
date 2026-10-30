@@ -380,24 +380,6 @@ func (s *transcriptStore) reindex() {
 	s.indexDirty = false
 }
 
-// rowOfPreviousUserTurn reports the row the newest user entry above `before` starts
-// at, which is where the turn the reader is walking back to began. ok is false when
-// no user entry sits above that row.
-func (s *transcriptStore) rowOfPreviousUserTurn(before int) (int, bool) {
-	s.reindex()
-
-	for index := range slices.Backward(s.records) {
-		if s.records[index].block.kind != blockUser {
-			continue
-		}
-		if s.starts[index] < before {
-			return s.starts[index], true
-		}
-	}
-
-	return 0, false
-}
-
 // userTurn is one prompt in the store: the region row it starts at, and the first
 // line of its text, which is what the rail's preview calls it.
 type userTurn struct {
