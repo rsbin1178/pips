@@ -1878,8 +1878,8 @@ Between the activity line and the composer box the frame reserves one blank row:
 the reserved band. It stays blank while there is nothing to say, and it carries
 the immediate feedback that is not the status line's job. While the transcript is
 not at the bottom — after PgUp/PgDn, Home/End or a wheel notch — it shows a
-centred `▼`, and a left click anywhere on that row returns to the newest rows
-exactly as `End` does; the status line no longer repeats that hint. The glyph
+centred `▼`, and a left click on that row returns to the newest rows exactly as
+`End` does. The status line no longer repeats that hint. The glyph
 carries no label: the band is a signpost, and the status line is where keys are
 named. When a drag copy is confirmed, the band reports `copied 3 lines` for a few
 seconds, on the same clock as a status notice; with both present the confirmation
@@ -1887,21 +1887,28 @@ keeps the right edge and the signpost is centred to its left, and the
 confirmation wins the row when the two cannot both be shown. The band is one row
 on every frame, so the composer never moves when its contents change.
 
-The band's up counterpart is the turn indicator. While anything is above the
-window, the transcript's first row carries a centred `▲`; a left click on that
-one cell puts the newest prompt above the window at its top, so repeated clicks
-walk back through the conversation one turn at a time — that is why the arrow
-stays on screen after each jump, and why it only leaves once the window reaches
-the beginning of the conversation. The two arrows bracket the reader: `▲` walks
-back a turn, `▼` returns to the newest rows. Both are the filled triangles on
-purpose: the hollow triangle is this UI's
-attention marker (an awaiting approval, a compacting context, the theme picker's
-polarity mark), so the scroll pair reads as movement instead of as a warning. The
-indicator is drawn into the first row rather than into a band of its
-own, because there is no free row above the transcript — reserving one would take
-a row from the messages and would change the window height that decides whether
-the indicator is needed at all, so showing it could hide it again on the next
-frame. It costs no message row and disappears as soon as your prompt is on screen.
+The transcript's position indicator is the turn rail. In the fullscreen viewport,
+once the conversation holds at least two user turns and the frame is wide and
+tall enough to leave a margin, a one-cell rail runs down the right edge: one mark
+per user turn, one per row, with the current turn highlighted and the marks at a
+scrollable end dimmed. Marks never merge. When the conversation has
+more turns than the rail holds, the rail's own window scrolls instead, so a mark
+always stands for exactly one turn and a click always matches what it says.
+
+A left click on a mark puts that turn's first row at the top of the viewport, or
+as close to it as the end of the conversation allows. `[` and `]` step back and
+forward one turn at a time (`Alt+Up` and `Alt+Down` are the fallbacks where the
+terminal reports them); the draft keeps the caret, and the brackets are only
+claimed while it is empty, so a message you are writing keeps every character you
+type. Every mark is the same one-cell bar; the current turn is highlighted in the
+primary colour and bold rather than reshaped, so the rail keeps an even rhythm.
+While a mark is focused the rail's window keeps its place, moving only when the
+focused mark would leave it. Under `NO_COLOR` the highlight is the bold alone.
+
+The rail fills cells the frame already leaves blank, so the text column keeps its
+width and its wrapping. Inline mode and the transcript escape hatch never show
+it: the terminal owns scrolling there, and there is no managed viewport to report
+a position in. The band's `▼` is the rail's down counterpart.
 
 `show_thinking_blocks = true` (the default) renders the model's visible reasoning
 as a Thinking block in the fullscreen viewport: the whole thought is shown under

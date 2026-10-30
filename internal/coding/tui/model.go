@@ -114,6 +114,8 @@ type Model struct {
 	themeDiagnostics     []themeDiagnostic
 	transcript           transcriptStore
 	transcriptScroll     scrollRegion
+	// turnRail is the turn rail's window across frames; see turn_rail.go.
+	turnRail turnRailState
 	// childScroll is the read-only child page's reading position. It is the shared
 	// region type, so the page opens on its newest row and follows appended content
 	// exactly as the conversation does.
@@ -1444,6 +1446,9 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if command, handled := m.updateTranscriptScrollKey(message); handled {
 		return m, command
 	}
+	if command, handled := m.updateTurnRailKey(message); handled {
+		return m, command
+	}
 	if m.worktreeLoading && (key == keyCtrlC || key == keyEscape) {
 		m.cancelWorkspaceStatus()
 
@@ -1553,6 +1558,10 @@ func (m *Model) readyView() tea.View {
 	if m.route.kind != routeNone && !m.teamRouteIsInline() {
 		return m.routeView()
 	}
+
+	// A focused rail mark is only current while the reading position sits where the
+	// step left it; settle it before the frame resolves the rail's window.
+	m.settleTurnRailFocus()
 
 	caps := m.layout()
 	footer := make([]string, 0, 5)
@@ -1675,23 +1684,22 @@ func (m *Model) readyView() tea.View {
 	// transcript rows and the hit map has to account for them.
 	dropped := clampFrameTailOffset(content, m.height)
 	transcriptVisible := max(0, transcriptRows-min(dropped, transcriptRows))
-	// The turn indicator is drawn into the top row of the frame rather than into a
-	// band of its own; see turn_indicator.go for why that row is the only free one,
-	// and why a frame with no visible transcript row draws none.
-	indicator := transcriptVisible > 0 && m.turnIndicatorShown()
-	content = m.drawTurnIndicator(clampFrameTail(content, m.height), indicator)
+	// The rail fills the margin the transcript band leaves blank. It is painted on
+	// the clamped frame, so its marks and the pointer map they carry are already in
+	// the frame's own coordinates.
+	content, railHits := m.drawTurnRail(clampFrameTail(content, m.height), transcriptVisible)
 	view := m.presentationView(content)
 	promptTop := frameRowOf(parts, promptIndex, dropped)
 	promptHit.place(promptTop, timelineInset(m.width))
 	m.frameHit = frameHitMap{
-		painted:       m.sizeReady,
-		transcript:    transcriptVisible,
-		topDropped:    min(dropped, transcriptRows),
-		band:          m.bandRowOf(parts, bandIndex, dropped, bandHint != ""),
-		turnIndicator: indicator,
-		question:      promptHit,
-		composerTop:   frameRowOf(parts, composerIndex, dropped),
-		composerRows:  lipgloss.Height(footer[composerFooterIndex]),
+		painted:      m.sizeReady,
+		transcript:   transcriptVisible,
+		topDropped:   min(dropped, transcriptRows),
+		band:         m.bandRowOf(parts, bandIndex, dropped, bandHint != ""),
+		turnRail:     railHits,
+		question:     promptHit,
+		composerTop:  frameRowOf(parts, composerIndex, dropped),
+		composerRows: lipgloss.Height(footer[composerFooterIndex]),
 	}
 	m.tasksPaneHit.top = frameRowOf(parts, tasksPaneFrameIndex, dropped)
 	// presentationView installs the pointer handler for every frame, so the ready
@@ -2494,6 +2502,10 @@ func (m *Model) updateTranscriptScrollKey(message tea.KeyPressMsg) (tea.Cmd, boo
 		return nil, false
 	}
 
+	// An ordinary scroll ends a rail focus: the reader moved the window themselves,
+	// so the mark a step placed is no longer where they are.
+	m.endTurnRailFocus()
+
 	// Reaching the top asks for the page above it. The request is bounded and
 	// idempotent, so a reader who keeps scrolling simply gets more history.
 	if atTop && region.offset == 0 {
@@ -2919,6 +2931,7 @@ type scrollbackWriteDoneMsg struct {
 }
 
 func (m *Model) submit(actionCtx actionContext) tea.Cmd {
+	m.endTurnRailFocus()
 	snapshot := m.composer.Snapshot()
 	switch actionCtx {
 	case contextIdle:

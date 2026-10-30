@@ -92,22 +92,35 @@ func projectionBenchTools(messages ai.Messages) []coding.ToolState {
 func projectionBenchModel(b *testing.B, messages ai.Messages, tools []coding.ToolState) *Model {
 	b.Helper()
 
-	model := newModel(b.Context(), Options{
-		Workspace: "/probe", PinPresentation: true, Screen: ScreenFullscreen, AltScreen: AltScreenAlways,
-	})
 	state := readyState()
 	state.Phase = coding.PhaseRunning
 	state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
 	state.Runs = []coding.RunState{{ID: "run-1", Active: true, TurnOpen: true, Turn: 1}}
 	state.Transcript = messages
 	state.Tools = tools
+
+	model := benchModel(b, state, 100, 40)
+	model.subscription = &subscriptionBridge{}
+	model.setLayout()
+
+	return model
+}
+
+// benchModel builds a ready fullscreen viewport over one state at a fixed
+// geometry, which is what a frame benchmark paints.
+func benchModel(tb testing.TB, state coding.State, width, height int) *Model {
+	tb.Helper()
+
+	model := newModel(tb.Context(), Options{
+		Workspace: "/probe", PinPresentation: true, Screen: ScreenFullscreen, AltScreen: AltScreenAlways,
+	})
 	model.state = state
 	model.lifecycle = lifecycleReady
 	model.sizeReady = true
-	model.width = 100
-	model.height = 40
-	model.subscription = &subscriptionBridge{}
+	model.width = width
+	model.height = height
 	model.setLayout()
+	tb.Cleanup(model.shutdownLiveRender)
 
 	return model
 }

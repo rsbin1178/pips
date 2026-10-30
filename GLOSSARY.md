@@ -71,6 +71,10 @@ in [`docs/`](docs/) — this file is the word, not the behaviour.
   grows.
 - **Row segment** — the paired frozen and tail rows a live block renders into.
 - **Scrollback** — the transcript retained above the viewport in inline mode.
+- **User turn** — one prompt and everything it caused, from that prompt to the next; the unit the turn
+  rail marks. Not the same as a **Turn**, which is one model call.
+- **Turn rail** — the column of per-user-turn marks down the transcript's right margin: a position
+  indicator, not a scrollbar, and one mark per user turn.
 - **Watcher** — a background command or file watch that outlives the tool call that started it.
 
 ## Extensions
