@@ -83,12 +83,37 @@ func markedRows(model *Model) []int {
 	return rows
 }
 
-// railMarks reports how many rail marks the frame paints, in either colour mode.
+// railMarks reports how many rail marks the frame paints.
 func railMarks(model *Model) int {
-	glyphs := railGlyphs(model)
+	return countGlyph(railGlyphs(model), turnRailBar)
+}
 
-	return countGlyph(glyphs, turnRailRest) + countGlyph(glyphs, turnRailActive) +
-		countGlyph(glyphs, turnRailRestNoColor) + countGlyph(glyphs, turnRailActiveNoColor)
+// activeMarkRow reports the row whose rail cell carries the current mark's
+// highlight, or -1.
+func activeMarkRow(model *Model) int {
+	active := model.turnRailGlyph(true, false)
+
+	for index, cell := range railCells(model) {
+		if strings.Contains(cell, active) {
+			return index
+		}
+	}
+
+	return -1
+}
+
+// countHighlights counts the rail cells carrying the current mark's highlight.
+func countHighlights(model *Model) int {
+	active := model.turnRailGlyph(true, false)
+	count := 0
+
+	for _, cell := range railCells(model) {
+		if strings.Contains(cell, active) {
+			count++
+		}
+	}
+
+	return count
 }
 
 // countGlyph counts one mark glyph in a painted column.
@@ -105,17 +130,6 @@ func countGlyph(cells []string, glyph string) int {
 }
 
 // indexOfGlyph reports the first row holding a glyph, or -1.
-func indexOfGlyph(cells []string, glyph string) int {
-	for index, cell := range cells {
-		if cell == glyph {
-			return index
-		}
-	}
-
-	return -1
-}
-
-// railCapacity reports how many marks the rail holds at the painted geometry.
 func railCapacity(model *Model) int {
 	return turnRailCapacity(model.transcriptScroll.height, model.turnRail.markPitch())
 }
@@ -148,12 +162,11 @@ func TestTurnRailPaintsOneMarkPerUserTurnAtTheFixedPitch(t *testing.T) {
 	glyphs := railGlyphs(model)
 
 	require.Equal(t, 3, railMarks(model), "one mark per user turn: %q", glyphs)
-	assert.Equal(t, 1, countGlyph(glyphs, turnRailActiveNoColor),
-		"exactly one mark is the current user turn: %q", glyphs)
+	assert.Equal(t, 1, countHighlights(model),
+		"exactly one mark is highlighted as the current user turn: %q", glyphs)
 
 	rows := markedRows(model)
-	assert.Equal(t, []int{0, 2, 4}, rows,
-		"marks sit one row apart with a blank row between, from the window's top")
+	assert.Equal(t, []int{0, 1, 2}, rows, "one mark per row, from the window's top")
 
 	frame := strings.Split(model.View().Content, "\n")
 	for _, row := range rows {
@@ -162,16 +175,16 @@ func TestTurnRailPaintsOneMarkPerUserTurnAtTheFixedPitch(t *testing.T) {
 	}
 }
 
-func TestTurnRailSupportsAPitchOfOneMarkPerRow(t *testing.T) {
+func TestTurnRailSupportsAPitchOfTwoRowsPerMark(t *testing.T) {
 	t.Parallel()
 
 	model := turnRailModel(t, 3, 80, 30, true)
-	model.turnRail.pitch = 1
+	model.turnRail.pitch = 2
 	model.rerenderTranscript(false)
 	_ = model.View()
 
-	assert.Equal(t, []int{0, 1, 2}, markedRows(model),
-		"a pitch of one puts a mark on every row it can afford")
+	assert.Equal(t, []int{0, 2, 4}, markedRows(model),
+		"a pitch of two leaves a blank row between marks")
 	assert.Equal(t, 3, railMarks(model), "the pitch changes spacing, not how many user turns are marked")
 }
 
@@ -181,7 +194,7 @@ func TestTurnRailFollowsTheReadingPosition(t *testing.T) {
 	model := turnRailModel(t, 6, 80, 30, true)
 	rows := markedRows(model)
 	require.NotEmpty(t, rows)
-	assert.Equal(t, rows[len(rows)-1], indexOfGlyph(railGlyphs(model), turnRailActiveNoColor),
+	assert.Equal(t, rows[len(rows)-1], activeMarkRow(model),
 		"following the newest rows makes the last user turn current")
 }
 
@@ -193,11 +206,9 @@ func TestTurnRailHighlightsTheUserTurnAtTheTopOfTheWindow(t *testing.T) {
 	require.Zero(t, model.transcriptScroll.offset, "the fixture scrolled to the beginning")
 	require.False(t, model.transcriptScroll.follow, "the fixture is long enough to leave the tail")
 
-	glyphs := railGlyphs(model)
-	assert.Equal(t, 0, indexOfGlyph(glyphs, turnRailActiveNoColor),
-		"the user turn the window opens on is the current one: %q", glyphs)
-	assert.Equal(t, 1, countGlyph(glyphs, turnRailActiveNoColor),
-		"only one mark is current: %q", glyphs)
+	assert.Equal(t, 0, activeMarkRow(model),
+		"the user turn the window opens on is the current one")
+	assert.Equal(t, 1, countHighlights(model), "only one mark is current")
 }
 
 func TestTurnRailScrollsItsWindowInsteadOfMergingMarks(t *testing.T) {
@@ -220,7 +231,7 @@ func TestTurnRailScrollsItsWindowInsteadOfMergingMarks(t *testing.T) {
 	// marks the rail shows.
 	long.Update(tea.KeyPressMsg{Code: tea.KeyHome})
 	assert.Len(t, markedRows(long), capacity, "the window keeps its size while it scrolls")
-	assert.Equal(t, 0, indexOfGlyph(railGlyphs(long), turnRailActiveNoColor),
+	assert.Equal(t, 0, activeMarkRow(long),
 		"the rail follows the reading position back to the top")
 }
 
@@ -377,18 +388,19 @@ func TestTurnRailLeavesTheTextColumnAlone(t *testing.T) {
 	}
 }
 
-func TestTurnRailDistinguishesTheCurrentUserTurnByShape(t *testing.T) {
+func TestTurnRailMarksAreTheSameShape(t *testing.T) {
 	t.Parallel()
 
 	model := turnRailModel(t, 3, 80, 30, true)
-	glyphs := railGlyphs(model)
-	assert.Equal(t, 1, countGlyph(glyphs, turnRailActiveNoColor))
-	assert.Equal(t, 2, countGlyph(glyphs, turnRailRestNoColor))
+	for _, glyph := range railGlyphs(model) {
+		if glyph == "" || glyph == " " {
+			continue
+		}
 
-	for row := range strings.SplitSeq(model.View().Content, "\n") {
-		cell := ansi.Cut(row, model.railColumn(), model.railColumn()+1)
-		assert.NotContains(t, cell, "\x1b", "NO_COLOR paints no styling")
+		assert.Equal(t, turnRailBar, glyph, "every mark is the same one-cell bar")
 	}
+
+	assert.Equal(t, 1, countHighlights(model), "and exactly one of them is highlighted")
 }
 
 func TestTurnRailColoursTheMarks(t *testing.T) {
@@ -400,8 +412,8 @@ func TestTurnRailColoursTheMarks(t *testing.T) {
 	require.Len(t, rows, 3)
 
 	palette := paletteFor(model.theme)
-	rest := lipgloss.NewStyle().Foreground(palette.separator).Render(turnRailRest)
-	active := lipgloss.NewStyle().Foreground(palette.session).Render(turnRailActive)
+	rest := lipgloss.NewStyle().Foreground(palette.separator).Render(turnRailBar)
+	active := lipgloss.NewStyle().Foreground(palette.session).Bold(true).Render(turnRailBar)
 
 	// A cell carries the row's own styling around the mark, so the assertion is
 	// that the mark's rendering is the one inside it — not that the cell equals it.
@@ -416,12 +428,14 @@ func TestTurnRailColoursTheMarks(t *testing.T) {
 func TestTurnRailDimsTheScrollableEnd(t *testing.T) {
 	t.Parallel()
 
-	model := turnRailModel(t, 30, 80, 30, false)
+	// The conversation must be long enough that the rail's window has room to
+	// scroll at both ends once the active mark is inside it.
+	model := turnRailModel(t, 60, 80, 30, false)
 	turns := model.transcript.userTurns()
 	capacity := railCapacity(model)
 	require.Positive(t, capacity)
-	active := capacity + 2
-	require.Greater(t, len(turns), active+2, "the fixture needs user turns below the active one")
+	active := capacity + 5
+	require.Greater(t, len(turns), active+capacity, "the fixture needs a scrollable window")
 
 	model.transcriptScroll.scrollTo(turns[active].start)
 
@@ -431,22 +445,20 @@ func TestTurnRailDimsTheScrollableEnd(t *testing.T) {
 	require.Greater(t, len(rows), 4)
 
 	palette := paletteFor(model.theme)
-	rest := lipgloss.NewStyle().Foreground(palette.separator).Render(turnRailRest)
-	faded := lipgloss.NewStyle().Foreground(palette.separator).Faint(true).Render(turnRailRest)
-	activeCell := lipgloss.NewStyle().Foreground(palette.session).Render(turnRailActive)
-	fadedActive := lipgloss.NewStyle().Foreground(palette.session).Faint(true).Render(turnRailActive)
+	rest := lipgloss.NewStyle().Foreground(palette.separator).Render(turnRailBar)
+	faded := lipgloss.NewStyle().Foreground(palette.separator).Faint(true).Render(turnRailBar)
+	activeCell := lipgloss.NewStyle().Foreground(palette.session).Bold(true).Render(turnRailBar)
 
 	assert.Contains(t, cells[rows[0]], faded, "the end that can scroll back is dimmed one step")
 	assert.Contains(t, cells[rows[len(rows)-1]], faded, "the end that can scroll on is dimmed one step")
 	assert.Contains(t, cells[rows[1]], rest, "a mark inside the band keeps the rest colour")
 	assert.NotContains(t, cells[rows[1]], "\x1b[2;", "a mark inside the band is not dimmed")
 
-	glyphs := railGlyphs(model)
-	require.Equal(t, 1, countGlyph(glyphs, turnRailActive))
-	activeRow := indexOfGlyph(glyphs, turnRailActive)
+	activeRow := activeMarkRow(model)
+	require.GreaterOrEqual(t, activeRow, 0)
 	assert.Contains(t, cells[activeRow], activeCell,
 		"the current mark keeps the primary label colour")
-	assert.NotContains(t, cells[activeRow], fadedActive,
+	assert.NotContains(t, cells[activeRow], "\x1b[2;",
 		"the current mark is never dimmed, whichever end the window sits at")
 }
 
@@ -471,8 +483,7 @@ func TestDragSelectionOverTheRailCopiesProseOnly(t *testing.T) {
 	copied := strings.Join(texts, "\n")
 
 	assert.Contains(t, copied, "TURN-1", "the drag copies the prose it addressed")
-	assert.NotContains(t, copied, turnRailRest)
-	assert.NotContains(t, copied, turnRailActive)
+	assert.NotContains(t, copied, turnRailBar)
 
 	for line := range strings.SplitSeq(copied, "\n") {
 		assert.Equal(t, strings.TrimRight(line, " "), line,
@@ -541,8 +552,8 @@ func TestTurnRailClickJumpsToTheUserTurn(t *testing.T) {
 		"the frame opens on the prompt the mark stands for")
 	activeRow, ok := markRowForTurn(model, clicked)
 	require.True(t, ok, "the clicked user turn still has a mark")
-	assert.Equal(t, turnRailActiveNoColor, railGlyphs(model)[activeRow],
-		"the clicked user turn is the current mark")
+	assert.Equal(t, activeRow, activeMarkRow(model),
+		"the clicked user turn is the one the rail highlights")
 }
 
 func TestTurnRailClickLandsEachEndInOneClick(t *testing.T) {
@@ -566,8 +577,7 @@ func TestTurnRailClickLandsEachEndInOneClick(t *testing.T) {
 		"and the viewport is at the tail, where that turn is visible")
 
 	_ = model.View()
-	glyphs := railGlyphs(model)
-	assert.Equal(t, turnRailActiveNoColor, glyphs[rows[len(rows)-1]],
+	assert.Equal(t, rows[len(rows)-1], activeMarkRow(model),
 		"the newest mark stays the current one")
 
 	// The first visible mark is the oldest turn of the window; one click reaches it
@@ -598,8 +608,13 @@ func TestTurnRailHitMapMatchesThePaintedMarks(t *testing.T) {
 			"and carries that turn's first row as the frame painted it")
 	}
 
-	_, ok := model.frameHit.turnRail.hitAt(rows[0] + 1)
-	assert.False(t, ok, "the blank row between two marks answers nothing")
+	// A conversation shorter than the window leaves blank rail rows below its last
+	// mark; those answer nothing.
+	short := turnRailModel(t, 3, 80, 30, true)
+	shortRows := markedRows(short)
+	require.Len(t, shortRows, 3)
+	_, ok := short.frameHit.turnRail.hitAt(shortRows[len(shortRows)-1] + 1)
+	assert.False(t, ok, "a row below the last mark answers nothing")
 
 	// The window scrolls to the beginning: the map has to follow it rather than
 	// keep answering the window it was built for.
@@ -619,14 +634,14 @@ func TestTurnRailHitMapMatchesThePaintedMarks(t *testing.T) {
 func TestTurnRailClickOnABlankRowDoesNothing(t *testing.T) {
 	t.Parallel()
 
-	model := turnRailModel(t, 30, 80, 30, true)
+	model := turnRailModel(t, 3, 80, 30, true)
 	rows := markedRows(model)
-	require.NotEmpty(t, rows)
-	blank := rows[0] + 1
+	require.Len(t, rows, 3)
+	blank := rows[len(rows)-1] + 1
 	require.Less(t, blank, model.frameHit.transcript, "the fixture needs a blank rail row")
 
 	_, painted := model.frameHit.turnRail.hitAt(blank)
-	require.False(t, painted, "the row between two marks carries no mark")
+	require.False(t, painted, "a row below the last mark carries no mark")
 
 	before := model.transcriptScroll.offset
 	assert.Nil(t, railClick(model, blank), "a blank rail row answers nothing")
@@ -703,19 +718,6 @@ func TestTurnRailClickNeedsAPaintedRail(t *testing.T) {
 }
 
 // frameRowIndex reports the frame row containing a text, or -1.
-func frameRowIndex(model *Model, text string) int {
-	rows := strings.Split(ansi.Strip(model.View().Content), "\n")
-	for index, row := range rows {
-		if strings.Contains(row, text) {
-			return index
-		}
-	}
-
-	return -1
-}
-
-// findFrameRow returns the first frame row containing a text, as the reader sees
-// it.
 func findFrameRow(model *Model, text string) (string, bool) {
 	for row := range strings.SplitSeq(ansi.Strip(model.View().Content), "\n") {
 		if strings.Contains(row, text) {
@@ -804,54 +806,19 @@ func TestTurnRailAltKeysStep(t *testing.T) {
 	assert.Equal(t, last, model.turnRail.focus.turn, "alt+down steps on")
 }
 
-func TestTurnRailPreviewNamesTheFocusedTurn(t *testing.T) {
+func TestTurnRailFocusLeavesTheBandAlone(t *testing.T) {
 	t.Parallel()
 
 	model := turnRailModel(t, 12, 80, 30, true)
-	model.Update(tea.KeyPressMsg{Text: "["})
+	model.Update(tea.KeyPressMsg{Code: tea.KeyHome})
+	model.Update(tea.KeyPressMsg{Text: "]"})
 	_ = model.View()
 
-	assert.Contains(t, ansi.Strip(model.View().Content), "turn 11/12 · TURN-11")
-
-	// Scrolling some other way ends the focus, so the band stops naming a turn the
-	// reader has moved away from.
-	model.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
-	_ = model.View()
-
-	assert.False(t, model.turnRail.focus.on)
-	assert.NotContains(t, ansi.Strip(model.View().Content), "turn 11/12")
-}
-
-func TestTurnRailBandKeepsTheScrollHintWithoutFocus(t *testing.T) {
-	t.Parallel()
-
-	model := turnRailModel(t, 12, 80, 30, true)
-	model.Update(tea.KeyPressMsg{Text: "["})
-	require.True(t, model.turnRail.focus.on)
-
-	// A scroll key that is not a rail step ends the focus; the band is the scroll
-	// hint again, not a preview.
-	model.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
-	_ = model.View()
-
-	assert.False(t, model.turnRail.focus.on)
-	assert.NotContains(t, ansi.Strip(model.View().Content), "turn ")
+	require.True(t, model.turnRail.focus.on, "the step is focused")
+	assert.NotContains(t, ansi.Strip(model.View().Content), "turn ",
+		"the band says nothing about the focused turn")
 	_, hinted := findFrameRow(model, bandScrollIcon)
-	assert.True(t, hinted, "the band is the return-to-newest hint again")
-}
-
-func TestTurnRailPreviewSharesTheBandWithTheCopyNotice(t *testing.T) {
-	t.Parallel()
-
-	model := turnRailModel(t, 12, 60, 30, true)
-	model.Update(tea.KeyPressMsg{Text: "["})
-	model.copiedNotice = "copied 3 lines"
-	_ = model.View()
-
-	row, ok := findFrameRow(model, "turn 11/12")
-	require.True(t, ok, "the band names the focused turn")
-	assert.Contains(t, row, "turn 11/12", "the preview keeps the left of the row")
-	assert.Contains(t, row, "copied 3 lines", "the confirmation keeps the right edge")
+	assert.True(t, hinted, "the band is still the return-to-newest hint")
 }
 
 func TestTurnRailBracketsTypeWhenThereIsNoRail(t *testing.T) {
@@ -866,40 +833,6 @@ func TestTurnRailBracketsTypeWhenThereIsNoRail(t *testing.T) {
 	assert.Equal(t, "[]", model.composer.Value(),
 		"with nothing to step through, a bracket is an ordinary character")
 	assert.False(t, model.turnRail.focus.on)
-}
-
-func TestTurnRailPreviewOwnsTheBandRow(t *testing.T) {
-	t.Parallel()
-
-	model := turnRailModel(t, 12, 80, 30, true)
-	model.Update(tea.KeyPressMsg{Code: tea.KeyHome})
-	model.Update(tea.KeyPressMsg{Text: "]"})
-	_ = model.View()
-
-	require.True(t, model.turnRail.focus.on)
-	require.NotEmpty(t, model.bandScrollHint(), "the fixture is scrolled away from the tail")
-	assert.Equal(t, -1, model.frameHit.band,
-		"the frame drew no arrow, so the band affords no return click")
-
-	row := frameRowIndex(model, "turn 2/12")
-	require.GreaterOrEqual(t, row, 0, "the band names the focused turn")
-
-	before := model.transcriptScroll.offset
-	assert.Nil(t, model.handleMouse(tea.MouseClickMsg{X: 10, Y: row, Button: tea.MouseLeft}))
-	assert.Equal(t, before, model.transcriptScroll.offset, "the click did not return to the newest rows")
-}
-
-func TestTurnRailCopyNoticeWinsATightBand(t *testing.T) {
-	t.Parallel()
-
-	model := turnRailModel(t, 12, composerBoxMinWidth, 30, true)
-	model.Update(tea.KeyPressMsg{Text: "["})
-	model.copiedNotice = "copied 3 lines"
-	_ = model.View()
-
-	row, ok := findFrameRow(model, "copied 3 lines")
-	require.True(t, ok, "the confirmation keeps the row")
-	assert.NotContains(t, row, "turn 11/12", "the preview yields the cells it cannot have")
 }
 
 func TestTurnRailFocusHoldsTheWindow(t *testing.T) {
@@ -928,8 +861,8 @@ func TestTurnRailFocusHoldsTheWindow(t *testing.T) {
 	focused := model.turnRail.focus.turn
 	row, ok := markRowForTurn(model, focused)
 	require.True(t, ok, "the focused turn has a mark in the window")
-	assert.Equal(t, turnRailActiveNoColor, railGlyphs(model)[row],
-		"and that mark is the one the rail calls current")
+	assert.Equal(t, row, activeMarkRow(model),
+		"and that mark is the one the rail highlights")
 }
 
 func TestTurnRailKeysAreInTheHelpPanel(t *testing.T) {

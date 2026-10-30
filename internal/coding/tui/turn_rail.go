@@ -25,18 +25,15 @@ import (
 // of compressing, so a click can always be exact. That policy is transplanted
 // from DeepSeek Harness's web TurnNavigator; only the policy, never the pixels.
 const (
-	// turnRailRest is a user turn the reader is not on, and turnRailActive the
-	// one at the reading position. Both pairs differ in shape as well as colour,
-	// so the current mark survives NO_COLOR.
-	turnRailRest          = "▁"
-	turnRailActive        = "▊"
-	turnRailRestNoColor   = "·"
-	turnRailActiveNoColor = "█"
-	// turnRailPitch is how many rows one mark occupies by default: the mark row
-	// plus a blank row, which reads as a dashed ladder instead of a continuous
-	// line. A pitch of 1 — one mark per row — is the other defensible value; see
+	// turnRailBar is the one-cell bar every mark is drawn with. The current mark
+	// is highlighted rather than reshaped, so the rail keeps an even rhythm and
+	// no mark can look taller than its neighbours.
+	turnRailBar = "▁"
+	// turnRailPitch is how many rows one mark occupies by default: one mark per
+	// row, so the rail reads as a continuous position line. A pitch of 2 — the
+	// mark row plus a blank row — is the other defensible value; see
 	// [turnRailState.markPitch].
-	turnRailPitch = 2
+	turnRailPitch = 1
 	// turnRailMinRows is the shortest transcript band that still affords a rail.
 	// Below it the rail would spend more rows on navigation than on conversation.
 	turnRailMinRows = 8
@@ -54,9 +51,8 @@ const (
 type turnRailState struct {
 	start int
 	// focus is the mark the reader stepped onto: which user turn, and the reading
-	// position that step left. The band previews it, the window stops re-centring
-	// around it, and any other scroll — which moves the reading position off that
-	// row — ends it.
+	// position that step left. The window stops re-centring around it, and any
+	// other scroll — which moves the reading position off that row — ends it.
 	focus turnRailFocus
 	// pitch is how many rows one mark occupies. Zero selects turnRailPitch, which
 	// is the shipped frame; the geometry keeps the spacing a parameter because a
@@ -193,8 +189,7 @@ func (m *Model) turnRailActiveIndex(turns []userTurn) int {
 // only while the reading position sits where that step left it. The gestures the
 // rail hears about clear the focus themselves; this check catches movement it never
 // sees — a new turn arriving under a following tail, or a re-wrap that re-anchors
-// the reading position — so the band never describes a position the reader is no
-// longer at.
+// the reading position — so the window never keeps a position the reader left.
 func (m *Model) settleTurnRailFocus() {
 	focus := m.turnRail.focus
 	if !focus.on {
@@ -270,30 +265,6 @@ func (m *Model) updateTurnRailKey(message tea.KeyPressMsg) (tea.Cmd, bool) {
 	}
 
 	return m.stepTurn(1), true
-}
-
-// turnRailPreview is the band's preview line while a mark is focused: which user
-// turn the reader is on, and the prompt it belongs to. A terminal has no hover,
-// so the band is the only place a mark can say what it is.
-func (m *Model) turnRailPreview() string {
-	focus := m.turnRail.focus
-	if !focus.on || !m.turnRailShown(m.transcriptScroll.height) {
-		return ""
-	}
-
-	turns := m.transcript.userTurns()
-	if !focus.valid(turns) {
-		return ""
-	}
-
-	// The band says "turn" because that is the reader's word for one of their
-	// prompts; the code and the specs call the unit a user turn.
-	line := "turn " + itoa(focus.turn+1) + "/" + itoa(len(turns))
-	if prompt := turns[focus.turn].prompt; prompt != "" {
-		line += " · " + prompt
-	}
-
-	return line
 }
 
 // turnRailFrame is the rail one frame paints: the user turns it can show, the
@@ -423,28 +394,30 @@ func (m *Model) turnRailMouse(message tea.MouseMsg) (tea.Cmd, bool) {
 	return command, true
 }
 
-// turnRailGlyph renders one mark. A faded mark is one step dimmer than the rest
-// state, which is the terminal's stand-in for the scrollable-end fade band.
+// turnRailGlyph renders one mark. Every mark is the same one-cell bar; the current
+// one is highlighted — the primary label colour and bold — rather than reshaped, so
+// the rail keeps its rhythm and its width. A scrollable end fades another step.
+// Without colour the highlight is bold, the only emphasis left on a cell the
+// terminal will not recolour.
 func (m *Model) turnRailGlyph(active, faded bool) string {
 	if m.options.NoColor {
 		if active {
-			return turnRailActiveNoColor
+			return lipgloss.NewStyle().Bold(true).Render(turnRailBar)
 		}
 
-		return turnRailRestNoColor
+		return turnRailBar
 	}
 
-	glyph, colour := turnRailRest, paletteFor(m.theme).separator
-	if active {
-		glyph, colour = turnRailActive, paletteFor(m.theme).session
-	}
+	style := lipgloss.NewStyle().Foreground(paletteFor(m.theme).separator)
 
-	style := lipgloss.NewStyle().Foreground(colour)
-	if faded {
+	switch {
+	case active:
+		style = style.Foreground(paletteFor(m.theme).session).Bold(true)
+	case faded:
 		style = style.Faint(true)
 	}
 
-	return style.Render(glyph)
+	return style.Render(turnRailBar)
 }
 
 // railColumn reports the frame column the rail occupies: the outermost cell of

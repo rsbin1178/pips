@@ -60,28 +60,25 @@ func (m *Model) copiedNoticeText() string {
 	return strings.TrimSpace(sanitizeInspectionText(m.copiedNotice))
 }
 
-// reservedBand renders the band's single row. Two occupants lead it: the rail's
-// preview while a mark is focused, which is a label and starts at the status
-// line's inset, and the scroll hint while the newest rows are off screen, which is
-// a standing invitation to move and is centred. The copy confirmation keeps the
-// status line's right edge, which is where a transient outcome reads as an
-// outcome.
+// reservedBand renders the band's single row. The scroll hint is centred on the
+// whole row, because it is a standing invitation to move rather than a field of
+// the status line; the copy confirmation keeps the status line's inset and its
+// right edge, which is where a transient outcome reads as an outcome.
 //
-// A narrow terminal truncates the lead rather than the outcome, and NO_COLOR drops
-// the styling and keeps the text.
+// A narrow terminal truncates the hint's label rather than the outcome, and
+// NO_COLOR drops the styling and keeps the text.
 //
-// The row is blank when there is nothing to show, which is what keeps a frame with
-// no live feedback byte-identical to the blank separator row it replaced.
+// The row is blank when there is nothing to show, which is what keeps a frame
+// with no live feedback byte-identical to the blank separator row it replaced.
 func (m *Model) reservedBand() string {
-	lead, centred := m.bandLead()
+	hint := m.bandScrollHint()
 	notice := m.copiedNoticeText()
-	if lead == "" && notice == "" {
+	if hint == "" && notice == "" {
 		return ""
 	}
-
 	if !m.options.NoColor {
 		muted := lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted)
-		lead = styleWhenNotEmpty(muted, lead)
+		hint = styleWhenNotEmpty(muted, hint)
 		notice = styleWhenNotEmpty(muted, notice)
 	}
 
@@ -89,41 +86,25 @@ func (m *Model) reservedBand() string {
 	inset := timelineInset(width)
 
 	switch {
-	case lead == "":
+	case hint == "":
 		// A copy confirmation keeps the status line's inset and right edge, where a
 		// transient outcome reads as an outcome.
 		return strings.Repeat(" ", inset) + alignStatusLine("", notice, width-2*inset)
-	case !centred:
-		// The rail's preview is a label, so it starts where the status line's text
-		// does; the confirmation keeps the right edge when both are showing.
-		return strings.Repeat(" ", inset) + alignStatusLine(lead, notice, width-2*inset)
 	case notice == "":
 		// The scroll hint is centred on the whole row: it is a standing invitation to
 		// move rather than a field of the status line.
-		return centreLine(lead, width)
+		return centreLine(hint, width)
 	}
 
-	// Hint and confirmation. The row is [hint][gap][confirmation][inset]; the
-	// confirmation wins it when the hint could not keep its glyphs.
+	// Both. The row is [hint][gap][confirmation][inset]; the confirmation wins it
+	// when the hint could not keep its glyphs.
 	noticeField := ansi.StringWidth(notice)
-	leadField := width - 1 - noticeField - inset
-	if leadField < ansi.StringWidth(bandScrollIcon) {
+	hintField := width - 1 - noticeField - inset
+	if hintField < ansi.StringWidth(bandScrollIcon) {
 		return strings.Repeat(" ", inset) + alignStatusLine("", notice, width-2*inset)
 	}
 
-	return centreLine(lead, leadField) + " " + notice + strings.Repeat(" ", inset)
-}
-
-// bandLead reports what leads the band: the rail's preview while a mark is
-// focused, or the scroll hint while the newest rows are off screen. centred says
-// how it is placed when it has the row to itself — the hint is a signpost and sits
-// in the middle, the preview is a label and starts at the inset.
-func (m *Model) bandLead() (lead string, centred bool) {
-	if preview := m.turnRailPreview(); preview != "" {
-		return preview, false
-	}
-
-	return m.bandScrollHint(), true
+	return centreLine(hint, hintField) + " " + notice + strings.Repeat(" ", inset)
 }
 
 // centreLine centres value in a field of width columns. The row it returns always

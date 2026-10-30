@@ -1879,9 +1879,7 @@ the reserved band. It stays blank while there is nothing to say, and it carries
 the immediate feedback that is not the status line's job. While the transcript is
 not at the bottom — after PgUp/PgDn, Home/End or a wheel notch — it shows a
 centred `▼`, and a left click on that row returns to the newest rows exactly as
-`End` does; while a turn mark is focused the rail's preview leads the row
-instead, and there is no arrow to click until the focus ends. The status line no
-longer repeats that hint. The glyph
+`End` does. The status line no longer repeats that hint. The glyph
 carries no label: the band is a signpost, and the status line is where keys are
 named. When a drag copy is confirmed, the band reports `copied 3 lines` for a few
 seconds, on the same clock as a status notice; with both present the confirmation
@@ -1892,8 +1890,8 @@ on every frame, so the composer never moves when its contents change.
 The transcript's position indicator is the turn rail. In the fullscreen viewport,
 once the conversation holds at least two user turns and the frame is wide and
 tall enough to leave a margin, a one-cell rail runs down the right edge: one mark
-per user turn, at a fixed pitch, with the turn at the reading position bright and
-the marks at a scrollable end dimmed. Marks never merge. When the conversation has
+per user turn, one per row, with the current turn highlighted and the marks at a
+scrollable end dimmed. Marks never merge. When the conversation has
 more turns than the rail holds, the rail's own window scrolls instead, so a mark
 always stands for exactly one turn and a click always matches what it says.
 
@@ -1902,10 +1900,10 @@ as close to it as the end of the conversation allows. `[` and `]` step back and
 forward one turn at a time (`Alt+Up` and `Alt+Down` are the fallbacks where the
 terminal reports them); the draft keeps the caret, and the brackets are only
 claimed while it is empty, so a message you are writing keeps every character you
-type. While a mark is focused the reserved band names it — `turn N/M · <first
-line of the prompt>` — and the rail's window keeps its place, moving only when the
-focused mark would leave it. Under `NO_COLOR` the marks keep a shape difference:
-`·` for a turn you are not on, `█` for the current one.
+type. Every mark is the same one-cell bar; the current turn is highlighted in the
+primary colour and bold rather than reshaped, so the rail keeps an even rhythm.
+While a mark is focused the rail's window keeps its place, moving only when the
+focused mark would leave it. Under `NO_COLOR` the highlight is the bold alone.
 
 The rail fills cells the frame already leaves blank, so the text column keeps its
 width and its wrapping. Inline mode and the transcript escape hatch never show

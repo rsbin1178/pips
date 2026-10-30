@@ -1559,9 +1559,8 @@ func (m *Model) readyView() tea.View {
 		return m.routeView()
 	}
 
-	// A focused rail mark is only current while the viewport still opens on its
-	// turn. Settling it before the footer is composed keeps the band from
-	// describing a position the reader has already scrolled away from.
+	// A focused rail mark is only current while the reading position sits where the
+	// step left it; settle it before the frame resolves the rail's window.
 	m.settleTurnRailFocus()
 
 	caps := m.layout()
@@ -1693,12 +1692,10 @@ func (m *Model) readyView() tea.View {
 	promptTop := frameRowOf(parts, promptIndex, dropped)
 	promptHit.place(promptTop, timelineInset(m.width))
 	m.frameHit = frameHitMap{
-		painted:    m.sizeReady,
-		transcript: transcriptVisible,
-		topDropped: min(dropped, transcriptRows),
-		// The band affords a return click only when the frame drew its arrow: a
-		// focused preview leads the row instead, and there is nothing to click.
-		band:         m.bandRowOf(parts, bandIndex, dropped, bandHint != "" && m.turnRailPreview() == ""),
+		painted:      m.sizeReady,
+		transcript:   transcriptVisible,
+		topDropped:   min(dropped, transcriptRows),
+		band:         m.bandRowOf(parts, bandIndex, dropped, bandHint != ""),
 		turnRail:     railHits,
 		question:     promptHit,
 		composerTop:  frameRowOf(parts, composerIndex, dropped),
